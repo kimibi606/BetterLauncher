@@ -1,0 +1,482 @@
+﻿﻿<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://starlightskins.lunareclipse.studio https://mc-heads.net https://minotar.net; media-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none';"
+    />
+    <title>BetterMon 런처</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="window-bar" id="windowFrameBar">
+      <div class="window-resizable-top frame-drag-padder"></div>
+      <div class="window-main">
+        <div class="window-resizable-vert frame-drag-padder"></div>
+        <div class="window-content">
+          <div class="window-title-dock">
+            <span class="window-title">BetterMon Launcher</span>
+          </div>
+          <div class="window-controls">
+            <button id="windowMinimize" class="window-btn" type="button" aria-label="최소화">–</button>
+            <button id="windowMaximize" class="window-btn" type="button" aria-label="최대화">□</button>
+            <button id="windowClose" class="window-btn close" type="button" aria-label="닫기">×</button>
+          </div>
+        </div>
+        <div class="window-resizable-vert frame-drag-padder"></div>
+      </div>
+    </header>
+
+    <section id="startupOverlay" class="startup-overlay">
+      <div class="startup-content">
+        <img id="startupIcon" class="startup-icon" src="./assets/app-icon.png" alt="런처 아이콘" />
+        <p id="startupStatus" class="startup-status" aria-live="polite">런처 초기화 중...</p>
+        <div
+          id="startupProgressTrack"
+          class="startup-progress-track"
+          role="progressbar"
+          aria-label="시작 진행률"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow="0"
+        >
+          <div id="startupProgressBar" class="startup-progress-bar"></div>
+        </div>
+        <p id="startupProgressText" class="startup-progress-text">0%</p>
+      </div>
+    </section>
+
+    <section id="loginScreen" class="app-screen login-screen screen-active" aria-hidden="false">
+      <div class="login-state-stack">
+        <div id="loginGate" class="login-gate login-state is-active" aria-hidden="false">
+          <div class="login-gate-card">
+            <h1>로그인</h1>
+            <button id="gateMicrosoftLogin" type="button" class="ms-login-button">
+              <img class="ms-login-icon" src="./assets/icons/microsoft.svg" alt="" aria-hidden="true" />
+              <span class="ms-login-label">Microsoft 로그인</span>
+              <span class="ms-login-loader" aria-hidden="true"></span>
+            </button>
+            <div id="gateAuthStatus" class="login-gate-status"></div>
+          </div>
+        </div>
+        <div
+          id="loginWaitingState"
+          class="login-waiting-state login-state"
+          aria-live="polite"
+          aria-busy="true"
+          aria-hidden="true"
+        >
+          <div class="login-waiting-visual" aria-hidden="true">
+            <span class="login-waiting-spinner"></span>
+          </div>
+          <p class="login-waiting-text">Microsoft의 응답을 기다리는 중...</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="launchScreen" class="app-screen launch-screen" aria-hidden="true">
+      <section
+        id="accountModelPanel"
+        class="account-model-panel"
+        aria-label="로그인 계정 모델"
+        role="button"
+        tabindex="0"
+        hidden
+      >
+        <img id="accountModelImage" class="account-model-image" src="./assets/app-icon.png" alt="계정 모델" />
+        <div class="account-model-meta">
+          <p id="accountModelName" class="account-model-name">플레이어</p>
+        </div>
+        <span id="accountModelTooltip" class="account-model-tooltip">관리</span>
+      </section>
+
+      <section id="launchPresetPanel" class="launch-preset-panel" aria-label="프리셋 선택" hidden>
+        <label class="launch-preset-label" for="launchPresetSelect">프리셋</label>
+        <select id="launchPresetSelect" class="launch-preset-select">
+          <option value="low">저사양</option>
+          <option value="high">고사양</option>
+        </select>
+      </section>
+
+      <section id="newsPanel" class="news-panel" aria-label="뉴스 및 업데이트 노트">
+        <header class="news-panel-header">
+          <h3>뉴스 / 업데이트 노트</h3>
+          <div class="news-panel-tools">
+            <span id="newsPanelBadge" class="news-panel-badge">새소식</span>
+            <button
+              id="newsPanelExpandButton"
+              class="news-panel-expand-button"
+              type="button"
+              aria-label="뉴스 패널 늘리기"
+              aria-expanded="false"
+            >
+              늘리기
+            </button>
+          </div>
+        </header>
+        <ul id="newsList" class="news-list"></ul>
+      </section>
+
+      <section id="mediaContent" aria-label="바로가기">
+        <div id="internalMedia">
+          <div class="mediaContainer" id="settingsMediaContainer">
+            <button class="mediaButton" id="settingsButton" type="button" aria-label="설정">
+              <span class="icon-mask icon-settings-mask" aria-hidden="true"></span>
+              <span id="settingsTooltip">설정</span>
+            </button>
+          </div>
+        </div>
+        <div class="mediaDivider" aria-hidden="true"></div>
+        <div id="externalMedia">
+          <div class="mediaContainer bgm-control" id="bgmControl">
+            <div id="bgmPopover" class="bgm-popover" aria-label="배경음 볼륨 제어">
+              <input
+                id="bgmVolumeSlider"
+                class="bgm-volume-slider"
+                type="range"
+                min="0"
+                max="100"
+                step="1"
+                value="35"
+                aria-label="배경음 볼륨"
+              />
+              <span id="bgmVolumeValue" class="bgm-volume-value" aria-hidden="true">35%</span>
+            </div>
+            <button
+              id="bgmToggleButton"
+              class="mediaButton bgm-media-button"
+              type="button"
+              aria-label="배경음 끄기"
+              aria-pressed="false"
+            >
+              <span class="icon-mask icon-audio-mask" aria-hidden="true"></span>
+            </button>
+          </div>
+          <div class="mediaContainer">
+            <a id="discordButton" class="mediaURL" href="#" aria-label="디스코드" title="디스코드">
+              <span class="icon-mask icon-discord-mask" aria-hidden="true"></span>
+              <span id="discordTooltip">디스코드</span>
+            </a>
+          </div>
+        </div>
+      </section>
+
+      <section id="playerCountPanel" class="player-count-panel" aria-label="서버 접속 인원">
+        <span class="player-count-label">접속 인원</span>
+        <span id="playerCountValue" class="player-count-value">확인 중...</span>
+        <span id="playerCountTooltip" class="player-count-tooltip" aria-hidden="true"></span>
+      </section>
+
+      <section class="start-launch-area" aria-label="게임 실행">
+        <p id="launchStatus" class="start-launch-status" aria-live="polite"></p>
+        <button id="startLaunchButton" class="start-launch-button" type="button" aria-label="게임 시작">게임 시작</button>
+      </section>
+
+      <main id="mainLayout" class="post-login-root"></main>
+    </section>
+
+    <section id="settingsScreen" class="app-screen settings-screen" aria-hidden="true">
+      <div class="settings-container" aria-labelledby="settingsHeaderText">
+        <aside class="settings-nav-panel">
+          <div class="settings-nav-header">
+            <h2 id="settingsHeaderText">설정</h2>
+          </div>
+          <nav class="settings-nav-list" aria-label="설정 탭">
+            <button class="settings-nav-item active" type="button" data-settings-tab="settingsTabAccount">계정</button>
+            <button class="settings-nav-item" type="button" data-settings-tab="settingsTabMinecraft">마인크래프트</button>
+            <button class="settings-nav-item" type="button" data-settings-tab="settingsTabJava">Java</button>
+            <button class="settings-nav-item" type="button" data-settings-tab="settingsTabLauncher">런처</button>
+            <button class="settings-nav-item" type="button" data-settings-tab="settingsTabAbout">정보</button>
+            <button class="settings-nav-item" type="button" data-settings-tab="settingsTabUpdate">업데이트</button>
+          </nav>
+          <div class="settings-nav-footer">
+            <button id="settingsDoneButton" class="settings-done" type="button">완료</button>
+          </div>
+        </aside>
+
+        <div class="settings-content-panel">
+          <button id="settingsCloseButton" class="settings-close" type="button" aria-label="설정 닫기">×</button>
+
+          <section id="settingsTabAccount" class="settings-tab active">
+            <div class="settings-tab-header">
+              <h3>계정</h3>
+              <p>새로운 계정을 추가하거나 기존 계정을 관리합니다.</p>
+            </div>
+
+            <div class="settings-account-panel" aria-label="Microsoft 계정 관리">
+              <div class="settings-account-toolbar">
+                <div class="settings-account-provider">
+                  <img class="settings-account-provider-icon" src="./assets/icons/microsoft.svg" alt="" aria-hidden="true" />
+                  <span>Microsoft</span>
+                </div>
+                <button id="settingsMicrosoftAdd" type="button" class="settings-account-add">+ Microsoft 계정 추가</button>
+              </div>
+
+              <div class="settings-account-card">
+                <img
+                  id="settingsAccountModelImage"
+                  class="settings-account-model-image"
+                  src="./assets/app-icon.png"
+                  alt="계정 모델"
+                  loading="lazy"
+                />
+
+                <div class="settings-account-meta">
+                  <div class="settings-account-field">
+                    <span class="settings-account-field-label">사용자 이름</span>
+                    <span id="settingsAccountName" class="settings-account-field-value">로그인 안 됨</span>
+                  </div>
+                  <div class="settings-account-field">
+                    <span class="settings-account-field-label">UUID</span>
+                    <span id="settingsAccountUuid" class="settings-account-field-value">-</span>
+                  </div>
+                </div>
+
+                <div class="settings-account-state">
+                  <span id="settingsAccountSelectedLabel" class="settings-account-selected">선택된 계정 없음</span>
+                  <button id="settingsMicrosoftLogout" type="button" class="settings-account-logout">로그아웃</button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section id="settingsTabMinecraft" class="settings-tab" hidden>
+            <div class="settings-tab-header">
+              <h3>마인크래프트 설정</h3>
+              <p>게임 실행과 관련된 설정입니다.</p>
+            </div>
+
+            <div class="settings-minecraft-panel" aria-label="마인크래프트 실행 설정">
+              <div class="settings-minecraft-row settings-minecraft-resolution">
+                <div class="settings-minecraft-title">게임 해상도</div>
+                <div class="settings-minecraft-resolution-inputs">
+                  <input
+                    id="settingsGameWidth"
+                    class="settings-minecraft-resolution-input"
+                    type="text"
+                    inputmode="numeric"
+                    pattern="[0-9]*"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                  <span class="settings-cross">×</span>
+                  <input
+                    id="settingsGameHeight"
+                    class="settings-minecraft-resolution-input"
+                    type="text"
+                    inputmode="numeric"
+                    pattern="[0-9]*"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                </div>
+              </div>
+
+              <label class="settings-minecraft-row settings-minecraft-toggle-row" for="settingsFullscreen">
+                <span class="settings-minecraft-toggle-text">전체 화면으로 실행합니다.</span>
+                <span class="settings-switch" aria-hidden="true">
+                  <input id="settingsFullscreen" type="checkbox" />
+                  <span class="settings-switch-slider"></span>
+                </span>
+              </label>
+
+              <input id="settingsAutoConnect" type="checkbox" checked disabled hidden />
+
+              <div class="settings-minecraft-row settings-minecraft-preset-row">
+                <span class="settings-minecraft-toggle-text-group">
+                  <span class="settings-minecraft-toggle-text">프리셋 설정</span>
+                </span>
+                <select id="settingsLauncherPreset" class="settings-minecraft-preset-select">
+                  <option value="low">저사양</option>
+                  <option value="high">고사양</option>
+                </select>
+              </div>
+
+              <label class="settings-minecraft-row settings-minecraft-toggle-row" for="settingsLaunchDetached">
+                <span class="settings-minecraft-toggle-text-group">
+                  <span class="settings-minecraft-toggle-text">런처와 게임 프로세스를 분리하여 실행합니다.</span>
+                  <span class="settings-minecraft-toggle-note">이 옵션을 사용하면 런처를 닫아도 게임이 계속 실행됩니다.</span>
+                </span>
+                <span class="settings-switch" aria-hidden="true">
+                  <input id="settingsLaunchDetached" type="checkbox" />
+                  <span class="settings-switch-slider"></span>
+                </span>
+              </label>
+            </div>
+
+          </section>
+
+          <section id="settingsTabJava" class="settings-tab" hidden>
+            <div class="settings-tab-header">
+              <h3>Java 설정</h3>
+              <p>Java 실행과 관련된 설정입니다.</p>
+            </div>
+
+            <div class="settings-java-panel" aria-label="Java 실행 설정">
+              <section class="settings-java-section settings-java-memory-section" aria-label="메모리 설정">
+                <h4 class="settings-java-title settings-java-memory-title">메모리</h4>
+                <div class="settings-java-memory-grid">
+                  <div class="settings-java-memory-controls">
+                    <label class="settings-java-memory-row" for="settingsRamMax">
+                      <span class="settings-java-memory-label">
+                        <span class="settings-java-memory-label-text">할당 RAM</span>
+                        <span class="settings-java-memory-inline-note">
+                          메모리는 단일 값으로 적용되며 최소/최대 RAM이 동일하게 설정됩니다.
+                        </span>
+                      </span>
+                      <input id="settingsRamMax" type="range" min="6144" max="32768" step="512" />
+                      <span id="settingsRamMaxDisplay" class="settings-java-memory-value">6.0G</span>
+                    </label>
+                    <input id="settingsRamMin" type="hidden" value="6144" />
+                  </div>
+
+                  <div class="settings-java-memory-stats" aria-label="시스템 메모리 정보">
+                    <div class="settings-java-memory-stat">
+                      <span class="settings-java-memory-stat-label">전체</span>
+                      <strong id="settingsJavaTotalMemory">-</strong>
+                    </div>
+                    <div class="settings-java-memory-stat">
+                      <span class="settings-java-memory-stat-label">사용 가능</span>
+                      <strong id="settingsJavaUsableMemory">-</strong>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="settings-java-section settings-java-path-section" aria-label="Java 실행 파일">
+                <h4 class="settings-java-title settings-java-path-title">Java 실행 파일</h4>
+                <p id="settingsJavaPathStatus" class="settings-java-path-status settings-java-path-status-compact">유효하지 않은 선택</p>
+                <div class="settings-java-file-row">
+                  <input id="settingsJavaPath" type="text" readonly />
+                  <button id="settingsPickJavaPath" type="button" class="secondary">파일 선택</button>
+                </div>
+                <p class="settings-java-note">
+                  게임 실행 전에 Java 실행 파일의 유효성을 검사합니다. 64비트 Java 21이 필요합니다.
+                  <br />
+                  Java 실행 파일의 경로는 보통 <code>bin/javaw.exe</code>로 끝나야 합니다.
+                </p>
+              </section>
+
+              <section class="settings-java-section settings-java-jvm-section" aria-label="JVM 인수 설정">
+                <h4 class="settings-java-title">JVM 인수 설정</h4>
+                <div class="settings-java-jvm-row">
+                  <input
+                    id="settingsJvmArgs"
+                    type="text"
+                    placeholder="필요한 경우에만 추가 인수를 입력"
+                  />
+                </div>
+                <div class="settings-java-note-stack">
+                  <p class="settings-java-note">
+                    실행 시 JVM에 전달할 추가 인수를 설정합니다. <code>-Xms</code>와 <code>-Xmx</code>는 포함되지 않아야 합니다.
+                  </p>
+                  <p class="settings-java-note">
+                    Java 21 (HotSpot VM) 기준으로 동작하는 JVM 인수를 사용하는 것을 권장합니다.
+                  </p>
+                </div>
+              </section>
+            </div>
+          </section>
+
+          <section id="settingsTabLauncher" class="settings-tab" hidden>
+            <div class="settings-tab-header">
+              <h3>런처</h3>
+              <p>런처 기본 환경을 설정합니다.</p>
+            </div>
+
+            <div class="settings-card">
+              <div class="settings-label">마인크래프트 폴더</div>
+              <div class="settings-file-row">
+                <input id="settingsMinecraftDirectory" type="text" readonly />
+                <button id="settingsPickMinecraftDirectory" type="button" class="secondary">선택</button>
+              </div>
+            </div>
+
+            <div class="settings-card">
+              <div class="settings-label">데이터 폴더</div>
+              <input id="settingsDataDirectory" type="text" readonly />
+            </div>
+          </section>
+
+          <section id="settingsTabUpdate" class="settings-tab" hidden>
+            <div class="settings-tab-header">
+              <h3>런처 업데이트</h3>
+              <p>GitHub 릴리즈 기준으로 런처 업데이트를 확인하고 설치합니다.</p>
+            </div>
+
+            <div class="settings-update-card" aria-live="polite">
+              <h4 id="settingsUpdateSummary" class="settings-update-summary">최신 버전을 사용하고 있습니다</h4>
+
+              <div class="settings-update-divider" aria-hidden="true"></div>
+
+              <div class="settings-update-release">
+                <span id="settingsUpdateIndicator" class="settings-update-indicator" aria-hidden="true">✓</span>
+                <div class="settings-update-release-meta">
+                  <p id="settingsUpdateChannel" class="settings-update-channel">GitHub Release</p>
+                  <p id="settingsUpdateVersion" class="settings-update-version">Version -</p>
+                </div>
+              </div>
+
+              <div class="settings-update-divider" aria-hidden="true"></div>
+
+              <button id="settingsUpdateAction" type="button" class="settings-update-action">업데이트 확인</button>
+            </div>
+          </section>
+
+          <section id="settingsTabAbout" class="settings-tab settings-about-tab" hidden>
+            <div class="settings-tab-header">
+              <h3>정보</h3>
+              <p>런처 정보와 GitHub 릴리즈 노트를 확인합니다.</p>
+            </div>
+
+            <div class="settings-about-stack">
+              <article class="settings-about-card settings-about-launcher-card" aria-live="polite">
+                <header class="settings-about-launcher-header">
+                  <img
+                    class="settings-about-launcher-icon"
+                    src="./assets/app-icon.png"
+                    alt="BetterMon 런처 아이콘"
+                    loading="lazy"
+                  />
+                  <h4>BetterMon Launcher</h4>
+                </header>
+
+                <div class="settings-about-divider" aria-hidden="true"></div>
+
+                <div class="settings-about-release-row">
+                  <span class="settings-about-release-indicator" aria-hidden="true">✓</span>
+                  <div class="settings-about-release-meta">
+                    <p id="settingsAboutChannel" class="settings-about-channel">GitHub Release</p>
+                    <p id="settingsAboutVersion" class="settings-about-version">Version -</p>
+                    <p id="settingsAboutReleaseDate" class="settings-about-release-date">Updated -</p>
+                  </div>
+                </div>
+              </article>
+
+              <article class="settings-about-card settings-about-release-card">
+                <p class="settings-about-release-label">릴리즈 노트</p>
+                <h4 id="settingsAboutReleaseTitle" class="settings-about-release-title">Release v-</h4>
+
+                <div class="settings-about-divider" aria-hidden="true"></div>
+
+                <p class="settings-about-release-description">
+                  BetterMon 런처 최신 변경사항입니다. 실행 전에 핵심 변경점을 확인하세요.
+                </p>
+
+                <ul id="settingsAboutNewsList" class="settings-about-news-list">
+                  <li class="settings-about-news-empty">표시할 릴리즈 노트가 없습니다.</li>
+                </ul>
+
+              </article>
+            </div>
+          </section>
+
+          <div id="settingsStatus" class="settings-status" aria-live="polite"></div>
+        </div>
+      </div>
+    </section>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>

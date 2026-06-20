@@ -1,0 +1,14 @@
+{
+  "version": "2026.03.05-low",
+  "baseUrl": "https://modpack.example.com/bettermon/modpack/low/",
+  "files": [
+    {
+      "path": "mods/example-low-mod.jar",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "size": 12345
+    }
+  ],
+  "delete": [
+    "mods/obsolete-low-mod.jar"
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "modpack": {
+    "githubRepository": "your-github-owner/your-modpack-releases-repo",
+    "manifestAsset": "latest.json"
+  },
+  "serverStatus": {
+    "host": "play.example.com",
+    "port": 25565,
+    "molangUrl": "https://status.example.com/molang",
+    "molangField": "status",
+    "molangOnlineValue": "online"
+  },
+  "news": {
+    "url": "https://raw.githubusercontent.com/your-github-owner/your-launcher-releases-repo/main/launcher-news.json",
+    "itemsPath": "items",
+    "refreshMs": 60000,
+    "maxItems": 8
+  },
+  "github": {
+    "owner": "your-github-owner",
+    "repo": "your-launcher-releases-repo",
+    "timeoutMs": 7000
+  }
+}

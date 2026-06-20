@@ -1,0 +1,21 @@
+{
+  "modpack": {
+    "githubRepository": "ExamplePack",
+    "manifestAsset": "latest.json"
+  },
+  "serverStatus": {
+    "host": "server.example",
+    "port": 25564
+  },
+  "news": {
+    "url": "https://raw.githubusercontent.com/kimibi606/ExamplePack/main/launcher-news.json",
+    "itemsPath": "items",
+    "refreshMs": 30000,
+    "maxItems": 8
+  },
+  "github": {
+    "owner": "kimibi606",
+    "repo": "ExamplePack",
+    "timeoutMs": 7000
+  }
+}

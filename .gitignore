@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.log
+reference/
+.idea/
+*.iml
+*.asar
+*.tmp
+Thumbs.db
+Desktop.ini
