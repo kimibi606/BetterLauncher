@@ -1595,6 +1595,60 @@ body[data-screen="launch"].preset-icons-hidden #playerCountPanel {
   cursor: not-allowed;
 }
 
+.settings-account-list {
+  display: grid;
+  gap: 6px;
+}
+
+.settings-account-list[hidden] {
+  display: none;
+}
+
+.settings-account-list-item {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.5fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  border: 1px solid rgba(182, 205, 236, 0.2);
+  background: rgba(3, 6, 10, 0.14);
+  color: rgba(241, 248, 255, 0.92);
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.settings-account-list-item:hover,
+.settings-account-list-item:focus-visible {
+  border-color: rgba(129, 221, 255, 0.42);
+  background: rgba(129, 221, 255, 0.08);
+  outline: none;
+}
+
+.settings-account-list-item.is-selected {
+  border-color: rgba(129, 221, 255, 0.38);
+  background: rgba(129, 221, 255, 0.1);
+  cursor: default;
+}
+
+.settings-account-list-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.settings-account-list-uuid {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgba(171, 195, 226, 0.82);
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+}
+
 .settings-minecraft-panel {
   display: grid;
   gap: 0;

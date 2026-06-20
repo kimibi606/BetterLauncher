@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld("launcherApi", {
   checkForUpdates: () => ipcRenderer.invoke("updater:check"),
   installUpdate: () => ipcRenderer.invoke("updater:install"),
   microsoftLogin: () => ipcRenderer.invoke("launcher:microsoft-login"),
+  selectMicrosoftAccount: (accountId) => ipcRenderer.invoke("launcher:microsoft-select-account", accountId),
   microsoftLogout: () => ipcRenderer.invoke("launcher:microsoft-logout"),
   openExternal: (url) => ipcRenderer.invoke("app:open-external", url),
   minimizeWindow: () => ipcRenderer.send("window:minimize"),

@@ -95,6 +95,7 @@ const settingsAccountModelImage = document.getElementById("settingsAccountModelI
 const settingsAccountName = document.getElementById("settingsAccountName");
 const settingsAccountUuid = document.getElementById("settingsAccountUuid");
 const settingsAccountSelectedLabel = document.getElementById("settingsAccountSelectedLabel");
+const settingsAccountList = document.getElementById("settingsAccountList");
 const settingsMicrosoftLogoutButton = document.getElementById("settingsMicrosoftLogout");
 const settingsGameWidthInput = document.getElementById("settingsGameWidth");
 const settingsGameHeightInput = document.getElementById("settingsGameHeight");
@@ -158,6 +159,7 @@ let authState = {
   signedIn: false,
   profileName: "",
   uuid: "",
+  accounts: [],
   loggingIn: false
 };
 let launcherDefaults = { ...DEFAULT_SETTINGS };
@@ -2597,7 +2599,8 @@ function updateSettingsAccountUi() {
   } else if (authState.signedIn && (displayName || normalizedUuid)) {
     settingsAccountName.textContent = displayName || "플레이어";
     settingsAccountUuid.textContent = normalizedUuid || "-";
-    settingsAccountSelectedLabel.textContent = "선택된 계정";
+    const accountCount = Array.isArray(authState.accounts) ? authState.accounts.length : 0;
+    settingsAccountSelectedLabel.textContent = accountCount > 1 ? `선택된 계정 (${accountCount}개 저장됨)` : "선택된 계정";
   } else {
     settingsAccountName.textContent = "로그인 안 됨";
     settingsAccountUuid.textContent = "-";
@@ -2612,6 +2615,46 @@ function updateSettingsAccountUi() {
   }
 
   updateSettingsAccountModelPreview();
+  renderSettingsAccountList();
+}
+
+function buildSettingsAccountListItem(account) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "settings-account-list-item";
+  button.dataset.accountId = asText(account?.id);
+  button.disabled = Boolean(account?.selected) || authState.loggingIn;
+  button.classList.toggle("is-selected", Boolean(account?.selected));
+
+  const nameElement = document.createElement("span");
+  nameElement.className = "settings-account-list-name";
+  nameElement.textContent = asText(account?.profileName, "플레이어");
+
+  const uuidElement = document.createElement("span");
+  uuidElement.className = "settings-account-list-uuid";
+  uuidElement.textContent = normalizeMinecraftUuid(account?.uuid) || "-";
+
+  button.appendChild(nameElement);
+  button.appendChild(uuidElement);
+  return button;
+}
+
+function renderSettingsAccountList() {
+  if (!settingsAccountList) {
+    return;
+  }
+
+  settingsAccountList.innerHTML = "";
+  const accounts = Array.isArray(authState.accounts) ? authState.accounts : [];
+  if (accounts.length <= 1) {
+    settingsAccountList.hidden = true;
+    return;
+  }
+
+  settingsAccountList.hidden = false;
+  for (const account of accounts) {
+    settingsAccountList.appendChild(buildSettingsAccountListItem(account));
+  }
 }
 
 function selectSettingsTab(tabId) {
@@ -2837,6 +2880,7 @@ function applyAuthState(nextState) {
     signedIn: Boolean(nextState?.signedIn),
     profileName: String(nextState?.profileName || ""),
     uuid: String(nextState?.uuid || ""),
+    accounts: Array.isArray(nextState?.accounts) ? nextState.accounts : [],
     loggingIn: Boolean(nextState?.loggingIn)
   };
 
@@ -3142,9 +3186,20 @@ bindClick(settingsMicrosoftAddButton, async () => {
   setSettingsStatus("Microsoft 로그인 진행 중...");
 
   try {
+    const previousAccountCount = Array.isArray(authState.accounts) ? authState.accounts.length : 0;
+    const previousUuid = normalizeMinecraftUuid(authState.uuid);
     const result = await window.launcherApi.microsoftLogin();
     if (result?.status) {
       applyAuthState(result.status);
+      const nextAccountCount = Array.isArray(result.status.accounts) ? result.status.accounts.length : 0;
+      const nextUuid = normalizeMinecraftUuid(result.status.uuid);
+      if (previousUuid && nextUuid === previousUuid && nextAccountCount > previousAccountCount) {
+        setSettingsStatus("Microsoft 계정이 추가되었습니다. 현재 선택 계정은 유지됩니다.");
+      } else if (result.ok) {
+        setSettingsStatus("Microsoft 계정이 연결되었습니다.");
+      } else if (result.error) {
+        setSettingsStatus(localizeStatusMessage(result.error), true);
+      }
     }
   } catch {
     setSettingsStatus("Microsoft 로그인을 시작할 수 없습니다.", true);
@@ -3152,6 +3207,30 @@ bindClick(settingsMicrosoftAddButton, async () => {
     updateSettingsAccountUi();
   }
 });
+
+if (settingsAccountList) {
+  settingsAccountList.addEventListener("click", async (event) => {
+    const target = event.target instanceof Element ? event.target.closest(".settings-account-list-item") : null;
+    if (!target || authState.loggingIn || !window.launcherApi || typeof window.launcherApi.selectMicrosoftAccount !== "function") {
+      return;
+    }
+
+    const accountId = asText(target.dataset.accountId);
+    if (!accountId) {
+      return;
+    }
+
+    const result = await window.launcherApi.selectMicrosoftAccount(accountId);
+    if (result?.status) {
+      applyAuthState(result.status);
+    }
+    if (result?.ok) {
+      setSettingsStatus("선택 계정을 변경했습니다.");
+    } else if (result?.error) {
+      setSettingsStatus(localizeStatusMessage(result.error), true);
+    }
+  });
+}
 
 if (settingsProfileSelect) {
   settingsProfileSelect.addEventListener("change", () => {

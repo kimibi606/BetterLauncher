@@ -4448,22 +4448,141 @@ function writeMicrosoftAuthCachePayload(payload) {
 
 function readMicrosoftAuthCache() {
   const payload = readMicrosoftAuthCachePayload();
-  return isMicrosoftMclcToken(payload) ? payload : null;
+  const store = normalizeMicrosoftAccountStore(payload);
+  return getSelectedMicrosoftAccountFromStore(store);
 }
 
-function saveMicrosoftAuthCache(token) {
+function getMicrosoftAccountId(account) {
+  return asTrimmedText(account?.uuid).toLowerCase() || asTrimmedText(account?.name).toLowerCase();
+}
+
+function normalizeMicrosoftAccountStore(payload) {
+  const source = payload && typeof payload === "object" ? payload : {};
+  const device = source.device && typeof source.device === "object" ? source.device : undefined;
+
+  if (isMicrosoftMclcToken(source)) {
+    const accountId = getMicrosoftAccountId(source);
+    return {
+      selectedAccountId: accountId,
+      accounts: accountId ? [source] : [],
+      device
+    };
+  }
+
+  const accounts = Array.isArray(source.accounts)
+    ? source.accounts.filter((account) => isMicrosoftMclcToken(account) && getMicrosoftAccountId(account))
+    : [];
+  const selectedAccountId = asTrimmedText(source.selectedAccountId).toLowerCase();
+  const selectedExists = accounts.some((account) => getMicrosoftAccountId(account) === selectedAccountId);
+
+  return {
+    selectedAccountId: selectedExists ? selectedAccountId : getMicrosoftAccountId(accounts[0]),
+    accounts,
+    device
+  };
+}
+
+function packMicrosoftAccountStore(store) {
+  const normalized = normalizeMicrosoftAccountStore(store);
+  return {
+    schemaVersion: MICROSOFT_AUTH_SCHEMA_VERSION,
+    selectedAccountId: normalized.selectedAccountId,
+    accounts: normalized.accounts,
+    ...(normalized.device ? { device: normalized.device } : {})
+  };
+}
+
+function getSelectedMicrosoftAccountFromStore(store) {
+  const normalized = normalizeMicrosoftAccountStore(store);
+  if (normalized.accounts.length === 0) {
+    return null;
+  }
+
+  return (
+    normalized.accounts.find((account) => getMicrosoftAccountId(account) === normalized.selectedAccountId) ||
+    normalized.accounts[0]
+  );
+}
+
+function getMicrosoftAccountSummaries() {
+  const store = normalizeMicrosoftAccountStore(readMicrosoftAuthCachePayload());
+  return store.accounts.map((account) => ({
+    id: getMicrosoftAccountId(account),
+    profileName: asTrimmedText(account?.name),
+    uuid: asTrimmedText(account?.uuid),
+    selected: getMicrosoftAccountId(account) === store.selectedAccountId
+  }));
+}
+
+function saveMicrosoftAuthCache(token, options = {}) {
   if (!isMicrosoftMclcToken(token)) {
     return;
   }
-  const previousPayload = readMicrosoftAuthCacheObject();
-  writeMicrosoftAuthCachePayload({
-    ...token,
-    device: previousPayload.device
-  });
+  const previousStore = normalizeMicrosoftAccountStore(readMicrosoftAuthCachePayload());
+  const accountId = getMicrosoftAccountId(token);
+  const accounts = previousStore.accounts.filter((account) => getMicrosoftAccountId(account) !== accountId);
+  accounts.push(token);
+
+  const shouldSelect = options.select !== false || !previousStore.selectedAccountId;
+  writeMicrosoftAuthCachePayload(
+    packMicrosoftAccountStore({
+      selectedAccountId: shouldSelect ? accountId : previousStore.selectedAccountId,
+      accounts,
+      device: previousStore.device
+    })
+  );
 }
 
-function clearMicrosoftAuthCache() {
+function removeMicrosoftAuthCacheAccount(accountId) {
+  const normalizedAccountId = asTrimmedText(accountId).toLowerCase();
+  if (!normalizedAccountId) {
+    return;
+  }
+
+  const previousStore = normalizeMicrosoftAccountStore(readMicrosoftAuthCachePayload());
+  const accounts = previousStore.accounts.filter((account) => getMicrosoftAccountId(account) !== normalizedAccountId);
+  writeMicrosoftAuthCachePayload(
+    packMicrosoftAccountStore({
+      selectedAccountId:
+        previousStore.selectedAccountId === normalizedAccountId
+          ? getMicrosoftAccountId(accounts[0])
+          : previousStore.selectedAccountId,
+      accounts,
+      device: previousStore.device
+    })
+  );
+}
+
+function selectMicrosoftAuthCacheAccount(accountId) {
+  const normalizedAccountId = asTrimmedText(accountId).toLowerCase();
+  if (!normalizedAccountId) {
+    return { ok: false, error: "Account id is required.", status: getMicrosoftStatus() };
+  }
+
+  const previousStore = normalizeMicrosoftAccountStore(readMicrosoftAuthCachePayload());
+  const account = previousStore.accounts.find((entry) => getMicrosoftAccountId(entry) === normalizedAccountId);
+  if (!account) {
+    return { ok: false, error: "Account not found.", status: getMicrosoftStatus() };
+  }
+
+  writeMicrosoftAuthCachePayload(
+    packMicrosoftAccountStore({
+      ...previousStore,
+      selectedAccountId: normalizedAccountId
+    })
+  );
+  microsoftAccount = account;
+  sendMicrosoftAuthState();
+  return { ok: true, status: getMicrosoftStatus() };
+}
+
+function clearMicrosoftAuthCache({ allAccounts = true } = {}) {
   try {
+    if (!allAccounts && microsoftAccount) {
+      removeMicrosoftAuthCacheAccount(getMicrosoftAccountId(microsoftAccount));
+      return;
+    }
+
     const pathsToRemove = [getMicrosoftAuthCachePath(), getLegacyMicrosoftAuthCachePath()];
     for (const filePath of pathsToRemove) {
       if (fs.existsSync(filePath)) {
@@ -4484,10 +4603,12 @@ function loadCachedMicrosoftAccount() {
 }
 
 function getMicrosoftStatus() {
+  const accounts = getMicrosoftAccountSummaries();
   return {
     signedIn: Boolean(microsoftAccount),
     profileName: asTrimmedText(microsoftAccount?.name),
     uuid: asTrimmedText(microsoftAccount?.uuid),
+    accounts,
     loggingIn: isMicrosoftLoggingIn
   };
 }
@@ -6092,6 +6213,7 @@ async function startMicrosoftLogin() {
 
   try {
     sendLog({ level: "info", message: "Opening Microsoft login window..." });
+    const previouslySelectedAccountId = getMicrosoftAccountId(microsoftAccount);
     const loginRequest = await createMinecraftLauncherLoginRequest();
     const authorizationCode = await requestMicrosoftAuthorizationCode({
       authorizeUrl: loginRequest.authorizeUrl,
@@ -6109,16 +6231,19 @@ async function startMicrosoftLogin() {
       sessionId: loginRequest.sessionId
     });
 
-    microsoftAccount = buildMicrosoftAccountRecord({
+    const nextAccount = buildMicrosoftAccountRecord({
       existingAccount: microsoftAccount,
       oauthToken,
       minecraftSession
     });
-    saveMicrosoftAuthCache(microsoftAccount);
+    const nextAccountId = getMicrosoftAccountId(nextAccount);
+    const shouldSelectNewAccount = !previouslySelectedAccountId || previouslySelectedAccountId === nextAccountId;
+    saveMicrosoftAuthCache(nextAccount, { select: shouldSelectNewAccount });
+    microsoftAccount = shouldSelectNewAccount ? nextAccount : readMicrosoftAuthCache();
 
     sendLog({
       level: "info",
-      message: `Microsoft account connected: ${microsoftAccount.name || "Unknown"}`
+      message: `Microsoft account added: ${nextAccount.name || "Unknown"}`
     });
     response = { ok: true };
   } catch (error) {
@@ -6137,10 +6262,15 @@ async function startMicrosoftLogin() {
 }
 
 function logoutMicrosoft() {
+  const signedOutName = asTrimmedText(microsoftAccount?.name);
+  const signedOutAccountId = getMicrosoftAccountId(microsoftAccount);
+  if (signedOutAccountId) {
+    removeMicrosoftAuthCacheAccount(signedOutAccountId);
+  }
   microsoftAccount = null;
-  clearMicrosoftAuthCache();
+  microsoftAccount = readMicrosoftAuthCache();
   sendMicrosoftAuthState();
-  sendLog({ level: "info", message: "Microsoft account signed out." });
+  sendLog({ level: "info", message: `Microsoft account signed out: ${signedOutName || "Unknown"}` });
   return { ok: true, status: getMicrosoftStatus() };
 }
 
@@ -6773,6 +6903,10 @@ ipcMain.handle("updater:install", () => {
 
 ipcMain.handle("launcher:microsoft-login", async () => {
   return startMicrosoftLogin();
+});
+
+ipcMain.handle("launcher:microsoft-select-account", (_, accountId) => {
+  return selectMicrosoftAuthCacheAccount(accountId);
 });
 
 ipcMain.handle("launcher:microsoft-logout", () => {
