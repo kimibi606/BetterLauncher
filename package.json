@@ -37,8 +37,7 @@
       "preload.js",
       "src/**/*",
       "package.json",
-      "modpack.config.json",
-      "modpack.config.example.json"
+      "modpack.config.json"
     ],
     "directories": {
       "output": "dist"
