@@ -4178,6 +4178,47 @@ async function synchronizeModpack(options) {
   throw new Error(`All configured modpack sources failed: ${sourceFailures.join(" | ")}`);
 }
 
+async function checkModpackUpdate(options) {
+  const launcherPreset = normalizeLauncherPreset(options?.launcherPreset, detectLauncherPreset().preset);
+  const modpackRoot = asTrimmedText(options?.gameDirectory) || asTrimmedText(options?.minecraftDirectory);
+  if (!modpackRoot) {
+    throw new Error("Modpack target directory is missing.");
+  }
+
+  const manifestSource = await fetchModpackManifestSource();
+  if (!manifestSource) {
+    return {
+      ok: true,
+      supported: false,
+      pending: false,
+      reason: "manifest-unconfigured"
+    };
+  }
+
+  const manifest = parseModpackManifest(manifestSource);
+  if (manifest.minecraftVersion && manifest.minecraftVersion !== FIXED_MINECRAFT_VERSION) {
+    throw new Error(
+      `Modpack Minecraft version does not match launcher version: ${manifest.minecraftVersion} != ${FIXED_MINECRAFT_VERSION}`
+    );
+  }
+
+  const previousState = readModpackState(modpackRoot);
+  const currentArchiveSha1 = normalizeSha1(previousState?.archiveSha1);
+  const latestArchiveSha1 = manifest.archive.sha1;
+  const pending = currentArchiveSha1 !== latestArchiveSha1;
+
+  return {
+    ok: true,
+    supported: true,
+    pending,
+    preset: launcherPreset,
+    currentVersion: asTrimmedText(previousState?.version),
+    latestVersion: manifest.version,
+    currentArchiveSha1,
+    latestArchiveSha1
+  };
+}
+
 async function runModpackSyncFromPayload(payload, options = {}) {
   const minecraftDirectory = asTrimmedText(payload?.minecraftDirectory);
   const gameDirectory = asTrimmedText(payload?.gameDirectory);
@@ -4195,6 +4236,26 @@ async function runModpackSyncFromPayload(payload, options = {}) {
       skipIfSessionSynced: Boolean(options?.skipIfSessionSynced)
     });
     return { ok: true, ...result };
+  } catch (error) {
+    return { ok: false, error: String(error?.message || error) };
+  }
+}
+
+async function runModpackUpdateCheckFromPayload(payload) {
+  const minecraftDirectory = asTrimmedText(payload?.minecraftDirectory);
+  const gameDirectory = asTrimmedText(payload?.gameDirectory);
+  const launcherPreset = normalizeLauncherPreset(payload?.launcherPreset, detectLauncherPreset().preset);
+
+  if (!minecraftDirectory && !gameDirectory) {
+    return { ok: false, error: "Minecraft directory is required." };
+  }
+
+  try {
+    return await checkModpackUpdate({
+      launcherPreset,
+      minecraftDirectory,
+      gameDirectory
+    });
   } catch (error) {
     return { ok: false, error: String(error?.message || error) };
   }
@@ -6809,6 +6870,14 @@ ipcMain.handle("launcher:sync-modpack", async (_, payload) => {
   return result;
 });
 
+ipcMain.handle("launcher:check-modpack-update", async (_, payload) => {
+  const result = await runModpackUpdateCheckFromPayload(payload);
+  if (!result.ok) {
+    sendLog({ level: "warn", message: `Modpack update check failed: ${result.error}` });
+  }
+  return result;
+});
+
 ipcMain.handle("launcher:prefetch-modpacks", async (_, payload) => {
   const result = await prefetchModpackArchivesFromPayload(payload);
   if (!result.ok && Array.isArray(result.failedPresets) && result.failedPresets.length > 0) {
@@ -6897,6 +6966,25 @@ ipcMain.handle("launcher:launch", async (_, payload) => {
       const message = formatMicrosoftAuthError(error);
       sendLog({ level: "error", message: `Microsoft auth error: ${message}` });
       return { ok: false, error: `Microsoft auth failed: ${message}` };
+    }
+
+    const modpackUpdateCheck = await runModpackUpdateCheckFromPayload({
+      launcherPreset,
+      minecraftDirectory,
+      gameDirectory
+    });
+    if (!modpackUpdateCheck.ok) {
+      sendLog({ level: "error", message: `Modpack update check failed: ${modpackUpdateCheck.error}` });
+      return { ok: false, error: `Modpack update check failed: ${modpackUpdateCheck.error}` };
+    }
+    if (modpackUpdateCheck.pending) {
+      sendLog({ level: "warn", message: "Modpack update is required before launch." });
+      return {
+        ok: false,
+        code: "modpack-update-required",
+        error: "Modpack update is required before launch.",
+        modpackUpdate: modpackUpdateCheck
+      };
     }
 
     const modpackResult = await runModpackSyncFromPayload(

@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld("launcherApi", {
   pickJava: () => ipcRenderer.invoke("launcher:pick-java"),
   loadProfiles: (payload) => ipcRenderer.invoke("launcher:load-profiles", payload),
   prepareRuntime: (payload) => ipcRenderer.invoke("launcher:prepare-runtime", payload),
+  checkModpackUpdate: (payload) => ipcRenderer.invoke("launcher:check-modpack-update", payload),
   syncModpack: (payload) => ipcRenderer.invoke("launcher:sync-modpack", payload),
   prefetchModpackPresets: (payload) => ipcRenderer.invoke("launcher:prefetch-modpacks", payload),
   launch: (payload) => ipcRenderer.invoke("launcher:launch", payload),

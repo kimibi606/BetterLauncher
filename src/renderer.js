@@ -174,6 +174,8 @@ let detectedSystemProfile = null;
 let isStartupModpackSyncRunning = false;
 let hasStartupModpackSyncRun = false;
 let isPresetModpackSyncRunning = false;
+let isModpackUpdateApplyRunning = false;
+let modpackUpdateState = null;
 let pendingPresetSyncPreset = "";
 let isLauncherUpdateGateRunning = false;
 let isBackgroundPresetPrefetchRunning = false;
@@ -1282,7 +1284,8 @@ function localizeStatusMessage(message) {
     "Modpack archive is up to date (SHA256 pinned).": "\uBAA8\uB4DC\uD329 \uC544\uCE74\uC774\uBE0C\uAC00 \uCD5C\uC2E0 \uC0C1\uD0DC\uC785\uB2C8\uB2E4 (SHA256 \uACE0\uC815).",
     "Modpack archive is already up to date.": "\uBAA8\uB4DC\uD329 \uC544\uCE74\uC774\uBE0C\uAC00 \uC774\uBBF8 \uCD5C\uC2E0 \uC0C1\uD0DC\uC785\uB2C8\uB2E4.",
     "Local modpack archive is unchanged.": "\uB85C\uCEEC \uBAA8\uB4DC\uD329 \uC544\uCE74\uC774\uBE0C\uAC00 \uBCC0\uACBD\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.",
-    "Modpack source returned 404. Keeping previously applied modpack files.": "\uBAA8\uB4DC\uD329 \uC18C\uC2A4\uAC00 404\uB97C \uBC18\uD658\uD588\uC2B5\uB2C8\uB2E4. \uAE30\uC874 \uC801\uC6A9 \uD30C\uC77C\uC744 \uC720\uC9C0\uD569\uB2C8\uB2E4."
+    "Modpack source returned 404. Keeping previously applied modpack files.": "\uBAA8\uB4DC\uD329 \uC18C\uC2A4\uAC00 404\uB97C \uBC18\uD658\uD588\uC2B5\uB2C8\uB2E4. \uAE30\uC874 \uC801\uC6A9 \uD30C\uC77C\uC744 \uC720\uC9C0\uD569\uB2C8\uB2E4.",
+    "Modpack update is required before launch.": "게임 실행 전에 모드팩 업데이트가 필요합니다."
   };
   if (Object.prototype.hasOwnProperty.call(directMap, text)) {
     return directMap[text];
@@ -2019,20 +2022,28 @@ function updateLaunchButtonUi() {
     return;
   }
 
+  const hasPendingModpackUpdate = Boolean(modpackUpdateState?.pending);
   const busy =
     isLaunchRequestPending ||
     isLauncherRunning ||
     isStartupModpackSyncRunning ||
     isPresetModpackSyncRunning ||
+    isModpackUpdateApplyRunning ||
     isLauncherUpdateGateRunning;
   startLaunchButton.disabled = !authState.signedIn || busy;
   startLaunchButton.textContent = isLauncherUpdateGateRunning
     ? "\uC5C5\uB370\uC774\uD2B8 \uC911..."
+    : isModpackUpdateApplyRunning
+      ? "업데이트 중..."
     : isPresetModpackSyncRunning
       ? "\uC801\uC6A9 \uC911..."
+      : isStartupModpackSyncRunning
+        ? "확인 중..."
       : busy
         ? "\uC2E4\uD589 \uC911..."
-        : "\uAC8C\uC784 \uC2DC\uC791";
+        : hasPendingModpackUpdate
+          ? "업데이트"
+          : "\uAC8C\uC784 \uC2DC\uC791";
   startLaunchButton.setAttribute("aria-busy", busy ? "true" : "false");
 }
 
@@ -2108,6 +2119,7 @@ async function runBackgroundPresetPrefetchIfIdle() {
     isStartupOverlayVisible() ||
     isStartupModpackSyncRunning ||
     isPresetModpackSyncRunning ||
+    isModpackUpdateApplyRunning ||
     isLaunchRequestPending ||
     isLauncherRunning ||
     isLauncherUpdateGateRunning
@@ -2155,6 +2167,7 @@ async function runQueuedPresetSyncIfIdle() {
   if (
     isStartupModpackSyncRunning ||
     isPresetModpackSyncRunning ||
+    isModpackUpdateApplyRunning ||
     isLaunchRequestPending ||
     isLauncherRunning ||
     isLauncherUpdateGateRunning
@@ -2203,6 +2216,7 @@ async function runLauncherPresetModpackSync(preset) {
 
     const appliedMessage = `${presetLabel} 프리셋이 적용되었습니다.`;
     setPresetApplyStatus(appliedMessage);
+    modpackUpdateState = { ok: true, pending: false, preset: nextPreset, latestVersion: asText(result?.version) };
     scheduleBackgroundPresetPrefetch(nextPreset);
     return true;
   } catch (error) {
@@ -2221,7 +2235,7 @@ function requestLauncherPresetApply(preset) {
   const nextPreset = normalizeLauncherPreset(preset, getRecommendedLauncherPreset());
   const presetLabel = getLauncherPresetLabel(nextPreset);
 
-  if (isLauncherRunning || isLaunchRequestPending || isLauncherUpdateGateRunning) {
+  if (isLauncherRunning || isLaunchRequestPending || isModpackUpdateApplyRunning || isLauncherUpdateGateRunning) {
     pendingPresetSyncPreset = nextPreset;
     const message = "게임 실행 중이라 프리셋 적용을 대기합니다. 게임 종료 후 자동 적용됩니다.";
     setPresetApplyStatus(message);
@@ -2235,7 +2249,7 @@ function requestLauncherPresetApply(preset) {
     return;
   }
 
-  if (isStartupModpackSyncRunning || isPresetModpackSyncRunning) {
+  if (isStartupModpackSyncRunning || isPresetModpackSyncRunning || isModpackUpdateApplyRunning) {
     pendingPresetSyncPreset = nextPreset;
     const message = `${presetLabel} 프리셋 적용 대기 중...`;
     setPresetApplyStatus(message);
@@ -2322,48 +2336,34 @@ async function runStartupModpackSync() {
 
   isStartupModpackSyncRunning = true;
   updateLaunchButtonUi();
-  setLaunchStatus("\uD328\uBE0C\uB9AD \uB7F0\uD0C0\uC784 \uC900\uBE44 \uC911...");
-  setStartupProgress(STARTUP_RUNTIME_PROGRESS_START, "\uD328\uBE0C\uB9AD \uB7F0\uD0C0\uC784 \uC900\uBE44 \uC911...");
+  setLaunchStatus("모드팩 업데이트 확인 중...");
+  setStartupProgress(STARTUP_MODPACK_PROGRESS_START, "모드팩 업데이트 확인 중...");
 
   try {
-    const runtimeResult = await window.launcherApi.prepareRuntime({
-      minecraftDirectory: payload.minecraftDirectory,
-      javaPath: asText(launcherSettings.javaPath) || asText(launcherDefaults.javaPath)
-    });
-    if (!runtimeResult?.ok) {
-      const message = localizeStatusMessage(runtimeResult?.error || "Runtime preparation failed.");
-      setLaunchStatus(message, true);
-      setStartupProgress(startupProgressPercent, message, true);
+    if (!window.launcherApi || typeof window.launcherApi.checkModpackUpdate !== "function") {
+      setLaunchStatus("");
+      setStartupProgress(STARTUP_MODPACK_PROGRESS_DONE, "모드팩 업데이트 확인을 건너뜁니다.");
       return;
     }
 
-    applyResolvedJavaPath(runtimeResult?.javaPath);
-
-    setStartupProgress(STARTUP_RUNTIME_PROGRESS_DONE, "\uD328\uBE0C\uB9AD \uB7F0\uD0C0\uC784 \uC900\uBE44 \uC644\uB8CC.");
-    setLaunchStatus("\uBAA8\uB4DC\uD329 \uC5C5\uB370\uC774\uD2B8 \uD655\uC778 \uC911...");
-    setStartupProgress(STARTUP_MODPACK_PROGRESS_START, "\uBAA8\uB4DC\uD329 \uC5C5\uB370\uC774\uD2B8 \uD655\uC778 \uC911...");
-    const result = await window.launcherApi.syncModpack(payload);
+    const result = await window.launcherApi.checkModpackUpdate(payload);
     if (!result?.ok) {
-      const message = localizeStatusMessage(result?.error || "Modpack update failed.");
+      const message = localizeStatusMessage(result?.error || "Modpack update check failed.");
       setLaunchStatus(message, true);
       setStartupProgress(startupProgressPercent, message, true);
       return;
     }
 
-    if (result.skipped) {
+    modpackUpdateState = result && typeof result === "object" ? { ...result } : null;
+    if (result.pending) {
+      const message = "모드팩 업데이트가 있습니다. 업데이트 버튼을 눌러 적용하세요.";
+      setLaunchStatus(message);
+      setStartupProgress(STARTUP_MODPACK_PROGRESS_DONE, "모드팩 업데이트 확인 완료.");
+    } else {
       setLaunchStatus("\uBAA8\uB4DC\uD329\uC774 \uCD5C\uC2E0 \uC0C1\uD0DC\uC785\uB2C8\uB2E4.");
       setStartupProgress(STARTUP_MODPACK_PROGRESS_DONE, "\uBAA8\uB4DC\uD329\uC774 \uCD5C\uC2E0 \uC0C1\uD0DC\uC785\uB2C8\uB2E4.");
-    } else {
-      setLaunchStatus("\uBAA8\uB4DC\uD329 \uC5C5\uB370\uC774\uD2B8\uAC00 \uC644\uB8CC\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
-      setStartupProgress(STARTUP_MODPACK_PROGRESS_DONE, "\uBAA8\uB4DC\uD329 \uC5C5\uB370\uC774\uD2B8\uAC00 \uC644\uB8CC\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
+      scheduleBackgroundPresetPrefetch(payload.launcherPreset);
     }
-
-    const finalModpackMessage = result.skipped
-      ? "\uBAA8\uB4DC\uD329\uC774 \uCD5C\uC2E0 \uC0C1\uD0DC\uC785\uB2C8\uB2E4."
-      : "\uBAA8\uB4DC\uD329 \uC5C5\uB370\uC774\uD2B8\uAC00 \uC644\uB8CC\uB418\uC5C8\uC2B5\uB2C8\uB2E4.";
-    setLaunchStatus(finalModpackMessage);
-    setStartupProgress(STARTUP_MODPACK_PROGRESS_DONE, finalModpackMessage);
-    scheduleBackgroundPresetPrefetch(payload.launcherPreset);
   } catch (error) {
     const message = localizeStatusMessage(asText(error?.message) || "Modpack update check failed.");
     setLaunchStatus(message, true);
@@ -2395,6 +2395,51 @@ function applyLauncherState(nextState) {
   syncLauncherBgmPlayback();
 }
 
+async function runPendingModpackUpdate() {
+  const payload = buildModpackSyncPayload();
+  if (!payload.minecraftDirectory) {
+    setLaunchStatus("\uB9C8\uC778\uD06C\uB798\uD504\uD2B8 \uD3F4\uB354\uAC00 \uC124\uC815\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.", true);
+    return false;
+  }
+
+  if (!window.launcherApi || typeof window.launcherApi.syncModpack !== "function") {
+    setLaunchStatus("모드팩 업데이트 기능을 사용할 수 없습니다.", true);
+    return false;
+  }
+
+  isModpackUpdateApplyRunning = true;
+  updateLaunchButtonUi();
+  setLaunchStatus("모드팩 업데이트 중...");
+
+  try {
+    const result = await window.launcherApi.syncModpack(payload);
+    if (!result?.ok) {
+      const message = localizeStatusMessage(result?.error || "Modpack update failed.");
+      setLaunchStatus(message, true);
+      return false;
+    }
+
+    modpackUpdateState = {
+      ok: true,
+      pending: false,
+      preset: payload.launcherPreset,
+      latestVersion: asText(result?.version) || asText(modpackUpdateState?.latestVersion)
+    };
+    setLaunchStatus("모드팩 업데이트가 완료되었습니다. 게임을 시작할 수 있습니다.");
+    scheduleBackgroundPresetPrefetch(payload.launcherPreset);
+    return true;
+  } catch (error) {
+    const message = localizeStatusMessage(asText(error?.message) || "Modpack update failed.");
+    setLaunchStatus(message, true);
+    return false;
+  } finally {
+    isModpackUpdateApplyRunning = false;
+    updateLaunchButtonUi();
+    await runQueuedPresetSyncIfIdle();
+    void runBackgroundPresetPrefetchIfIdle();
+  }
+}
+
 async function launchGame() {
   if (!authState.signedIn) {
     setLaunchStatus("Microsoft\uB85C \uBA3C\uC800 \uB85C\uADF8\uC778\uD574 \uC8FC\uC138\uC694.", true);
@@ -2417,6 +2462,11 @@ async function launchGame() {
     return;
   }
 
+  if (isModpackUpdateApplyRunning) {
+    setLaunchStatus("모드팩 업데이트 진행 중입니다. 잠시 기다려 주세요.", true);
+    return;
+  }
+
   if (isLaunchRequestPending || isLauncherRunning) {
     return;
   }
@@ -2429,6 +2479,11 @@ async function launchGame() {
 
   if (payload.ramMin > payload.ramMax) {
     setLaunchStatus("RAM \uC124\uC815\uAC12\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.", true);
+    return;
+  }
+
+  if (modpackUpdateState?.pending) {
+    await runPendingModpackUpdate();
     return;
   }
 
@@ -2446,6 +2501,13 @@ async function launchGame() {
   try {
     const result = await window.launcherApi.launch(payload);
     if (!result?.ok) {
+      if (result?.code === "modpack-update-required" || result?.modpackUpdate?.pending) {
+        modpackUpdateState =
+          result?.modpackUpdate && typeof result.modpackUpdate === "object"
+            ? { ...result.modpackUpdate, pending: true }
+            : { ok: true, pending: true };
+        updateLaunchButtonUi();
+      }
       setLaunchStatus(localizeStatusMessage(result?.error || "Minecraft launch failed."), true);
       return;
     }
