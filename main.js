@@ -1454,6 +1454,17 @@ function resolveLauncherNewsSource(rawValue, configPath = "", options = {}) {
   };
 }
 
+function appendNewsCacheBuster(url) {
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.set("_newsTs", String(Date.now()));
+    return parsed.toString();
+  } catch {
+    const separator = String(url).includes("?") ? "&" : "?";
+    return `${url}${separator}_newsTs=${Date.now()}`;
+  }
+}
+
 function readLauncherNewsConfig() {
   const config = readModpackConfig();
   const configPath = asTrimmedText(config?.__configPath);
@@ -1960,10 +1971,14 @@ async function readLauncherNewsPayload(source, timeoutMs = NEWS_TIMEOUT_DEFAULT_
   }
 
   if (source.kind === "http") {
+    const requestUrl = appendNewsCacheBuster(source.value);
     const response = await fetchWithTimeout(
-      source.value,
+      requestUrl,
       {
-        headers: buildHttpHeaders(source.value)
+        headers: buildHttpHeaders(source.value, {
+          "Cache-Control": "no-cache",
+          Pragma: "no-cache"
+        })
       },
       timeoutMs
     );
