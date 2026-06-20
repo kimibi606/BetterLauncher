@@ -1,19 +1,19 @@
 {
   "items": [
     {
-      "type": "\uC5C5\uB370\uC774\uD2B8",
+      "type": "업데이트",
       "date": "2026-03-06",
-      "text": "\uB274\uC2A4/\uC5C5\uB370\uC774\uD2B8 \uD328\uB110\uC774 JSON \uAE30\uBC18 \uC2E4\uC2DC\uAC04 \uAC31\uC2E0\uC744 \uC9C0\uC6D0\uD569\uB2C8\uB2E4."
+      "text": "뉴스/업데이트 패널이 JSON 기반 실시간 갱신을 지원합니다."
     },
     {
-      "type": "\uC548\uB0B4",
+      "type": "안내",
       "date": "2026-03-06",
-      "text": "modpack.config.json\uC758 news.url \uB610\uB294 news.path\uB97C \uBC14\uAFB8\uBA74 \uC18C\uC2DD \uACF5\uAE09\uC6D0\uC744 \uAD50\uCCB4\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4."
+      "text": "modpack.config.json의 news.url 또는 news.path를 바꾸면 소식 공급원을 교체할 수 있습니다."
     },
     {
-      "type": "\uD301",
+      "type": "팁",
       "date": "2026-03-06",
-      "text": "launcher-news.json\uC744 \uC218\uC815\uD558\uBA74 \uB7F0\uCC98\uC5D0\uC11C \uC790\uB3D9\uC73C\uB85C \uB2E4\uC2DC \uBD88\uB7EC\uC635\uB2C8\uB2E4."
+      "text": "launcher-news.json을 수정하면 런처에서 자동으로 다시 불러옵니다."
     }
   ]
 }
