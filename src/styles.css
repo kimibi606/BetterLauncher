@@ -1505,6 +1505,22 @@ body[data-screen="launch"].preset-icons-hidden #playerCountPanel {
   padding: 14px 12px;
   border: 1px solid rgba(182, 205, 236, 0.28);
   background: rgba(3, 6, 10, 0.2);
+  transition: border-color 0.18s ease, background-color 0.18s ease;
+}
+
+.settings-account-card.is-clickable {
+  cursor: pointer;
+}
+
+.settings-account-card.is-clickable:hover,
+.settings-account-card.is-clickable:focus-within {
+  border-color: rgba(129, 221, 255, 0.42);
+  background: rgba(129, 221, 255, 0.08);
+}
+
+.settings-account-card.is-selected {
+  border-color: rgba(129, 221, 255, 0.42);
+  background: rgba(129, 221, 255, 0.1);
 }
 
 .settings-account-model-image {
@@ -1543,11 +1559,7 @@ body[data-screen="launch"].preset-icons-hidden #playerCountPanel {
   line-height: 1.25;
 }
 
-#settingsAccountName {
-  font-size: 14px;
-}
-
-#settingsAccountUuid {
+.settings-account-uuid-value {
   font-family: Consolas, "Courier New", monospace;
   font-size: 14px;
   letter-spacing: 0;
@@ -1597,56 +1609,11 @@ body[data-screen="launch"].preset-icons-hidden #playerCountPanel {
 
 .settings-account-list {
   display: grid;
-  gap: 6px;
+  gap: 10px;
 }
 
 .settings-account-list[hidden] {
   display: none;
-}
-
-.settings-account-list-item {
-  display: grid;
-  grid-template-columns: minmax(120px, 0.5fr) minmax(0, 1fr);
-  align-items: center;
-  gap: 12px;
-  width: 100%;
-  border: 1px solid rgba(182, 205, 236, 0.2);
-  background: rgba(3, 6, 10, 0.14);
-  color: rgba(241, 248, 255, 0.92);
-  padding: 8px 10px;
-  text-align: left;
-}
-
-.settings-account-list-item:hover,
-.settings-account-list-item:focus-visible {
-  border-color: rgba(129, 221, 255, 0.42);
-  background: rgba(129, 221, 255, 0.08);
-  outline: none;
-}
-
-.settings-account-list-item.is-selected {
-  border-color: rgba(129, 221, 255, 0.38);
-  background: rgba(129, 221, 255, 0.1);
-  cursor: default;
-}
-
-.settings-account-list-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.settings-account-list-uuid {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: rgba(171, 195, 226, 0.82);
-  font-family: Consolas, "Courier New", monospace;
-  font-size: 12px;
 }
 
 .settings-minecraft-panel {
@@ -2485,11 +2452,6 @@ body[data-screen="launch"].preset-icons-hidden #playerCountPanel {
 }
 
 .settings-tab:not(.settings-about-tab) .settings-account-field-value {
-  font-size: 12px;
-}
-
-.settings-tab:not(.settings-about-tab) #settingsAccountName,
-.settings-tab:not(.settings-about-tab) #settingsAccountUuid {
   font-size: 12px;
 }
 

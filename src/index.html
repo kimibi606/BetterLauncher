@@ -213,33 +213,32 @@
                 <button id="settingsMicrosoftAdd" type="button" class="settings-account-add">+ Microsoft 계정 추가</button>
               </div>
 
-              <div class="settings-account-card">
-                <img
-                  id="settingsAccountModelImage"
-                  class="settings-account-model-image"
-                  src="./assets/app-icon.png"
-                  alt="계정 모델"
-                  loading="lazy"
-                />
+              <div id="settingsAccountList" class="settings-account-list" aria-label="저장된 Microsoft 계정">
+                <div class="settings-account-card">
+                  <img
+                    class="settings-account-model-image"
+                    src="./assets/app-icon.png"
+                    alt="계정 모델"
+                    loading="lazy"
+                  />
 
-                <div class="settings-account-meta">
-                  <div class="settings-account-field">
-                    <span class="settings-account-field-label">사용자 이름</span>
-                    <span id="settingsAccountName" class="settings-account-field-value">로그인 안 됨</span>
+                  <div class="settings-account-meta">
+                    <div class="settings-account-field">
+                      <span class="settings-account-field-label">사용자 이름</span>
+                      <span class="settings-account-field-value">로그인 안 됨</span>
+                    </div>
+                    <div class="settings-account-field">
+                      <span class="settings-account-field-label">UUID</span>
+                      <span class="settings-account-field-value settings-account-uuid-value">-</span>
+                    </div>
                   </div>
-                  <div class="settings-account-field">
-                    <span class="settings-account-field-label">UUID</span>
-                    <span id="settingsAccountUuid" class="settings-account-field-value">-</span>
-                  </div>
-                </div>
 
-                <div class="settings-account-state">
-                  <span id="settingsAccountSelectedLabel" class="settings-account-selected">선택된 계정 없음</span>
-                  <button id="settingsMicrosoftLogout" type="button" class="settings-account-logout">로그아웃</button>
+                  <div class="settings-account-state">
+                    <span class="settings-account-selected">선택된 계정 없음</span>
+                    <button type="button" class="settings-account-logout">로그아웃</button>
+                  </div>
                 </div>
               </div>
-
-              <div id="settingsAccountList" class="settings-account-list" aria-label="저장된 Microsoft 계정"></div>
             </div>
           </section>
 

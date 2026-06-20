@@ -91,12 +91,7 @@ const settingsCloseButton = document.getElementById("settingsCloseButton");
 const settingsDoneButton = document.getElementById("settingsDoneButton");
 const settingsStatus = document.getElementById("settingsStatus");
 const settingsMicrosoftAddButton = document.getElementById("settingsMicrosoftAdd");
-const settingsAccountModelImage = document.getElementById("settingsAccountModelImage");
-const settingsAccountName = document.getElementById("settingsAccountName");
-const settingsAccountUuid = document.getElementById("settingsAccountUuid");
-const settingsAccountSelectedLabel = document.getElementById("settingsAccountSelectedLabel");
 const settingsAccountList = document.getElementById("settingsAccountList");
-const settingsMicrosoftLogoutButton = document.getElementById("settingsMicrosoftLogout");
 const settingsGameWidthInput = document.getElementById("settingsGameWidth");
 const settingsGameHeightInput = document.getElementById("settingsGameHeight");
 const settingsFullscreenInput = document.getElementById("settingsFullscreen");
@@ -196,7 +191,6 @@ let lastRenderedNewsSignature = "";
 let isNewsPanelExpanded = false;
 let playerCountPollTimer = null;
 let isPlayerCountRequestPending = false;
-let lastSettingsAccountModelKey = "";
 let presetTransitionTimeoutId = null;
 let presetTransitionSequenceId = 0;
 let updaterSnapshot = null;
@@ -606,54 +600,39 @@ function updateAccountModelUi() {
   tryNextCandidate();
 }
 
-function updateSettingsAccountModelPreview() {
-  if (!settingsAccountModelImage) {
+function loadMinecraftModelImage(imageElement, uuidValue, profileNameValue) {
+  if (!imageElement) {
     return;
   }
 
-  if (!authState.signedIn) {
-    lastSettingsAccountModelKey = "";
-    settingsAccountModelImage.onerror = null;
-    settingsAccountModelImage.onload = null;
-    settingsAccountModelImage.src = "./assets/app-icon.png";
-    settingsAccountModelImage.alt = "怨꾩젙 紐⑤뜽";
-    return;
-  }
-
-  const uuid = normalizeMinecraftUuid(authState.uuid);
-  const displayName = asText(authState.profileName, "?뚮젅?댁뼱");
-  const modelKey = uuid || `name:${displayName.toLowerCase()}`;
-  if (modelKey === lastSettingsAccountModelKey) {
-    return;
-  }
-
-  lastSettingsAccountModelKey = modelKey;
-  settingsAccountModelImage.alt = `${displayName} 紐⑤뜽`;
+  const uuid = normalizeMinecraftUuid(uuidValue);
+  const displayName = asText(profileNameValue, "플레이어");
+  imageElement.alt = `${displayName} 모델`;
 
   const candidates = buildMinecraftBodyModelUrlCandidates(uuid, displayName);
   if (candidates.length === 0) {
-    settingsAccountModelImage.onerror = null;
-    settingsAccountModelImage.onload = null;
-    settingsAccountModelImage.src = "./assets/app-icon.png";
+    imageElement.onerror = null;
+    imageElement.onload = null;
+    imageElement.src = "./assets/app-icon.png";
     return;
   }
 
   let candidateIndex = 0;
   const tryNextCandidate = () => {
     if (candidateIndex >= candidates.length) {
-      settingsAccountModelImage.onerror = null;
-      settingsAccountModelImage.src = "./assets/app-icon.png";
+      imageElement.onerror = null;
+      imageElement.src = "./assets/app-icon.png";
       return;
     }
-    settingsAccountModelImage.src = candidates[candidateIndex];
+    imageElement.src = candidates[candidateIndex];
     candidateIndex += 1;
   };
 
-  settingsAccountModelImage.onerror = () => {
+  imageElement.onerror = () => {
     tryNextCandidate();
   };
-  settingsAccountModelImage.onload = () => {
-    settingsAccountModelImage.onerror = null;
+  imageElement.onload = () => {
+    imageElement.onerror = null;
   };
   tryNextCandidate();
 }
@@ -2585,58 +2564,89 @@ function readSettingsFromInputs() {
 }
 
 function updateSettingsAccountUi() {
-  if (!settingsAccountName || !settingsAccountUuid || !settingsAccountSelectedLabel) {
-    return;
-  }
-
-  const displayName = asText(authState.profileName);
-  const normalizedUuid = normalizeMinecraftUuid(authState.uuid);
-
-  if (authState.loggingIn) {
-    settingsAccountName.textContent = "Microsoft 로그인 진행 중...";
-    settingsAccountUuid.textContent = "-";
-    settingsAccountSelectedLabel.textContent = "연결 중...";
-  } else if (authState.signedIn && (displayName || normalizedUuid)) {
-    settingsAccountName.textContent = displayName || "플레이어";
-    settingsAccountUuid.textContent = normalizedUuid || "-";
-    const accountCount = Array.isArray(authState.accounts) ? authState.accounts.length : 0;
-    settingsAccountSelectedLabel.textContent = accountCount > 1 ? `선택된 계정 (${accountCount}개 저장됨)` : "선택된 계정";
-  } else {
-    settingsAccountName.textContent = "로그인 안 됨";
-    settingsAccountUuid.textContent = "-";
-    settingsAccountSelectedLabel.textContent = "선택된 계정 없음";
-  }
-
   if (settingsMicrosoftAddButton) {
     settingsMicrosoftAddButton.disabled = authState.loggingIn;
   }
-  if (settingsMicrosoftLogoutButton) {
-    settingsMicrosoftLogoutButton.disabled = !authState.signedIn || authState.loggingIn;
-  }
-
-  updateSettingsAccountModelPreview();
   renderSettingsAccountList();
 }
 
-function buildSettingsAccountListItem(account) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "settings-account-list-item";
-  button.dataset.accountId = asText(account?.id);
-  button.disabled = Boolean(account?.selected) || authState.loggingIn;
-  button.classList.toggle("is-selected", Boolean(account?.selected));
+function buildSettingsAccountCard(account, { placeholder = false } = {}) {
+  const card = document.createElement("article");
+  card.className = "settings-account-card";
+  card.classList.toggle("is-selected", Boolean(account?.selected));
+  card.classList.toggle("is-clickable", !placeholder && !account?.selected && !authState.loggingIn);
+  if (!placeholder) {
+    card.dataset.accountId = asText(account?.id);
+    card.setAttribute("role", "button");
+    card.tabIndex = !account?.selected && !authState.loggingIn ? 0 : -1;
+  }
 
-  const nameElement = document.createElement("span");
-  nameElement.className = "settings-account-list-name";
-  nameElement.textContent = asText(account?.profileName, "플레이어");
+  const image = document.createElement("img");
+  image.className = "settings-account-model-image";
+  image.loading = "lazy";
+  image.src = "./assets/app-icon.png";
+  image.alt = "계정 모델";
 
-  const uuidElement = document.createElement("span");
-  uuidElement.className = "settings-account-list-uuid";
-  uuidElement.textContent = normalizeMinecraftUuid(account?.uuid) || "-";
+  const meta = document.createElement("div");
+  meta.className = "settings-account-meta";
 
-  button.appendChild(nameElement);
-  button.appendChild(uuidElement);
-  return button;
+  const nameField = document.createElement("div");
+  nameField.className = "settings-account-field";
+  const nameLabel = document.createElement("span");
+  nameLabel.className = "settings-account-field-label";
+  nameLabel.textContent = "사용자 이름";
+  const nameValue = document.createElement("span");
+  nameValue.className = "settings-account-field-value";
+  nameValue.textContent = placeholder ? (authState.loggingIn ? "Microsoft 로그인 진행 중..." : "로그인 안 됨") : asText(account?.profileName, "플레이어");
+  nameField.appendChild(nameLabel);
+  nameField.appendChild(nameValue);
+
+  const uuidField = document.createElement("div");
+  uuidField.className = "settings-account-field";
+  const uuidLabel = document.createElement("span");
+  uuidLabel.className = "settings-account-field-label";
+  uuidLabel.textContent = "UUID";
+  const uuidValue = document.createElement("span");
+  uuidValue.className = "settings-account-field-value settings-account-uuid-value";
+  uuidValue.textContent = placeholder ? "-" : normalizeMinecraftUuid(account?.uuid) || "-";
+  uuidField.appendChild(uuidLabel);
+  uuidField.appendChild(uuidValue);
+
+  meta.appendChild(nameField);
+  meta.appendChild(uuidField);
+
+  const state = document.createElement("div");
+  state.className = "settings-account-state";
+  const selectedLabel = document.createElement("span");
+  selectedLabel.className = "settings-account-selected";
+  selectedLabel.textContent = placeholder
+    ? authState.loggingIn
+      ? "연결 중..."
+      : "선택된 계정 없음"
+    : account?.selected
+      ? "선택된 계정"
+      : "클릭하여 선택";
+  state.appendChild(selectedLabel);
+
+  if (!placeholder && account?.selected) {
+    const logoutButton = document.createElement("button");
+    logoutButton.type = "button";
+    logoutButton.className = "settings-account-logout";
+    logoutButton.textContent = "로그아웃";
+    logoutButton.disabled = !authState.signedIn || authState.loggingIn;
+    logoutButton.dataset.action = "logout";
+    state.appendChild(logoutButton);
+  }
+
+  card.appendChild(image);
+  card.appendChild(meta);
+  card.appendChild(state);
+
+  if (!placeholder) {
+    loadMinecraftModelImage(image, account?.uuid, account?.profileName);
+  }
+
+  return card;
 }
 
 function renderSettingsAccountList() {
@@ -2646,14 +2656,15 @@ function renderSettingsAccountList() {
 
   settingsAccountList.innerHTML = "";
   const accounts = Array.isArray(authState.accounts) ? authState.accounts : [];
-  if (accounts.length <= 1) {
-    settingsAccountList.hidden = true;
+  settingsAccountList.hidden = false;
+
+  if (accounts.length === 0) {
+    settingsAccountList.appendChild(buildSettingsAccountCard(null, { placeholder: true }));
     return;
   }
 
-  settingsAccountList.hidden = false;
   for (const account of accounts) {
-    settingsAccountList.appendChild(buildSettingsAccountListItem(account));
+    settingsAccountList.appendChild(buildSettingsAccountCard(account));
   }
 }
 
@@ -3209,9 +3220,12 @@ bindClick(settingsMicrosoftAddButton, async () => {
 });
 
 if (settingsAccountList) {
-  settingsAccountList.addEventListener("click", async (event) => {
-    const target = event.target instanceof Element ? event.target.closest(".settings-account-list-item") : null;
+  const selectAccountFromCard = async (target) => {
     if (!target || authState.loggingIn || !window.launcherApi || typeof window.launcherApi.selectMicrosoftAccount !== "function") {
+      return;
+    }
+
+    if (target.classList.contains("is-selected")) {
       return;
     }
 
@@ -3229,6 +3243,35 @@ if (settingsAccountList) {
     } else if (result?.error) {
       setSettingsStatus(localizeStatusMessage(result.error), true);
     }
+  };
+
+  settingsAccountList.addEventListener("click", async (event) => {
+    const actionTarget = event.target instanceof Element ? event.target.closest("[data-action='logout']") : null;
+    if (actionTarget) {
+      const result = await window.launcherApi.microsoftLogout();
+      if (result?.status) {
+        applyAuthState(result.status);
+        setSettingsStatus("Microsoft에서 로그아웃했습니다.");
+      }
+      return;
+    }
+
+    const target = event.target instanceof Element ? event.target.closest(".settings-account-card") : null;
+    await selectAccountFromCard(target);
+  });
+
+  settingsAccountList.addEventListener("keydown", async (event) => {
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
+    }
+
+    const target = event.target instanceof Element ? event.target.closest(".settings-account-card") : null;
+    if (!target) {
+      return;
+    }
+
+    event.preventDefault();
+    await selectAccountFromCard(target);
   });
 }
 
@@ -3295,14 +3338,6 @@ if (bgmVolumeSlider) {
     syncLauncherBgmPlayback();
   });
 }
-
-bindClick(settingsMicrosoftLogoutButton, async () => {
-  const result = await window.launcherApi.microsoftLogout();
-  if (result?.status) {
-    applyAuthState(result.status);
-    setSettingsStatus("Microsoft\uC5D0\uC11C \uB85C\uADF8\uC544\uC6C3\uD588\uC2B5\uB2C8\uB2E4.");
-  }
-});
 
 bindClick(settingsUpdateActionButton, async () => {
   if (!window.launcherApi || typeof window.launcherApi.getUpdaterState !== "function") {
