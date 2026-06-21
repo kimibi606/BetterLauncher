@@ -5,7 +5,7 @@
   },
   "serverStatus": {
     "host": "server.example",
-    "port": 25564
+    "port": 25565
   },
   "news": {
     "url": "https://raw.githubusercontent.com/kimibi606/ExamplePack/main/launcher-news.json",

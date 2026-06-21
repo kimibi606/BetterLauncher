@@ -2163,9 +2163,9 @@ function readServerStatusConfig() {
       config?.serverHost ||
       config?.serverAddress ||
       config?.serverIp ||
-      "115.138.103.44"
+      "server.example"
   );
-  const port = asPortNumber(envPort || serverStatusConfig.port || config?.serverPort, 25564);
+  const port = asPortNumber(envPort || serverStatusConfig.port || config?.serverPort, 25565);
   const molangUrl = asTrimmedText(
     envMolangUrl || serverStatusConfig.molangUrl || serverStatusConfig.molangStatusUrl || config?.molangStatusUrl
   );
@@ -2190,7 +2190,7 @@ function readServerStatusConfig() {
 function buildAutoConnectTarget() {
   const config = readServerStatusConfig();
   const host = asTrimmedText(config.host);
-  const port = asPortNumber(config.port, 25564);
+  const port = asPortNumber(config.port, 25565);
   if (!host) {
     return {
       ok: false,
