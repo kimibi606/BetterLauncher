@@ -2017,11 +2017,9 @@ function updateLaunchButtonUi() {
     ? "\uC5C5\uB370\uC774\uD2B8 \uC911..."
     : isModpackUpdateApplyRunning
       ? "업데이트 중..."
-    : isPresetModpackSyncRunning
-      ? "\uC801\uC6A9 \uC911..."
       : isStartupModpackSyncRunning
         ? "확인 중..."
-      : busy
+      : isLaunchRequestPending || isLauncherRunning
         ? "\uC2E4\uD589 \uC911..."
         : hasPendingModpackUpdate
           ? "업데이트"
