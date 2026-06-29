@@ -1654,6 +1654,16 @@ function normalizeRepositoryName(value) {
   return repository;
 }
 
+function buildGitHubLatestReleaseAssetUrl(repository, assetName) {
+  const normalizedRepository = normalizeRepositoryName(repository);
+  const normalizedAssetName = asTrimmedText(assetName);
+  if (!normalizedRepository || !normalizedAssetName) {
+    return "";
+  }
+  const [owner, repo] = normalizedRepository.split("/");
+  return `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases/latest/download/${encodeURIComponent(normalizedAssetName)}`;
+}
+
 async function fetchModpackManifestSource() {
   const manifestConfig = readModpackManifestConfig();
   if (!manifestConfig.configured) {
@@ -1678,6 +1688,28 @@ async function fetchModpackManifestSource() {
   const repository = normalizeRepositoryName(manifestConfig.repository);
   if (!repository) {
     throw new Error(`Invalid modpack GitHub repository: ${manifestConfig.repository}`);
+  }
+
+  const directManifestUrl = buildGitHubLatestReleaseAssetUrl(repository, manifestConfig.manifestAsset);
+  if (directManifestUrl) {
+    const directResponse = await fetchWithTimeout(
+      directManifestUrl,
+      {
+        headers: buildHttpHeaders(directManifestUrl)
+      },
+      manifestConfig.timeoutMs
+    );
+    if (directResponse.ok) {
+      const text = await directResponse.text();
+      const manifestLocation = asTrimmedText(directResponse.url) || directManifestUrl;
+      return {
+        text,
+        json: JSON.parse(text),
+        manifestLocation,
+        sourceKind: "http",
+        sourceKey: `github-latest:${repository}:${manifestConfig.manifestAsset}:${manifestLocation}`
+      };
+    }
   }
 
   const [owner, repo] = repository.split("/");
