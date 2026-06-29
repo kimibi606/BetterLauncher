@@ -77,9 +77,10 @@ function main() {
 
   const rceditExe = findRceditExecutable();
   if (!rceditExe) {
-    throw new Error(
-      "rcedit executable not found. Set BETTERMON_RCEDIT_EXE or BETTERMON_RCEDIT_PATH and retry."
+    console.warn(
+      "patch-win-exe-icon: skipped because rcedit was not found. Set BETTERMON_RCEDIT_EXE or BETTERMON_RCEDIT_PATH to force patching."
     );
+    process.exit(0);
   }
 
   const result = spawnSync(rceditExe, [exePath, "--set-icon", iconPath], {
