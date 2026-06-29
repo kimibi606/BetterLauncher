@@ -8,8 +8,7 @@
     "dist": "electron-builder build",
     "dist:win": "electron-builder build --win nsis",
     "dist:dir": "electron-builder build --dir",
-    "release:github": "npm run dist:dir && node scripts/patch-win-exe-icon.js && node scripts/write-app-update-config.js && electron-builder build --prepackaged dist/win-unpacked --win nsis --publish always",
-    "build:distribution-index": "node scripts/build-distribution-index.js"
+    "release:github": "npm run dist:dir && node scripts/patch-win-exe-icon.js && node scripts/write-app-update-config.js && electron-builder build --prepackaged dist/win-unpacked --win nsis --publish always"
   },
   "keywords": [
     "minecraft",
@@ -19,7 +18,6 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.883.0",
     "electron-updater": "^6.7.1",
     "minecraft-launcher-core": "^3.18.2",
     "msmc": "^5.0.5"

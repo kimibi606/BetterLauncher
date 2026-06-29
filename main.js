@@ -538,10 +538,6 @@ function isFileUrl(value) {
   return /^file:\/\//i.test(asTrimmedText(value));
 }
 
-function isS3Url(value) {
-  return /^s3:\/\//i.test(asTrimmedText(value));
-}
-
 function normalizeHostnameForCompare(value) {
   return asTrimmedText(value).replace(/^\[|\]$/g, "").toLowerCase();
 }
@@ -597,60 +593,6 @@ function normalizeExternalOpenUrl(rawUrl, { allowHttpLoopback = true } = {}) {
   }
 
   return { ok: false, error: "Only https URLs are allowed (http is allowed only for localhost)." };
-}
-
-function normalizeS3ObjectKey(value) {
-  const raw = asTrimmedText(value).replace(/^\/+/, "");
-  if (!raw) {
-    return "";
-  }
-
-  return raw
-    .split("/")
-    .filter((segment) => segment.length > 0)
-    .map((segment) => {
-      try {
-        return encodeURIComponent(decodeURIComponent(segment));
-      } catch {
-        return encodeURIComponent(segment);
-      }
-    })
-    .join("/");
-}
-
-function buildS3HttpsUrl(bucket, objectKey, region = "") {
-  const safeBucket = asTrimmedText(bucket);
-  const safeKey = normalizeS3ObjectKey(objectKey);
-  const safeRegion = asTrimmedText(region);
-  if (!safeBucket || !safeKey) {
-    return "";
-  }
-  if (safeRegion) {
-    return `https://${safeBucket}.s3.${safeRegion}.amazonaws.com/${safeKey}`;
-  }
-  return `https://${safeBucket}.s3.amazonaws.com/${safeKey}`;
-}
-
-function parseS3Uri(value) {
-  const raw = asTrimmedText(value);
-  if (!isS3Url(raw)) {
-    return null;
-  }
-
-  try {
-    const parsed = new URL(raw);
-    const bucket = asTrimmedText(parsed.hostname);
-    const key = asTrimmedText(parsed.pathname).replace(/^\/+/, "");
-    if (!bucket || !key) {
-      return null;
-    }
-    return {
-      bucket,
-      key
-    };
-  } catch {
-    return null;
-  }
 }
 
 function asNonNegativeInteger(value, fallback = 0) {
@@ -1408,7 +1350,7 @@ function pickLauncherNewsItemsArray(payload, itemsPath = "") {
   return [];
 }
 
-function resolveLauncherNewsSource(rawValue, configPath = "", options = {}) {
+function resolveLauncherNewsSource(rawValue, configPath = "") {
   const value = asTrimmedText(rawValue);
   if (!value) {
     return null;
@@ -1416,22 +1358,6 @@ function resolveLauncherNewsSource(rawValue, configPath = "", options = {}) {
 
   if (isHttpUrl(value)) {
     return { kind: "http", value };
-  }
-
-  if (isS3Url(value)) {
-    const parsedS3 = parseS3Uri(value);
-    if (!parsedS3) {
-      return null;
-    }
-    const awsRegion = asTrimmedText(options?.awsRegion);
-    return {
-      kind: "s3",
-      value,
-      bucket: parsedS3.bucket,
-      key: parsedS3.key,
-      region: awsRegion,
-      httpsUrl: buildS3HttpsUrl(parsedS3.bucket, parsedS3.key, awsRegion)
-    };
   }
 
   let resolvedPath = "";
@@ -1469,14 +1395,6 @@ function readLauncherNewsConfig() {
   const config = readModpackConfig();
   const configPath = asTrimmedText(config?.__configPath);
   const newsConfig = config && config.news && typeof config.news === "object" ? config.news : {};
-  const awsRegion = asTrimmedText(
-    process.env.BETTERMON_NEWS_AWS_REGION ||
-      newsConfig.awsRegion ||
-      newsConfig.region ||
-      config?.newsAwsRegion ||
-      process.env.AWS_REGION ||
-      process.env.AWS_DEFAULT_REGION
-  );
 
   const envSource = asTrimmedText(
     process.env.BETTERMON_NEWS_URL || process.env.BETTERMON_NEWS_SOURCE || process.env.BETTERMON_NEWS_PATH
@@ -1490,7 +1408,7 @@ function readLauncherNewsConfig() {
       config?.newsSource ||
       config?.newsPath
   );
-  const source = resolveLauncherNewsSource(sourceRaw, configPath, { awsRegion });
+  const source = resolveLauncherNewsSource(sourceRaw, configPath);
   const fallbackSourceRaw = asTrimmedText(
     process.env.BETTERMON_NEWS_FALLBACK_URL ||
       process.env.BETTERMON_NEWS_FALLBACK_SOURCE ||
@@ -1500,7 +1418,7 @@ function readLauncherNewsConfig() {
       config?.newsFallbackUrl ||
       config?.newsPublicUrl
   );
-  const fallbackSource = resolveLauncherNewsSource(fallbackSourceRaw, configPath, { awsRegion });
+  const fallbackSource = resolveLauncherNewsSource(fallbackSourceRaw, configPath);
   const refreshMs = asIntegerInRange(
     process.env.BETTERMON_NEWS_REFRESH_MS || newsConfig.refreshMs || config?.newsRefreshMs,
     NEWS_REFRESH_DEFAULT_MS,
@@ -1530,7 +1448,6 @@ function readLauncherNewsConfig() {
   return {
     source,
     fallbackSource,
-    awsRegion,
     itemsPath,
     inlineItems,
     refreshMs,
@@ -1866,108 +1783,9 @@ function parseModpackManifest(manifestSource) {
   };
 }
 
-async function readTextFromReadableStream(stream) {
-  const chunks = [];
-  for await (const chunk of stream) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
-
-async function readS3ObjectTextViaSdk(source) {
-  let sdk = null;
-  try {
-    sdk = require("@aws-sdk/client-s3");
-  } catch {
-    return {
-      ok: false,
-      error: "AWS SDK module is unavailable."
-    };
-  }
-
-  const region = asTrimmedText(source?.region || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION);
-  if (!region) {
-    return {
-      ok: false,
-      error: "AWS region is not configured for S3 news source."
-    };
-  }
-
-  try {
-    const client = new sdk.S3Client({ region });
-    const result = await client.send(
-      new sdk.GetObjectCommand({
-        Bucket: source.bucket,
-        Key: source.key
-      })
-    );
-    const body = result?.Body;
-    if (!body) {
-      throw new Error("S3 response body is empty.");
-    }
-
-    if (typeof body.transformToString === "function") {
-      return {
-        ok: true,
-        text: await body.transformToString("utf8")
-      };
-    }
-
-    return {
-      ok: true,
-      text: await readTextFromReadableStream(body)
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      error: String(error?.message || error)
-    };
-  }
-}
-
-async function readS3ObjectTextViaHttps(source, timeoutMs = NEWS_TIMEOUT_DEFAULT_MS) {
-  const url = asTrimmedText(source?.httpsUrl) || buildS3HttpsUrl(source?.bucket, source?.key, source?.region);
-  if (!url) {
-    throw new Error("S3 HTTPS URL could not be resolved.");
-  }
-  const response = await fetchWithTimeout(
-    url,
-    {
-      headers: buildHttpHeaders(url)
-    },
-    timeoutMs
-  );
-  if (!response.ok) {
-    throw new Error(`Failed to load S3 news object (${response.status}).`);
-  }
-  return await response.text();
-}
-
 async function readLauncherNewsPayload(source, timeoutMs = NEWS_TIMEOUT_DEFAULT_MS) {
   if (!source || !source.kind || !source.value) {
     throw new Error("News source is not configured.");
-  }
-
-  if (source.kind === "s3") {
-    const viaSdk = await readS3ObjectTextViaSdk(source);
-    let rawText = "";
-    let sdkError = "";
-    if (viaSdk.ok) {
-      rawText = viaSdk.text;
-    } else {
-      sdkError = asTrimmedText(viaSdk.error);
-      rawText = await readS3ObjectTextViaHttps(source, timeoutMs);
-    }
-
-    try {
-      return JSON.parse(rawText);
-    } catch {
-      throw new Error(
-        sdkError
-          ? `Launcher news JSON is invalid. SDK error: ${sdkError}`
-          : "Launcher news JSON is invalid."
-      );
-    }
   }
 
   if (source.kind === "http") {
