@@ -251,16 +251,17 @@ function shouldPlayLauncherBgm() {
 function updateLauncherBgmControls() {
   const volume = getNormalizedLauncherBgmVolume();
   const muted = isLauncherBgmMuted();
+  const displayVolume = muted ? 0 : volume;
 
   if (bgmVolumeSlider) {
-    bgmVolumeSlider.value = String(volume);
-    bgmVolumeSlider.setAttribute("aria-valuenow", String(volume));
-    bgmVolumeSlider.setAttribute("aria-valuetext", muted ? "음소거" : `${volume}%`);
-    bgmVolumeSlider.style.setProperty("--bgm-volume-ratio", `${volume}%`);
+    bgmVolumeSlider.value = String(displayVolume);
+    bgmVolumeSlider.setAttribute("aria-valuenow", String(displayVolume));
+    bgmVolumeSlider.setAttribute("aria-valuetext", muted ? "음소거" : `${displayVolume}%`);
+    bgmVolumeSlider.style.setProperty("--bgm-volume-ratio", `${displayVolume}%`);
   }
 
   if (bgmVolumeValue) {
-    bgmVolumeValue.textContent = muted ? "OFF" : `${volume}%`;
+    bgmVolumeValue.textContent = muted ? "OFF" : `${displayVolume}%`;
   }
 
   if (bgmToggleButton) {
