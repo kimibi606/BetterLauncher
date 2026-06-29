@@ -26,6 +26,18 @@ function findRceditExecutable() {
     }
   }
 
+  const projectRoot = path.resolve(__dirname, "..");
+  const localCandidates = [
+    path.join(projectRoot, "node_modules", "rcedit", "bin", "rcedit-x64.exe"),
+    path.join(projectRoot, "node_modules", "rcedit", "bin", "rcedit.exe"),
+    path.join(projectRoot, "node_modules", "electron-winstaller", "vendor", "rcedit.exe")
+  ];
+  for (const candidate of localCandidates) {
+    if (fileExists(candidate)) {
+      return candidate;
+    }
+  }
+
   const localAppData = String(process.env.LOCALAPPDATA || "").trim();
   if (!localAppData) {
     return "";
