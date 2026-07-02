@@ -1701,7 +1701,7 @@ async function fetchModpackManifestSource() {
     );
     if (directResponse.ok) {
       const text = await directResponse.text();
-      const manifestLocation = asTrimmedText(directResponse.url) || directManifestUrl;
+      const manifestLocation = directManifestUrl;
       return {
         text,
         json: JSON.parse(text),
