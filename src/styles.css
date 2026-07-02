@@ -914,8 +914,8 @@ body[data-screen="launch"].preset-icons-hidden #playerCountPanel {
 }
 
 .icon-refresh-mask {
-  -webkit-mask-image: url("./assets/icons/refresh.svg");
-  mask-image: url("./assets/icons/refresh.svg");
+  -webkit-mask-image: url("./assets/icons/refresh.png");
+  mask-image: url("./assets/icons/refresh.png");
   width: 28px;
   height: 28px;
 }
