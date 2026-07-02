@@ -81,6 +81,7 @@ const playerCountPanel = document.getElementById("playerCountPanel");
 const playerCountValue = document.getElementById("playerCountValue");
 const playerCountTooltip = document.getElementById("playerCountTooltip");
 const discordButton = document.getElementById("discordButton");
+const refreshDataButton = document.getElementById("refreshDataButton");
 const settingsButton = document.getElementById("settingsButton");
 const bgmToggleButton = document.getElementById("bgmToggleButton");
 const bgmVolumeSlider = document.getElementById("bgmVolumeSlider");
@@ -191,6 +192,7 @@ let lastRenderedNewsSignature = "";
 let isNewsPanelExpanded = false;
 let playerCountPollTimer = null;
 let isPlayerCountRequestPending = false;
+let isManualDataRefreshPending = false;
 let presetTransitionTimeoutId = null;
 let presetTransitionSequenceId = 0;
 let updaterSnapshot = null;
@@ -1027,15 +1029,26 @@ function restartNewsPollingTimer() {
   }, newsRefreshMs);
 }
 
+function updateDataRefreshButtonUi() {
+  if (!refreshDataButton) {
+    return;
+  }
+  const refreshing = isManualDataRefreshPending || isNewsRequestPending || isPlayerCountRequestPending;
+  refreshDataButton.disabled = refreshing;
+  refreshDataButton.classList.toggle("is-refreshing", refreshing);
+  refreshDataButton.setAttribute("aria-busy", refreshing ? "true" : "false");
+}
+
 async function refreshLauncherNews(force = false) {
   if (!newsList || !window.launcherApi || typeof window.launcherApi.getNews !== "function") {
     return;
   }
-  if (isNewsRequestPending && !force) {
+  if (isNewsRequestPending) {
     return;
   }
 
   isNewsRequestPending = true;
+  updateDataRefreshButtonUi();
   try {
     const snapshot = await window.launcherApi.getNews();
     const nextRefreshMs = clampNewsRefreshMs(snapshot?.refreshMs, newsRefreshMs);
@@ -1050,6 +1063,7 @@ async function refreshLauncherNews(force = false) {
     setNewsBadgeText("\uC624\uD504\uB77C\uC778");
   } finally {
     isNewsRequestPending = false;
+    updateDataRefreshButtonUi();
   }
 }
 
@@ -1159,11 +1173,12 @@ async function refreshPlayerCount(force = false) {
     setPlayerCountText("\uD655\uC778 \uC2E4\uD328", true);
     return;
   }
-  if (isPlayerCountRequestPending && !force) {
+  if (isPlayerCountRequestPending) {
     return;
   }
 
   isPlayerCountRequestPending = true;
+  updateDataRefreshButtonUi();
   try {
     const snapshot = await window.launcherApi.getServerStatus();
     applyPlayerCountUi(snapshot);
@@ -1172,6 +1187,22 @@ async function refreshPlayerCount(force = false) {
     setPlayerCountTooltip(String(error?.message || error));
   } finally {
     isPlayerCountRequestPending = false;
+    updateDataRefreshButtonUi();
+  }
+}
+
+async function refreshLauncherDataNow() {
+  if (isManualDataRefreshPending || isNewsRequestPending || isPlayerCountRequestPending) {
+    return;
+  }
+
+  isManualDataRefreshPending = true;
+  updateDataRefreshButtonUi();
+  try {
+    await Promise.allSettled([refreshLauncherNews(true), refreshPlayerCount(true)]);
+  } finally {
+    isManualDataRefreshPending = false;
+    updateDataRefreshButtonUi();
   }
 }
 
@@ -3105,6 +3136,10 @@ bindClick(discordButton, async (event) => {
 
 bindClick(settingsButton, () => {
   openSettingsScreen();
+});
+
+bindClick(refreshDataButton, async () => {
+  await refreshLauncherDataNow();
 });
 
 bindClick(newsPanelExpandButton, () => {
