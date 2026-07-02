@@ -913,13 +913,6 @@ body[data-screen="launch"].preset-icons-hidden #playerCountPanel {
   height: 28px;
 }
 
-.icon-refresh-mask {
-  -webkit-mask-image: url("./assets/icons/refresh.png");
-  mask-image: url("./assets/icons/refresh.png");
-  width: 28px;
-  height: 28px;
-}
-
 .icon-discord-mask {
   -webkit-mask-image: url("./assets/icons/discord.svg");
   mask-image: url("./assets/icons/discord.svg");
@@ -928,7 +921,6 @@ body[data-screen="launch"].preset-icons-hidden #playerCountPanel {
 }
 
 #settingsTooltip,
-#refreshTooltip,
 #discordTooltip {
   visibility: hidden;
   opacity: 0;
@@ -954,7 +946,6 @@ body[data-screen="launch"].preset-icons-hidden #playerCountPanel {
 }
 
 #settingsTooltip::after,
-#refreshTooltip::after,
 #discordTooltip::after {
   content: " ";
   position: absolute;
@@ -968,10 +959,7 @@ body[data-screen="launch"].preset-icons-hidden #playerCountPanel {
 
 .mediaButton:hover #settingsTooltip,
 .mediaButton:focus #settingsTooltip,
-.mediaButton:active #settingsTooltip,
-.mediaButton:hover #refreshTooltip,
-.mediaButton:focus #refreshTooltip,
-.mediaButton:active #refreshTooltip {
+.mediaButton:active #settingsTooltip {
   visibility: visible;
   opacity: 1;
   transition-delay: 0s;
@@ -996,27 +984,6 @@ body[data-screen="launch"].preset-icons-hidden #playerCountPanel {
   height: 44px;
 }
 
-.media-refresh-button {
-  width: 44px;
-  height: 44px;
-}
-
-.media-refresh-button:hover:not(:disabled) .icon-refresh-mask,
-.media-refresh-button:focus:not(:disabled) .icon-refresh-mask,
-.media-refresh-button:active:not(:disabled) .icon-refresh-mask {
-  transform: rotate(28deg) scale(1.22);
-  background-color: #7fdfff;
-}
-
-.media-refresh-button:disabled {
-  cursor: wait;
-}
-
-.media-refresh-button.is-refreshing .icon-refresh-mask {
-  animation: refresh-spin 0.85s linear infinite;
-  background-color: rgba(127, 223, 255, 0.92);
-}
-
 .bgm-media-button.is-muted .icon-audio-mask {
   background-color: rgba(255, 219, 219, 0.9);
 }
@@ -1037,12 +1004,6 @@ body[data-screen="launch"].preset-icons-hidden #playerCountPanel {
 .mediaURL:active .icon-discord-mask {
   transform: scale(1.35);
   background-color: #657ac4;
-}
-
-@keyframes refresh-spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 
 .start-launch-area {
