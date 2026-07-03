@@ -175,6 +175,7 @@ let isModpackUpdateApplyRunning = false;
 let modpackUpdateState = null;
 let pendingPresetSyncPreset = "";
 let isLauncherUpdateGateRunning = false;
+let isLauncherUpdateInstallRunning = false;
 let isBackgroundPresetPrefetchRunning = false;
 let activeBackgroundPresetCachePreset = "";
 let pendingBackgroundPresetCachePreset = "";
@@ -2006,26 +2007,51 @@ function updateLaunchButtonUi() {
   }
 
   const hasPendingModpackUpdate = Boolean(modpackUpdateState?.pending);
+  const hasLauncherUpdateReady = isLauncherUpdateReadyToInstall();
+  const isLauncherUpdateDownloading = isLauncherUpdateDownloadInProgress();
   const busy =
     isLaunchRequestPending ||
     isLauncherRunning ||
     isStartupModpackSyncRunning ||
     isPresetModpackSyncRunning ||
     isModpackUpdateApplyRunning ||
-    isLauncherUpdateGateRunning;
-  startLaunchButton.disabled = !authState.signedIn || busy;
-  startLaunchButton.textContent = isLauncherUpdateGateRunning
-    ? "\uC5C5\uB370\uC774\uD2B8 \uC911..."
-    : isModpackUpdateApplyRunning
-      ? "업데이트 중..."
-      : isStartupModpackSyncRunning
-        ? "확인 중..."
-      : isLaunchRequestPending || isLauncherRunning
-        ? "\uC2E4\uD589 \uC911..."
-        : hasPendingModpackUpdate
-          ? "업데이트"
-          : "\uAC8C\uC784 \uC2DC\uC791";
+    isLauncherUpdateInstallRunning ||
+    isLauncherUpdateGateRunning ||
+    isLauncherUpdateDownloading;
+  let label = "\uAC8C\uC784 \uC2DC\uC791";
+  if (isLauncherUpdateInstallRunning) {
+    label = "\uC5C5\uB370\uC774\uD2B8 \uC801\uC6A9 \uC911...";
+  } else if (isLauncherUpdateGateRunning) {
+    label = "\uC5C5\uB370\uC774\uD2B8 \uD655\uC778 \uC911...";
+  } else if (hasLauncherUpdateReady) {
+    label = "\uB7F0\uCC98 \uC5C5\uB370\uC774\uD2B8";
+  } else if (isLauncherUpdateDownloading) {
+    label = "\uC5C5\uB370\uC774\uD2B8 \uB2E4\uC6B4\uB85C\uB4DC";
+  } else if (isModpackUpdateApplyRunning) {
+    label = "업데이트 중...";
+  } else if (isStartupModpackSyncRunning) {
+    label = "확인 중...";
+  } else if (isLaunchRequestPending || isLauncherRunning) {
+    label = "\uC2E4\uD589 \uC911...";
+  } else if (hasPendingModpackUpdate) {
+    label = "업데이트";
+  }
+  startLaunchButton.disabled = busy || (!authState.signedIn && !hasLauncherUpdateReady);
+  startLaunchButton.textContent = label;
+  startLaunchButton.setAttribute("aria-label", label);
   startLaunchButton.setAttribute("aria-busy", busy ? "true" : "false");
+}
+
+function isLauncherUpdateReadyToInstall() {
+  return Boolean(updaterSnapshot?.enabled && updaterSnapshot?.downloaded);
+}
+
+function isLauncherUpdateDownloadInProgress() {
+  return Boolean(
+    updaterSnapshot?.enabled &&
+      !updaterSnapshot?.downloaded &&
+      (updaterSnapshot?.downloading || updaterSnapshot?.available)
+  );
 }
 
 function getSelectedProfileInfo() {
@@ -2421,7 +2447,43 @@ async function runPendingModpackUpdate() {
   }
 }
 
+async function installDownloadedLauncherUpdate() {
+  if (!window.launcherApi || typeof window.launcherApi.installUpdate !== "function") {
+    setLaunchStatus("런처 업데이트 기능을 사용할 수 없습니다.", true);
+    return false;
+  }
+
+  isLauncherUpdateInstallRunning = true;
+  updateLaunchButtonUi();
+  setLaunchStatus("런처 업데이트 적용을 위해 다시 시작합니다.");
+
+  try {
+    const result = await window.launcherApi.installUpdate();
+    if (!result?.ok) {
+      setLaunchStatus(asText(result?.error) || "런처 업데이트 적용에 실패했습니다.", true);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    setLaunchStatus(asText(error?.message) || "런처 업데이트 적용에 실패했습니다.", true);
+    return false;
+  } finally {
+    isLauncherUpdateInstallRunning = false;
+    updateLaunchButtonUi();
+  }
+}
+
 async function launchGame() {
+  if (isLauncherUpdateReadyToInstall()) {
+    await installDownloadedLauncherUpdate();
+    return;
+  }
+
+  if (isLauncherUpdateDownloadInProgress()) {
+    setLaunchStatus("런처 업데이트를 다운로드 중입니다. 완료되면 적용해 주세요.");
+    return;
+  }
+
   if (!authState.signedIn) {
     setLaunchStatus("Microsoft\uB85C \uBA3C\uC800 \uB85C\uADF8\uC778\uD574 \uC8FC\uC138\uC694.", true);
     switchScreen("login");
@@ -2923,8 +2985,19 @@ function applyWindowState(nextState) {
 }
 
 function updateUpdaterUi(state) {
+  const wasDownloaded = Boolean(updaterSnapshot?.downloaded);
   updaterSnapshot = state && typeof state === "object" ? { ...state } : null;
   updateSettingsAboutReleaseUi();
+  updateLaunchButtonUi();
+  if (
+    !wasDownloaded &&
+    updaterSnapshot?.downloaded &&
+    currentScreen === "launch" &&
+    !isLaunchRequestPending &&
+    !isLauncherRunning
+  ) {
+    setLaunchStatus("런처 업데이트가 준비되었습니다. 적용 후 게임을 시작할 수 있습니다.");
+  }
   if (!settingsUpdateSummary || !settingsUpdateIndicator || !settingsUpdateChannel || !settingsUpdateVersion || !settingsUpdateActionButton) {
     return;
   }
