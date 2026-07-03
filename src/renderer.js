@@ -1255,6 +1255,7 @@ function localizeStatusMessage(message) {
     "Launch request accepted. Waiting for Minecraft process...": "\uC2E4\uD589 \uC694\uCCAD \uC644\uB8CC. \uB9C8\uC778\uD06C\uB798\uD504\uD2B8 \uD504\uB85C\uC138\uC2A4 \uC2DC\uC791 \uB300\uAE30 \uC911...",
     "Validating Microsoft session...": "Microsoft \uC138\uC158 \uAC80\uC99D \uC911...",
     "Opening Microsoft login window...": "Microsoft \uB85C\uADF8\uC778 \uCC3D \uC5EC\uB294 \uC911...",
+    "Microsoft session expired. Please sign in again.": "Microsoft \uC138\uC158\uC774 \uB9CC\uB8CC\uB418\uC5C8\uC2B5\uB2C8\uB2E4. \uB2E4\uC2DC \uB85C\uADF8\uC778\uD574 \uC8FC\uC138\uC694.",
     "Downloading Java runtime...": "Java \uB7F0\uD0C0\uC784 \uB2E4\uC6B4\uB85C\uB4DC \uC911...",
     "Extracting Java runtime...": "Java \uB7F0\uD0C0\uC784 \uCD94\uCD9C \uC911...",
     "Using system Java runtime from PATH.": "PATH\uC5D0 \uB4F1\uB85D\uB41C \uC2DC\uC2A4\uD15C Java \uB7F0\uD0C0\uC784 \uC0AC\uC6A9 \uC911.",
@@ -2487,6 +2488,16 @@ async function launchGame() {
             ? { ...result.modpackUpdate, pending: true }
             : { ok: true, pending: true };
         updateLaunchButtonUi();
+      }
+      if (result?.code === "auth-session-expired") {
+        authState = {
+          ...authState,
+          ...(result?.status && typeof result.status === "object" ? result.status : {})
+        };
+        updateAccountUi();
+        if (!authState.signedIn) {
+          switchScreen("login");
+        }
       }
       setLaunchStatus(localizeStatusMessage(result?.error || "Minecraft launch failed."), true);
       return;

@@ -4846,6 +4846,11 @@ function formatMicrosoftAuthError(error) {
   return message || "Unknown error";
 }
 
+function isMicrosoftRefreshSessionExpiredError(error) {
+  const message = formatMicrosoftAuthError(error).toLowerCase();
+  return message.includes("microsoft oauth token refresh failed") && message.includes("invalid_grant");
+}
+
 function readFirstConfiguredEnvValue(keys) {
   if (!Array.isArray(keys)) {
     return "";
@@ -6032,7 +6037,25 @@ async function refreshMicrosoftAuthorization(withLogs) {
   if (withLogs) {
     sendLog({ level: "auth", message: "Refreshing Microsoft session..." });
   }
-  const oauthToken = await refreshMinecraftLauncherOAuthToken(savedRefreshToken);
+  let oauthToken;
+  try {
+    oauthToken = await refreshMinecraftLauncherOAuthToken(savedRefreshToken);
+  } catch (error) {
+    if (isMicrosoftRefreshSessionExpiredError(error)) {
+      const expiredAccountName = asTrimmedText(microsoftAccount?.name) || "Unknown";
+      clearMicrosoftAuthCache({ allAccounts: false });
+      microsoftAccount = readMicrosoftAuthCache();
+      sendMicrosoftAuthState();
+      sendLog({
+        level: "warn",
+        message: `Microsoft session expired. Removed saved account: ${expiredAccountName}`
+      });
+      const expiredError = new Error("Microsoft session expired. Please sign in again.");
+      expiredError.code = "auth-session-expired";
+      throw expiredError;
+    }
+    throw error;
+  }
   const minecraftSession = await authenticateMinecraftLauncherSession({
     microsoftAccessToken: oauthToken.access_token,
     sessionId: null
@@ -6949,7 +6972,12 @@ ipcMain.handle("launcher:launch", async (_, payload) => {
     } catch (error) {
       const message = formatMicrosoftAuthError(error);
       sendLog({ level: "error", message: `Microsoft auth error: ${message}` });
-      return { ok: false, error: `Microsoft auth failed: ${message}` };
+      return {
+        ok: false,
+        code: error?.code || "auth-failed",
+        error: error?.code === "auth-session-expired" ? message : `Microsoft auth failed: ${message}`,
+        status: getMicrosoftStatus()
+      };
     }
 
     const modpackUpdateCheck = await runModpackUpdateCheckFromPayload({
