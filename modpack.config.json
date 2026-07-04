@@ -10,7 +10,7 @@
   "news": {
     "url": "https://raw.githubusercontent.com/kimibi606/ExamplePack/main/launcher-news.json",
     "itemsPath": "items",
-    "refreshMs": 30000,
+    "refreshMs": 15000,
     "maxItems": 8
   },
   "github": {

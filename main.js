@@ -81,7 +81,7 @@ const FIXED_MOD_LOADER = "fabric";
 const FIXED_JAVA_MAJOR_VERSION = 21;
 const FIXED_JAVA_REQUIREMENT_LABEL = `Java ${FIXED_JAVA_MAJOR_VERSION}`;
 const WINDOWS_JAVA_RUNTIME_URL = `https://api.adoptium.net/v3/binary/latest/${FIXED_JAVA_MAJOR_VERSION}/ga/windows/x64/jre/hotspot/normal/eclipse`;
-const APP_UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
+const APP_UPDATE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
 const APP_ICON_PATH = path.join(
   __dirname,
   "src",
@@ -94,7 +94,7 @@ const ZIP_EOCD_MIN_SIZE = 22;
 const ZIP_EOCD_MAX_COMMENT_LENGTH = 0xffff;
 const ZIP_EOCD_SCAN_PADDING_BYTES = 1024;
 const SERVER_STATUS_TIMEOUT_MS = 7000;
-const NEWS_REFRESH_DEFAULT_MS = 60000;
+const NEWS_REFRESH_DEFAULT_MS = 15000;
 const NEWS_REFRESH_MIN_MS = 5000;
 const NEWS_REFRESH_MAX_MS = 30 * 60 * 1000;
 const NEWS_TIMEOUT_DEFAULT_MS = 7000;

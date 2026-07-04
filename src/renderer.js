@@ -13,11 +13,11 @@ const STARTUP_FINALIZING_PROGRESS = 96;
 const STARTUP_COMPLETE_PROGRESS = 100;
 const LAUNCH_LOG_CAPTURE_MS = 45000;
 const LAUNCH_START_TIMEOUT_MS = 20000;
-const PLAYER_COUNT_REFRESH_MS = 30000;
-const NEWS_REFRESH_DEFAULT_MS = 60000;
+const PLAYER_COUNT_REFRESH_MS = 15000;
+const MODPACK_UPDATE_REFRESH_MS = 60000;
+const NEWS_REFRESH_DEFAULT_MS = 15000;
 const NEWS_REFRESH_MIN_MS = 5000;
 const NEWS_REFRESH_MAX_MS = 30 * 60 * 1000;
-const MANUAL_REFRESH_SPIN_MIN_MS = 850;
 const PRESET_TRANSITION_FADE_MS = 980;
 const PRESET_ICON_FADE_MS = 640;
 const PRESET_TRANSITION_SETTLE_MS = 120;
@@ -83,7 +83,6 @@ const playerCountValue = document.getElementById("playerCountValue");
 const playerCountTooltip = document.getElementById("playerCountTooltip");
 const discordButton = document.getElementById("discordButton");
 const settingsButton = document.getElementById("settingsButton");
-const manualRefreshButton = document.getElementById("manualRefreshButton");
 const bgmToggleButton = document.getElementById("bgmToggleButton");
 const bgmVolumeSlider = document.getElementById("bgmVolumeSlider");
 const bgmVolumeValue = document.getElementById("bgmVolumeValue");
@@ -190,12 +189,13 @@ let lastAccountModelKey = "";
 let newsRefreshMs = NEWS_REFRESH_DEFAULT_MS;
 let newsPollTimer = null;
 let isNewsRequestPending = false;
-let isManualRefreshRunning = false;
 let currentNewsItems = [];
 let lastRenderedNewsSignature = "";
 let isNewsPanelExpanded = false;
 let playerCountPollTimer = null;
 let isPlayerCountRequestPending = false;
+let modpackUpdatePollTimer = null;
+let isModpackUpdateCheckRunning = false;
 let presetTransitionTimeoutId = null;
 let presetTransitionSequenceId = 0;
 let updaterSnapshot = null;
@@ -792,7 +792,7 @@ function getAboutReleaseNoteItems() {
     if (githubReleaseSnapshot?.ok) {
       return parseGitHubReleaseNotes(githubReleaseSnapshot.body, githubReleaseSnapshot.publishedAt);
     }
-    return [];
+    return currentNewsItems;
   }
   return currentNewsItems;
 }
@@ -893,6 +893,7 @@ async function refreshGitHubReleaseInfo(options = {}) {
     return false;
   }
   const forceRefresh = Boolean(options?.forceRefresh);
+  const allowFallback = Boolean(options?.allowFallback);
   if (isGitHubReleaseRequestPending && !forceRefresh) {
     return true;
   }
@@ -901,7 +902,7 @@ async function refreshGitHubReleaseInfo(options = {}) {
   try {
     const snapshot = await window.launcherApi.getGitHubRelease({ forceRefresh });
     applyGitHubReleaseUi(snapshot);
-    return !snapshot || snapshot.ok !== false;
+    return allowFallback || !snapshot || snapshot.ok !== false;
   } catch (error) {
     if (!githubReleaseSnapshot) {
       applyGitHubReleaseUi({
@@ -910,7 +911,7 @@ async function refreshGitHubReleaseInfo(options = {}) {
         error: asText(error?.message) || "Failed to load GitHub release."
       });
     }
-    return false;
+    return allowFallback;
   } finally {
     isGitHubReleaseRequestPending = false;
   }
@@ -1225,101 +1226,80 @@ function stopPlayerCountPolling() {
   playerCountPollTimer = null;
 }
 
-async function refreshModpackUpdateStatusFromButton() {
+function canRunBackgroundModpackUpdateCheck() {
+  return !(
+    isStartupModpackSyncRunning ||
+    isPresetModpackSyncRunning ||
+    isModpackUpdateApplyRunning ||
+    isLaunchRequestPending ||
+    isLauncherRunning ||
+    isLauncherUpdateGateRunning
+  );
+}
+
+async function refreshModpackUpdateStatus(options = {}) {
   if (!window.launcherApi || typeof window.launcherApi.checkModpackUpdate !== "function") {
     return false;
   }
+  if (isModpackUpdateCheckRunning) {
+    return true;
+  }
 
+  const silent = Boolean(options?.silent);
   const payload = buildModpackSyncPayload();
   if (!payload.minecraftDirectory) {
-    setLaunchStatus("Minecraft 폴더가 설정되지 않아 모드팩 상태를 확인할 수 없습니다.", true);
-    return false;
-  }
-
-  const result = await window.launcherApi.checkModpackUpdate(payload);
-  if (!result?.ok) {
-    setLaunchStatus(localizeStatusMessage(result?.error || "Modpack update check failed."), true);
-    return false;
-  }
-
-  modpackUpdateState = result && typeof result === "object" ? { ...result } : null;
-  updateLaunchButtonUi();
-  if (result.pending) {
-    setLaunchStatus("모드팩 업데이트가 있습니다. 업데이트 버튼을 눌러 적용하세요.");
-  }
-  return true;
-}
-
-async function refreshLauncherUpdateStatusFromButton() {
-  if (!window.launcherApi || typeof window.launcherApi.checkForUpdates !== "function") {
-    return false;
-  }
-
-  const result = await window.launcherApi.checkForUpdates();
-  if (!result?.ok) {
-    const message = asText(result?.error);
-    if (message === "Auto updater is disabled in development mode.") {
-      return true;
+    if (!silent) {
+      setLaunchStatus("Minecraft 폴더가 설정되지 않아 모드팩 상태를 확인할 수 없습니다.", true);
     }
-    setLaunchStatus(localizeStatusMessage(message || "Launcher update check failed."), true);
     return false;
   }
 
-  if (window.launcherApi && typeof window.launcherApi.getUpdaterState === "function") {
-    const state = await window.launcherApi.getUpdaterState().catch(() => null);
-    if (state) {
-      updateUpdaterUi(state);
+  isModpackUpdateCheckRunning = true;
+  try {
+    const result = await window.launcherApi.checkModpackUpdate(payload);
+    if (!result?.ok) {
+      if (!silent) {
+        setLaunchStatus(localizeStatusMessage(result?.error || "Modpack update check failed."), true);
+      }
+      return false;
     }
+
+    const wasPending = Boolean(modpackUpdateState?.pending);
+    modpackUpdateState = result && typeof result === "object" ? { ...result } : null;
+    updateLaunchButtonUi();
+    if (result.pending) {
+      setLaunchStatus("모드팩 업데이트가 있습니다. 업데이트 버튼을 눌러 적용하세요.");
+    } else if (wasPending && !silent) {
+      setLaunchStatus("모드팩이 최신 상태입니다.");
+    }
+    return true;
+  } finally {
+    isModpackUpdateCheckRunning = false;
   }
-  return true;
 }
 
-function buildManualRefreshTasks() {
-  return [
-    { label: "뉴스", promise: refreshLauncherNews({ forceRefresh: true, forceRender: true }) },
-    { label: "업데이트 노트", promise: refreshGitHubReleaseInfo({ forceRefresh: true }) },
-    { label: "모드팩 상태", promise: refreshModpackUpdateStatusFromButton() },
-    { label: "런처 상태", promise: refreshLauncherUpdateStatusFromButton() },
-    { label: "접속 인원", promise: refreshPlayerCount() }
-  ];
+async function refreshModpackUpdateStatusInBackground() {
+  if (!canRunBackgroundModpackUpdateCheck()) {
+    return false;
+  }
+  return refreshModpackUpdateStatus({ silent: true });
 }
 
-function getFailedManualRefreshLabels(tasks, results) {
-  return results
-    .map((result, index) => (result.status === "rejected" || result.value === false ? tasks[index]?.label || "" : ""))
-    .filter(Boolean);
+function startModpackUpdatePolling() {
+  if (modpackUpdatePollTimer !== null) {
+    window.clearInterval(modpackUpdatePollTimer);
+  }
+  modpackUpdatePollTimer = window.setInterval(() => {
+    void refreshModpackUpdateStatusInBackground();
+  }, MODPACK_UPDATE_REFRESH_MS);
 }
 
-async function refreshLauncherDataFromButton() {
-  if (!manualRefreshButton || isManualRefreshRunning) {
+function stopModpackUpdatePolling() {
+  if (modpackUpdatePollTimer === null) {
     return;
   }
-
-  isManualRefreshRunning = true;
-  manualRefreshButton.disabled = true;
-  manualRefreshButton.classList.add("is-refreshing");
-  manualRefreshButton.setAttribute("aria-busy", "true");
-  const refreshSpinPromise = delay(MANUAL_REFRESH_SPIN_MIN_MS);
-  setLaunchStatus("런처 정보를 새로고침하는 중...");
-
-  try {
-    const tasks = buildManualRefreshTasks();
-    const results = await Promise.allSettled(tasks.map((task) => task.promise));
-    const failedLabels = getFailedManualRefreshLabels(tasks, results);
-
-    if (failedLabels.length > 0) {
-      setLaunchStatus(`새로고침 실패: ${failedLabels.join(", ")}`, true);
-    } else if (!modpackUpdateState?.pending && !isLauncherUpdateReadyToInstall()) {
-      setLaunchStatus("뉴스, 업데이트 상태, 접속 인원을 새로고침했습니다.");
-    }
-  } finally {
-    await refreshSpinPromise;
-    manualRefreshButton.classList.remove("is-refreshing");
-    manualRefreshButton.removeAttribute("aria-busy");
-    manualRefreshButton.disabled = false;
-    isManualRefreshRunning = false;
-    updateLaunchButtonUi();
-  }
+  window.clearInterval(modpackUpdatePollTimer);
+  modpackUpdatePollTimer = null;
 }
 
 function parseModpackProgressMessage(message) {
@@ -3335,10 +3315,6 @@ bindClick(newsPanelExpandButton, () => {
   applyNewsPanelExpandedState(!isNewsPanelExpanded);
 });
 
-bindClick(manualRefreshButton, () => {
-  void refreshLauncherDataFromButton();
-});
-
 bindClick(accountModelPanel, () => {
   if (!authState.signedIn) {
     return;
@@ -3712,6 +3688,7 @@ window.addEventListener("beforeunload", () => {
   resetPresetTransitionEffects();
   stopNewsPolling();
   stopPlayerCountPolling();
+  stopModpackUpdatePolling();
 });
 
 Promise.resolve()
@@ -3738,6 +3715,7 @@ Promise.resolve()
     await ensureLatestLauncherOnStartup();
     startNewsPolling();
     startPlayerCountPolling();
+    startModpackUpdatePolling();
     await runStartupModpackSync();
   })
   .then(async () => {

@@ -915,14 +915,6 @@ body[data-screen="launch"].preset-icons-hidden #playerCountPanel {
   height: 28px;
 }
 
-.icon-refresh-mask {
-  -webkit-mask-image: url("./assets/icons/refresh.png");
-  mask-image: url("./assets/icons/refresh.png");
-  width: 24px;
-  height: 24px;
-  transform-origin: 50% 50%;
-}
-
 .icon-discord-mask {
   -webkit-mask-image: url("./assets/icons/discord.svg");
   mask-image: url("./assets/icons/discord.svg");
@@ -931,7 +923,6 @@ body[data-screen="launch"].preset-icons-hidden #playerCountPanel {
 }
 
 #settingsTooltip,
-#refreshTooltip,
 #discordTooltip {
   visibility: hidden;
   opacity: 0;
@@ -957,7 +948,6 @@ body[data-screen="launch"].preset-icons-hidden #playerCountPanel {
 }
 
 #settingsTooltip::after,
-#refreshTooltip::after,
 #discordTooltip::after {
   content: " ";
   position: absolute;
@@ -971,10 +961,7 @@ body[data-screen="launch"].preset-icons-hidden #playerCountPanel {
 
 .mediaButton:hover #settingsTooltip,
 .mediaButton:focus #settingsTooltip,
-.mediaButton:active #settingsTooltip,
-.mediaButton:hover #refreshTooltip,
-.mediaButton:focus #refreshTooltip,
-.mediaButton:active #refreshTooltip {
+.mediaButton:active #settingsTooltip {
   visibility: visible;
   opacity: 1;
   transition-delay: 0s;
@@ -997,34 +984,6 @@ body[data-screen="launch"].preset-icons-hidden #playerCountPanel {
 .bgm-media-button {
   width: 44px;
   height: 44px;
-}
-
-.refresh-media-button {
-  width: 75px;
-  height: 54px;
-}
-
-.refresh-media-button:hover .icon-refresh-mask,
-.refresh-media-button:focus .icon-refresh-mask {
-  background-color: rgba(223, 248, 255, 0.95);
-}
-
-.refresh-media-button:active .icon-refresh-mask {
-  background-color: #b9ecff;
-}
-
-.refresh-media-button.is-refreshing .icon-refresh-mask {
-  animation: refresh-spin 0.85s linear infinite;
-  background-color: #7fdfff;
-}
-
-@keyframes refresh-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(1turn);
-  }
 }
 
 .bgm-media-button.is-muted .icon-audio-mask {
