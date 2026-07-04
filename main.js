@@ -2,6 +2,7 @@ const fs = require("fs");
 const crypto = require("crypto");
 const os = require("os");
 const path = require("path");
+const net = require("net");
 const { spawn } = require("child_process");
 const { Readable } = require("stream");
 const { pipeline } = require("stream/promises");
@@ -78,6 +79,7 @@ const LEGACY_SESSION_DATA_ENTRY_NAMES = [
 const FIXED_MINECRAFT_VERSION = "1.21.1";
 const FIXED_MOD_LOADER = "fabric";
 const FIXED_JAVA_MAJOR_VERSION = 21;
+const FIXED_JAVA_REQUIREMENT_LABEL = `Java ${FIXED_JAVA_MAJOR_VERSION}`;
 const WINDOWS_JAVA_RUNTIME_URL = `https://api.adoptium.net/v3/binary/latest/${FIXED_JAVA_MAJOR_VERSION}/ga/windows/x64/jre/hotspot/normal/eclipse`;
 const APP_UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 const APP_ICON_PATH = path.join(
@@ -1249,9 +1251,16 @@ function normalizeNewsDateText(value) {
   return parsed.toISOString().slice(0, 10);
 }
 
+function normalizeNewsTextValue(value) {
+  if (Array.isArray(value)) {
+    return value.map((line) => asTrimmedText(line)).filter(Boolean).join("\n");
+  }
+  return asTrimmedText(value);
+}
+
 function normalizeLauncherNewsItem(rawItem) {
   if (typeof rawItem === "string") {
-    const text = asTrimmedText(rawItem);
+    const text = normalizeNewsTextValue(rawItem);
     if (!text) {
       return null;
     }
@@ -1268,14 +1277,17 @@ function normalizeLauncherNewsItem(rawItem) {
 
   const type = asTrimmedText(rawItem.type || rawItem.category || rawItem.tag || rawItem.kind) || "\uC548\uB0B4";
   const primaryText =
-    asTrimmedText(rawItem.text) ||
-    asTrimmedText(rawItem.message) ||
-    asTrimmedText(rawItem.content) ||
-    asTrimmedText(rawItem.body) ||
-    asTrimmedText(rawItem.note);
+    normalizeNewsTextValue(rawItem.text) ||
+    normalizeNewsTextValue(rawItem.message) ||
+    normalizeNewsTextValue(rawItem.content) ||
+    normalizeNewsTextValue(rawItem.body) ||
+    normalizeNewsTextValue(rawItem.note);
   const titleText = asTrimmedText(rawItem.title);
-  const summaryText = asTrimmedText(rawItem.summary || rawItem.description || rawItem.details);
-  const text = primaryText || (titleText && summaryText ? `${titleText} - ${summaryText}` : titleText);
+  const summaryText =
+    normalizeNewsTextValue(rawItem.summary) ||
+    normalizeNewsTextValue(rawItem.description) ||
+    normalizeNewsTextValue(rawItem.details);
+  const text = primaryText || (titleText && summaryText ? `${titleText}\n${summaryText}` : titleText);
   if (!text) {
     return null;
   }
@@ -1380,15 +1392,19 @@ function resolveLauncherNewsSource(rawValue, configPath = "") {
   };
 }
 
-function appendNewsCacheBuster(url) {
+function appendRequestCacheBuster(url, key = "_ts") {
   try {
     const parsed = new URL(url);
-    parsed.searchParams.set("_newsTs", String(Date.now()));
+    parsed.searchParams.set(key, `${Date.now()}-${process.hrtime.bigint().toString()}`);
     return parsed.toString();
   } catch {
     const separator = String(url).includes("?") ? "&" : "?";
-    return `${url}${separator}_newsTs=${Date.now()}`;
+    return `${url}${separator}${encodeURIComponent(key)}=${Date.now()}`;
   }
+}
+
+function appendNewsCacheBuster(url) {
+  return appendRequestCacheBuster(url, "_newsTs");
 }
 
 function readLauncherNewsConfig() {
@@ -1512,9 +1528,10 @@ function normalizeGitHubReleaseAssetList(rawAssets) {
   return assets;
 }
 
-async function getLatestGitHubReleaseSnapshot() {
+async function getLatestGitHubReleaseSnapshot(options = {}) {
   const github = readGitHubReleaseConfig();
   const updatedAt = new Date().toISOString();
+  const forceRefresh = Boolean(options?.force || options?.forceRefresh);
 
   if (!github.configured) {
     return {
@@ -1537,13 +1554,22 @@ async function getLatestGitHubReleaseSnapshot() {
   }
 
   const repositoryUrl = `https://github.com/${github.owner}/${github.repo}`;
-  const apiUrl = `${github.apiBaseUrl}/repos/${encodeURIComponent(github.owner)}/${encodeURIComponent(github.repo)}/releases/latest`;
+  const baseApiUrl = `${github.apiBaseUrl}/repos/${encodeURIComponent(github.owner)}/${encodeURIComponent(github.repo)}/releases/latest`;
+  const apiUrl = forceRefresh ? appendRequestCacheBuster(baseApiUrl, "_releaseTs") : baseApiUrl;
 
   try {
     const response = await fetchWithTimeout(
       apiUrl,
       {
-        headers: buildHttpHeaders(apiUrl)
+        headers: buildHttpHeaders(baseApiUrl, {
+          ...(forceRefresh
+            ? {
+                "Cache-Control": "no-store, no-cache, max-age=0",
+                Pragma: "no-cache",
+                Expires: "0"
+              }
+            : {})
+        })
       },
       github.timeoutMs
     );
@@ -1815,19 +1841,21 @@ function parseModpackManifest(manifestSource) {
   };
 }
 
-async function readLauncherNewsPayload(source, timeoutMs = NEWS_TIMEOUT_DEFAULT_MS) {
+async function readLauncherNewsPayload(source, timeoutMs = NEWS_TIMEOUT_DEFAULT_MS, options = {}) {
   if (!source || !source.kind || !source.value) {
     throw new Error("News source is not configured.");
   }
 
   if (source.kind === "http") {
+    const forceRefresh = Boolean(options?.force || options?.forceRefresh);
     const requestUrl = appendNewsCacheBuster(source.value);
     const response = await fetchWithTimeout(
       requestUrl,
       {
         headers: buildHttpHeaders(source.value, {
-          "Cache-Control": "no-cache",
-          Pragma: "no-cache"
+          "Cache-Control": forceRefresh ? "no-store, no-cache, max-age=0" : "no-cache",
+          Pragma: "no-cache",
+          ...(forceRefresh ? { Expires: "0" } : {})
         })
       },
       timeoutMs
@@ -1851,8 +1879,9 @@ async function readLauncherNewsPayload(source, timeoutMs = NEWS_TIMEOUT_DEFAULT_
   }
 }
 
-async function getLauncherNewsSnapshot() {
+async function getLauncherNewsSnapshot(options = {}) {
   const config = readLauncherNewsConfig();
+  const forceRefresh = Boolean(options?.force || options?.forceRefresh);
   const hasSource = Boolean(config?.source?.value);
   const hasFallbackSource = Boolean(config?.fallbackSource?.value);
   const fallbackItems = normalizeLauncherNewsItems(config.inlineItems, config.maxItems);
@@ -1862,7 +1891,7 @@ async function getLauncherNewsSnapshot() {
 
   if (hasSource) {
     try {
-      const payload = await readLauncherNewsPayload(config.source, config.timeoutMs);
+      const payload = await readLauncherNewsPayload(config.source, config.timeoutMs, { forceRefresh });
       const pickedItems = pickLauncherNewsItemsArray(payload, config.itemsPath);
       items = normalizeLauncherNewsItems(pickedItems, config.maxItems);
       sourceType = config.source.kind;
@@ -1871,7 +1900,7 @@ async function getLauncherNewsSnapshot() {
       sourceType = config.source.kind;
       if (hasFallbackSource) {
         try {
-          const payload = await readLauncherNewsPayload(config.fallbackSource, config.timeoutMs);
+          const payload = await readLauncherNewsPayload(config.fallbackSource, config.timeoutMs, { forceRefresh });
           const pickedItems = pickLauncherNewsItemsArray(payload, config.itemsPath);
           items = normalizeLauncherNewsItems(pickedItems, config.maxItems);
           sourceType = config.fallbackSource.kind;
@@ -2083,6 +2112,183 @@ function hasMeaningfulPlayerCapacity(serverStatus) {
   return playersOnline !== null && playersMax !== null && playersMax > 0;
 }
 
+function writeMinecraftVarInt(value) {
+  const bytes = [];
+  let current = Number(value) >>> 0;
+  do {
+    let temp = current & 0x7f;
+    current >>>= 7;
+    if (current !== 0) {
+      temp |= 0x80;
+    }
+    bytes.push(temp);
+  } while (current !== 0);
+  return Buffer.from(bytes);
+}
+
+function readMinecraftVarInt(buffer, offset = 0) {
+  let value = 0;
+  let position = 0;
+
+  for (let index = offset; index < buffer.length; index += 1) {
+    const current = buffer[index];
+    value |= (current & 0x7f) << (7 * position);
+    position += 1;
+
+    if ((current & 0x80) !== 0x80) {
+      return {
+        value,
+        size: index - offset + 1
+      };
+    }
+
+    if (position > 5) {
+      throw new Error("Minecraft status response contained an invalid VarInt.");
+    }
+  }
+
+  return null;
+}
+
+function writeMinecraftString(value) {
+  const content = Buffer.from(asTrimmedText(value), "utf8");
+  return Buffer.concat([writeMinecraftVarInt(content.length), content]);
+}
+
+function buildMinecraftStatusPacket(packetId, payload = Buffer.alloc(0)) {
+  const body = Buffer.concat([writeMinecraftVarInt(packetId), payload]);
+  return Buffer.concat([writeMinecraftVarInt(body.length), body]);
+}
+
+function buildMinecraftStatusHandshake(host, port) {
+  const payload = Buffer.concat([
+    writeMinecraftVarInt(767),
+    writeMinecraftString(host),
+    Buffer.from([(port >> 8) & 0xff, port & 0xff]),
+    writeMinecraftVarInt(1)
+  ]);
+  return buildMinecraftStatusPacket(0, payload);
+}
+
+function parseMinecraftStatusResponse(buffer) {
+  const packetLength = readMinecraftVarInt(buffer, 0);
+  if (!packetLength || buffer.length < packetLength.size + packetLength.value) {
+    return null;
+  }
+
+  let offset = packetLength.size;
+  const packetId = readMinecraftVarInt(buffer, offset);
+  if (!packetId) {
+    return null;
+  }
+  offset += packetId.size;
+
+  if (packetId.value !== 0) {
+    throw new Error(`Unexpected Minecraft status packet id: ${packetId.value}`);
+  }
+
+  const jsonLength = readMinecraftVarInt(buffer, offset);
+  if (!jsonLength) {
+    return null;
+  }
+  offset += jsonLength.size;
+
+  const jsonEnd = offset + jsonLength.value;
+  if (buffer.length < jsonEnd) {
+    return null;
+  }
+
+  return JSON.parse(buffer.subarray(offset, jsonEnd).toString("utf8"));
+}
+
+function normalizeDirectMinecraftPlayerNames(playersPayload) {
+  const sample = Array.isArray(playersPayload?.sample) ? playersPayload.sample : [];
+  return extractPlayerNamesFromPlayersPayload({
+    sample: sample.map((entry) => ({
+      name: entry?.name,
+      id: entry?.id
+    }))
+  });
+}
+
+async function queryMinecraftServerStatusDirect(host, port) {
+  const target = `${host}:${port}`;
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host, port });
+    const chunks = [];
+    let finished = false;
+
+    const finish = (result) => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      clearTimeout(timeout);
+      socket.destroy();
+      resolve(result);
+    };
+
+    const timeout = setTimeout(() => {
+      finish({
+        address: target,
+        online: null,
+        playersOnline: null,
+        playersMax: null,
+        playerNames: [],
+        error: "Minecraft status ping timed out.",
+        source: "direct"
+      });
+    }, SERVER_STATUS_TIMEOUT_MS);
+
+    socket.on("connect", () => {
+      socket.write(buildMinecraftStatusHandshake(host, port));
+      socket.write(buildMinecraftStatusPacket(0));
+    });
+
+    socket.on("data", (chunk) => {
+      chunks.push(chunk);
+      const buffer = Buffer.concat(chunks);
+      try {
+        const parsed = parseMinecraftStatusResponse(buffer);
+        if (!parsed) {
+          return;
+        }
+        finish({
+          address: target,
+          online: true,
+          playersOnline: asNullableNonNegativeInteger(parsed?.players?.online),
+          playersMax: asNullableNonNegativeInteger(parsed?.players?.max),
+          playerNames: normalizeDirectMinecraftPlayerNames(parsed?.players),
+          error: "",
+          source: "direct"
+        });
+      } catch (error) {
+        finish({
+          address: target,
+          online: null,
+          playersOnline: null,
+          playersMax: null,
+          playerNames: [],
+          error: String(error?.message || error),
+          source: "direct"
+        });
+      }
+    });
+
+    socket.on("error", (error) => {
+      finish({
+        address: target,
+        online: null,
+        playersOnline: null,
+        playersMax: null,
+        playerNames: [],
+        error: String(error?.message || error),
+        source: "direct"
+      });
+    });
+  });
+}
+
 async function queryMinecraftServerStatusFromMcStatus(host, port) {
   const target = `${host}:${port}`;
   const url = `https://api.mcstatus.io/v2/status/java/${encodeURIComponent(target)}`;
@@ -2148,6 +2354,24 @@ async function queryMinecraftServerStatusFromMcsrvStat(host, port) {
 }
 
 async function queryMinecraftServerStatus(host, port) {
+  const directResult = await queryMinecraftServerStatusDirect(host, port);
+  if (directResult.online === true && hasMeaningfulPlayerCapacity(directResult)) {
+    const needsFallbackNames = !Array.isArray(directResult.playerNames) || directResult.playerNames.length === 0;
+    if (!needsFallbackNames) {
+      return directResult;
+    }
+
+    const fallbackResult = await queryMinecraftServerStatusFromMcsrvStat(host, port);
+    return {
+      ...directResult,
+      playerNames:
+        Array.isArray(fallbackResult.playerNames) && fallbackResult.playerNames.length > 0
+          ? fallbackResult.playerNames
+          : directResult.playerNames,
+      source: fallbackResult.online === true ? `${directResult.source}+${fallbackResult.source}` : directResult.source
+    };
+  }
+
   const primaryResult = await queryMinecraftServerStatusFromMcStatus(host, port);
   const shouldUseFallback =
     primaryResult.online !== true ||
@@ -2189,19 +2413,30 @@ async function queryMinecraftServerStatus(host, port) {
 
   const mergedError = [primaryResult.error, fallbackResult.error].filter(Boolean).join(" | ");
   return {
-    address: primaryResult.address,
-    online: primaryResult.online ?? fallbackResult.online ?? null,
+    address: directResult.address || primaryResult.address,
+    online: directResult.online ?? primaryResult.online ?? fallbackResult.online ?? null,
     playersOnline:
-      primaryResult.playersOnline !== null ? primaryResult.playersOnline : fallbackResult.playersOnline,
-    playersMax: primaryResult.playersMax !== null ? primaryResult.playersMax : fallbackResult.playersMax,
+      directResult.playersOnline !== null
+        ? directResult.playersOnline
+        : primaryResult.playersOnline !== null
+          ? primaryResult.playersOnline
+          : fallbackResult.playersOnline,
+    playersMax:
+      directResult.playersMax !== null
+        ? directResult.playersMax
+        : primaryResult.playersMax !== null
+          ? primaryResult.playersMax
+          : fallbackResult.playersMax,
     playerNames:
-      Array.isArray(primaryResult.playerNames) && primaryResult.playerNames.length > 0
+      Array.isArray(directResult.playerNames) && directResult.playerNames.length > 0
+        ? directResult.playerNames
+        : Array.isArray(primaryResult.playerNames) && primaryResult.playerNames.length > 0
         ? primaryResult.playerNames
         : Array.isArray(fallbackResult.playerNames)
           ? fallbackResult.playerNames
           : [],
-    error: mergedError,
-    source: primaryResult.source || fallbackResult.source || ""
+    error: [directResult.error, mergedError].filter(Boolean).join(" | "),
+    source: directResult.source || primaryResult.source || fallbackResult.source || ""
   };
 }
 
@@ -4191,6 +4426,25 @@ async function prepareRuntimeFromPayload(payload) {
       minecraftVersion: FIXED_MINECRAFT_VERSION,
       loader: FIXED_MOD_LOADER,
       javaPath: resolvedJavaPath
+    };
+  } catch (error) {
+    return { ok: false, error: String(error?.message || error) };
+  }
+}
+
+async function autoSelectJavaFromPayload(payload) {
+  const minecraftDirectory = asTrimmedText(payload?.minecraftDirectory || payload);
+  if (!minecraftDirectory) {
+    return { ok: false, error: "Minecraft directory is required." };
+  }
+
+  try {
+    const resolvedJavaPath = await ensureJavaRuntimeInDirectory(minecraftDirectory, "");
+    const settingsJavaPath = resolveJavaExecutableForSettings(resolvedJavaPath);
+    return {
+      ok: true,
+      javaPath: settingsJavaPath || resolvedJavaPath,
+      javaVersion: FIXED_JAVA_MAJOR_VERSION
     };
   } catch (error) {
     return { ok: false, error: String(error?.message || error) };
@@ -6261,6 +6515,68 @@ async function detectJavaMajorVersion(javaExecutable) {
   });
 }
 
+function isFixedJavaMajorVersion(major) {
+  return Number(major) === FIXED_JAVA_MAJOR_VERSION;
+}
+
+function resolveExecutableFromPath(commandName) {
+  const command = asTrimmedText(commandName);
+  if (!command) {
+    return "";
+  }
+  if (path.isAbsolute(command) && fs.existsSync(command)) {
+    return command;
+  }
+
+  const pathValue = process.env.PATH || "";
+  const directories = pathValue.split(path.delimiter).filter(Boolean);
+  const extensions =
+    process.platform === "win32"
+      ? (process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean)
+      : [""];
+  const commandExtension = path.extname(command);
+  const candidateNames =
+    process.platform === "win32" && !commandExtension
+      ? extensions.map((extension) => `${command}${extension.toLowerCase()}`)
+      : [command];
+
+  for (const directory of directories) {
+    for (const candidateName of candidateNames) {
+      const candidatePath = path.join(directory, candidateName);
+      if (fs.existsSync(candidatePath)) {
+        return candidatePath;
+      }
+    }
+  }
+
+  return "";
+}
+
+function preferJavawExecutable(javaExecutable) {
+  const candidate = asTrimmedText(javaExecutable);
+  if (process.platform !== "win32" || !candidate) {
+    return candidate;
+  }
+
+  const normalizedBaseName = path.basename(candidate).toLowerCase();
+  if (normalizedBaseName !== "java.exe") {
+    return candidate;
+  }
+
+  const javawCandidate = path.join(path.dirname(candidate), "javaw.exe");
+  return fs.existsSync(javawCandidate) ? javawCandidate : candidate;
+}
+
+function resolveJavaExecutableForSettings(javaExecutable) {
+  const candidate = asTrimmedText(javaExecutable);
+  if (!candidate) {
+    return "";
+  }
+
+  const resolved = path.isAbsolute(candidate) ? candidate : resolveExecutableFromPath(candidate);
+  return preferJavawExecutable(resolved || candidate);
+}
+
 async function findJavaHomeInDirectory(rootDirectory) {
   const queue = [rootDirectory];
 
@@ -6360,8 +6676,8 @@ async function installBundledWindowsJavaRuntime(minecraftDirectory) {
   }
 
   const major = await detectJavaMajorVersion(javaExecutable);
-  if (major < FIXED_JAVA_MAJOR_VERSION) {
-    throw new Error(`Installed Java runtime version is ${major || "unknown"}, but ${FIXED_JAVA_MAJOR_VERSION}+ is required.`);
+  if (!isFixedJavaMajorVersion(major)) {
+    throw new Error(`Installed Java runtime version is ${major || "unknown"}, but ${FIXED_JAVA_REQUIREMENT_LABEL} is required.`);
   }
 
   sendLog({
@@ -6375,7 +6691,7 @@ async function ensureJavaRuntimeInDirectory(minecraftDirectory, requestedJavaPat
   const explicitJavaPath = asTrimmedText(requestedJavaPath);
   if (explicitJavaPath) {
     const explicitMajor = await detectJavaMajorVersion(explicitJavaPath);
-    if (explicitMajor >= FIXED_JAVA_MAJOR_VERSION) {
+    if (isFixedJavaMajorVersion(explicitMajor)) {
       sendLog({
         level: "info",
         message: `Using configured Java runtime: ${explicitJavaPath}`
@@ -6384,36 +6700,46 @@ async function ensureJavaRuntimeInDirectory(minecraftDirectory, requestedJavaPat
     }
     sendLog({
       level: "info",
-      message: `Configured Java runtime could not be used (version: ${explicitMajor || "unknown"}). Trying automatic Java detection...`
+      message: `Configured Java runtime could not be used (version: ${explicitMajor || "unknown"}). ${FIXED_JAVA_REQUIREMENT_LABEL} is required. Trying automatic Java detection...`
     });
   }
 
   const bundledJava = getBundledJavaExecutableCandidates(minecraftDirectory).find((candidate) => fs.existsSync(candidate));
   if (bundledJava) {
     const bundledMajor = await detectJavaMajorVersion(bundledJava);
-    if (bundledMajor >= FIXED_JAVA_MAJOR_VERSION) {
+    if (isFixedJavaMajorVersion(bundledMajor)) {
       sendLog({
         level: "info",
         message: `Using bundled Java runtime: ${bundledJava}`
       });
       return bundledJava;
     }
+    sendLog({
+      level: "info",
+      message: `Bundled Java runtime could not be used (version: ${bundledMajor || "unknown"}). Reinstalling ${FIXED_JAVA_REQUIREMENT_LABEL} runtime...`
+    });
   }
 
   const systemJavaMajor = await detectJavaMajorVersion("java");
-  if (systemJavaMajor >= FIXED_JAVA_MAJOR_VERSION) {
+  if (isFixedJavaMajorVersion(systemJavaMajor)) {
     sendLog({
       level: "info",
       message: "Using system Java runtime from PATH."
     });
     return "java";
   }
+  if (systemJavaMajor) {
+    sendLog({
+      level: "info",
+      message: `System Java runtime from PATH could not be used (version: ${systemJavaMajor}). ${FIXED_JAVA_REQUIREMENT_LABEL} is required.`
+    });
+  }
 
   if (process.platform === "win32") {
     return installBundledWindowsJavaRuntime(minecraftDirectory);
   }
 
-  throw new Error(`Java ${FIXED_JAVA_MAJOR_VERSION}+ runtime is required, and automatic installation is not supported on this OS.`);
+  throw new Error(`${FIXED_JAVA_REQUIREMENT_LABEL} runtime is required, and automatic installation is not supported on this OS.`);
 }
 
 function isFixedFabricVersionId(versionId) {
@@ -6709,9 +7035,9 @@ ipcMain.handle("launcher:get-server-status", async () => {
   }
 });
 
-ipcMain.handle("launcher:get-news", async () => {
+ipcMain.handle("launcher:get-news", async (_event, payload = {}) => {
   try {
-    return await getLauncherNewsSnapshot();
+    return await getLauncherNewsSnapshot(payload);
   } catch (error) {
     return {
       ok: false,
@@ -6725,9 +7051,9 @@ ipcMain.handle("launcher:get-news", async () => {
   }
 });
 
-ipcMain.handle("launcher:get-github-release", async () => {
+ipcMain.handle("launcher:get-github-release", async (_event, payload = {}) => {
   try {
-    return await getLatestGitHubReleaseSnapshot();
+    return await getLatestGitHubReleaseSnapshot(payload);
   } catch (error) {
     return {
       ok: false,
@@ -6855,6 +7181,18 @@ ipcMain.handle("launcher:pick-java", async () => {
   }
 
   return result.filePaths[0];
+});
+
+ipcMain.handle("launcher:auto-select-java", async (_, payload) => {
+  const result = await autoSelectJavaFromPayload(payload);
+  if (!result.ok) {
+    sendLog({ level: "error", message: `Java auto selection failed: ${result.error}` });
+    return {
+      ok: false,
+      error: `Java auto selection failed: ${result.error}`
+    };
+  }
+  return result;
 });
 
 ipcMain.handle("launcher:load-profiles", async (_, payload) => {

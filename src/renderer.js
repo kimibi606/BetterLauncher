@@ -17,6 +17,7 @@ const PLAYER_COUNT_REFRESH_MS = 30000;
 const NEWS_REFRESH_DEFAULT_MS = 60000;
 const NEWS_REFRESH_MIN_MS = 5000;
 const NEWS_REFRESH_MAX_MS = 30 * 60 * 1000;
+const MANUAL_REFRESH_SPIN_MIN_MS = 850;
 const PRESET_TRANSITION_FADE_MS = 980;
 const PRESET_ICON_FADE_MS = 640;
 const PRESET_TRANSITION_SETTLE_MS = 120;
@@ -82,6 +83,7 @@ const playerCountValue = document.getElementById("playerCountValue");
 const playerCountTooltip = document.getElementById("playerCountTooltip");
 const discordButton = document.getElementById("discordButton");
 const settingsButton = document.getElementById("settingsButton");
+const manualRefreshButton = document.getElementById("manualRefreshButton");
 const bgmToggleButton = document.getElementById("bgmToggleButton");
 const bgmVolumeSlider = document.getElementById("bgmVolumeSlider");
 const bgmVolumeValue = document.getElementById("bgmVolumeValue");
@@ -101,6 +103,7 @@ const settingsMinecraftDirectoryInput = document.getElementById("settingsMinecra
 const settingsPickMinecraftDirectoryButton = document.getElementById("settingsPickMinecraftDirectory");
 const settingsProfileSelect = document.getElementById("settingsProfileSelect");
 const settingsJavaPathInput = document.getElementById("settingsJavaPath");
+const settingsAutoJavaPathButton = document.getElementById("settingsAutoJavaPath");
 const settingsPickJavaPathButton = document.getElementById("settingsPickJavaPath");
 const settingsRamMinInput = document.getElementById("settingsRamMin");
 const settingsRamMaxInput = document.getElementById("settingsRamMax");
@@ -187,6 +190,7 @@ let lastAccountModelKey = "";
 let newsRefreshMs = NEWS_REFRESH_DEFAULT_MS;
 let newsPollTimer = null;
 let isNewsRequestPending = false;
+let isManualRefreshRunning = false;
 let currentNewsItems = [];
 let lastRenderedNewsSignature = "";
 let isNewsPanelExpanded = false;
@@ -647,9 +651,16 @@ function clampNewsRefreshMs(value, fallback = NEWS_REFRESH_DEFAULT_MS) {
   return Math.max(NEWS_REFRESH_MIN_MS, Math.min(NEWS_REFRESH_MAX_MS, parsed));
 }
 
+function normalizeNewsTextValue(value) {
+  if (Array.isArray(value)) {
+    return value.map((line) => asText(line)).filter(Boolean).join("\n");
+  }
+  return asText(value);
+}
+
 function normalizeNewsItem(rawItem) {
   if (typeof rawItem === "string") {
-    const text = asText(rawItem);
+    const text = normalizeNewsTextValue(rawItem);
     if (!text) {
       return null;
     }
@@ -664,7 +675,7 @@ function normalizeNewsItem(rawItem) {
     return null;
   }
 
-  const text = asText(rawItem.text);
+  const text = normalizeNewsTextValue(rawItem.text);
   if (!text) {
     return null;
   }
@@ -877,18 +888,20 @@ function applyGitHubReleaseUi(snapshot) {
   updateUpdaterUi(updaterSnapshot);
 }
 
-async function refreshGitHubReleaseInfo(force = false) {
+async function refreshGitHubReleaseInfo(options = {}) {
   if (!window.launcherApi || typeof window.launcherApi.getGitHubRelease !== "function") {
-    return;
+    return false;
   }
-  if (isGitHubReleaseRequestPending && !force) {
-    return;
+  const forceRefresh = Boolean(options?.forceRefresh);
+  if (isGitHubReleaseRequestPending && !forceRefresh) {
+    return true;
   }
 
   isGitHubReleaseRequestPending = true;
   try {
-    const snapshot = await window.launcherApi.getGitHubRelease();
+    const snapshot = await window.launcherApi.getGitHubRelease({ forceRefresh });
     applyGitHubReleaseUi(snapshot);
+    return !snapshot || snapshot.ok !== false;
   } catch (error) {
     if (!githubReleaseSnapshot) {
       applyGitHubReleaseUi({
@@ -897,6 +910,7 @@ async function refreshGitHubReleaseInfo(force = false) {
         error: asText(error?.message) || "Failed to load GitHub release."
       });
     }
+    return false;
   } finally {
     isGitHubReleaseRequestPending = false;
   }
@@ -999,7 +1013,7 @@ function renderNewsItems(items, force = false) {
   return true;
 }
 
-function applyLauncherNewsUi(snapshot) {
+function applyLauncherNewsUi(snapshot, options = {}) {
   if (!newsList) {
     return;
   }
@@ -1012,7 +1026,7 @@ function applyLauncherNewsUi(snapshot) {
 
   const incomingItems = Array.isArray(snapshot.items) ? snapshot.items : [];
   currentNewsItems = normalizeNewsItems(incomingItems);
-  const didRenderNews = renderNewsItems(currentNewsItems);
+  const didRenderNews = renderNewsItems(currentNewsItems, Boolean(options?.forceRender));
   if (didRenderNews) {
     renderSettingsAboutNewsItems();
   }
@@ -1028,17 +1042,19 @@ function restartNewsPollingTimer() {
   }, newsRefreshMs);
 }
 
-async function refreshLauncherNews(force = false) {
+async function refreshLauncherNews(options = {}) {
   if (!newsList || !window.launcherApi || typeof window.launcherApi.getNews !== "function") {
-    return;
+    return false;
   }
-  if (isNewsRequestPending && !force) {
-    return;
+  const forceRefresh = Boolean(options?.forceRefresh);
+  const forceRender = Boolean(options?.forceRender);
+  if (isNewsRequestPending && !forceRefresh) {
+    return true;
   }
 
   isNewsRequestPending = true;
   try {
-    const snapshot = await window.launcherApi.getNews();
+    const snapshot = await window.launcherApi.getNews({ forceRefresh });
     const nextRefreshMs = clampNewsRefreshMs(snapshot?.refreshMs, newsRefreshMs);
     if (nextRefreshMs !== newsRefreshMs) {
       newsRefreshMs = nextRefreshMs;
@@ -1046,9 +1062,11 @@ async function refreshLauncherNews(force = false) {
         restartNewsPollingTimer();
       }
     }
-    applyLauncherNewsUi(snapshot);
+    applyLauncherNewsUi(snapshot, { forceRender });
+    return !snapshot || snapshot.ok !== false;
   } catch {
     setNewsBadgeText("\uC624\uD504\uB77C\uC778");
+    return false;
   } finally {
     isNewsRequestPending = false;
   }
@@ -1067,7 +1085,7 @@ function startNewsPolling() {
     return;
   }
 
-  void refreshLauncherNews(true);
+  void refreshLauncherNews();
   restartNewsPollingTimer();
 }
 
@@ -1105,8 +1123,15 @@ function buildPlayerListTooltip(server) {
   const names = Array.isArray(server?.playerNames)
     ? server.playerNames.map((name) => asText(name)).filter(Boolean)
     : [];
+  const playersOnline = Number(server?.playersOnline);
   if (names.length === 0) {
+    if (Number.isFinite(playersOnline) && playersOnline > 0) {
+      return "플레이어 목록은 서버에서 전체 공개하지 않습니다.";
+    }
     return "";
+  }
+  if (Number.isFinite(playersOnline) && playersOnline > names.length) {
+    return `${names.join("\n")}\n외 ${playersOnline - names.length}명`;
   }
   return names.join("\n");
 }
@@ -1155,22 +1180,24 @@ function applyPlayerCountUi(snapshot) {
   setPlayerCountTooltip(asText(server?.error));
 }
 
-async function refreshPlayerCount(force = false) {
+async function refreshPlayerCount() {
   if (!window.launcherApi || typeof window.launcherApi.getServerStatus !== "function") {
     setPlayerCountText("\uD655\uC778 \uC2E4\uD328", true);
-    return;
+    return false;
   }
-  if (isPlayerCountRequestPending && !force) {
-    return;
+  if (isPlayerCountRequestPending) {
+    return true;
   }
 
   isPlayerCountRequestPending = true;
   try {
     const snapshot = await window.launcherApi.getServerStatus();
     applyPlayerCountUi(snapshot);
+    return !snapshot || snapshot.ok !== false;
   } catch (error) {
     setPlayerCountText("\uD655\uC778 \uC2E4\uD328", true);
     setPlayerCountTooltip(String(error?.message || error));
+    return false;
   } finally {
     isPlayerCountRequestPending = false;
   }
@@ -1184,7 +1211,7 @@ function startPlayerCountPolling() {
   if (playerCountPollTimer !== null) {
     window.clearInterval(playerCountPollTimer);
   }
-  void refreshPlayerCount(true);
+  void refreshPlayerCount();
   playerCountPollTimer = window.setInterval(() => {
     void refreshPlayerCount();
   }, PLAYER_COUNT_REFRESH_MS);
@@ -1196,6 +1223,103 @@ function stopPlayerCountPolling() {
   }
   window.clearInterval(playerCountPollTimer);
   playerCountPollTimer = null;
+}
+
+async function refreshModpackUpdateStatusFromButton() {
+  if (!window.launcherApi || typeof window.launcherApi.checkModpackUpdate !== "function") {
+    return false;
+  }
+
+  const payload = buildModpackSyncPayload();
+  if (!payload.minecraftDirectory) {
+    setLaunchStatus("Minecraft 폴더가 설정되지 않아 모드팩 상태를 확인할 수 없습니다.", true);
+    return false;
+  }
+
+  const result = await window.launcherApi.checkModpackUpdate(payload);
+  if (!result?.ok) {
+    setLaunchStatus(localizeStatusMessage(result?.error || "Modpack update check failed."), true);
+    return false;
+  }
+
+  modpackUpdateState = result && typeof result === "object" ? { ...result } : null;
+  updateLaunchButtonUi();
+  if (result.pending) {
+    setLaunchStatus("모드팩 업데이트가 있습니다. 업데이트 버튼을 눌러 적용하세요.");
+  }
+  return true;
+}
+
+async function refreshLauncherUpdateStatusFromButton() {
+  if (!window.launcherApi || typeof window.launcherApi.checkForUpdates !== "function") {
+    return false;
+  }
+
+  const result = await window.launcherApi.checkForUpdates();
+  if (!result?.ok) {
+    const message = asText(result?.error);
+    if (message === "Auto updater is disabled in development mode.") {
+      return true;
+    }
+    setLaunchStatus(localizeStatusMessage(message || "Launcher update check failed."), true);
+    return false;
+  }
+
+  if (window.launcherApi && typeof window.launcherApi.getUpdaterState === "function") {
+    const state = await window.launcherApi.getUpdaterState().catch(() => null);
+    if (state) {
+      updateUpdaterUi(state);
+    }
+  }
+  return true;
+}
+
+function buildManualRefreshTasks() {
+  return [
+    { label: "뉴스", promise: refreshLauncherNews({ forceRefresh: true, forceRender: true }) },
+    { label: "업데이트 노트", promise: refreshGitHubReleaseInfo({ forceRefresh: true }) },
+    { label: "모드팩 상태", promise: refreshModpackUpdateStatusFromButton() },
+    { label: "런처 상태", promise: refreshLauncherUpdateStatusFromButton() },
+    { label: "접속 인원", promise: refreshPlayerCount() }
+  ];
+}
+
+function getFailedManualRefreshLabels(tasks, results) {
+  return results
+    .map((result, index) => (result.status === "rejected" || result.value === false ? tasks[index]?.label || "" : ""))
+    .filter(Boolean);
+}
+
+async function refreshLauncherDataFromButton() {
+  if (!manualRefreshButton || isManualRefreshRunning) {
+    return;
+  }
+
+  isManualRefreshRunning = true;
+  manualRefreshButton.disabled = true;
+  manualRefreshButton.classList.add("is-refreshing");
+  manualRefreshButton.setAttribute("aria-busy", "true");
+  const refreshSpinPromise = delay(MANUAL_REFRESH_SPIN_MIN_MS);
+  setLaunchStatus("런처 정보를 새로고침하는 중...");
+
+  try {
+    const tasks = buildManualRefreshTasks();
+    const results = await Promise.allSettled(tasks.map((task) => task.promise));
+    const failedLabels = getFailedManualRefreshLabels(tasks, results);
+
+    if (failedLabels.length > 0) {
+      setLaunchStatus(`새로고침 실패: ${failedLabels.join(", ")}`, true);
+    } else if (!modpackUpdateState?.pending && !isLauncherUpdateReadyToInstall()) {
+      setLaunchStatus("뉴스, 업데이트 상태, 접속 인원을 새로고침했습니다.");
+    }
+  } finally {
+    await refreshSpinPromise;
+    manualRefreshButton.classList.remove("is-refreshing");
+    manualRefreshButton.removeAttribute("aria-busy");
+    manualRefreshButton.disabled = false;
+    isManualRefreshRunning = false;
+    updateLaunchButtonUi();
+  }
 }
 
 function parseModpackProgressMessage(message) {
@@ -1305,8 +1429,20 @@ function localizeStatusMessage(message) {
     "\uC124\uC815\uB41C Java \uB7F0\uD0C0\uC784\uC744 \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC5B4 \uC790\uB3D9 \uD0D0\uC9C0\uB97C \uC2DC\uB3C4\uD569\uB2C8\uB2E4 (\uBC84\uC804: $1)."
   );
   localized = localized.replace(
+    /^Configured Java runtime could not be used \(version:\s*([^)]+)\)\. Java 21 is required\. Trying automatic Java detection\.\.\.$/i,
+    "설정된 Java 런타임을 사용할 수 없습니다. Java 21이 필요합니다 (현재 버전: $1)."
+  );
+  localized = localized.replace(
     /^Using bundled Java runtime:\s*(.+)$/i,
     "\uB0B4\uC7A5 Java \uB7F0\uD0C0\uC784 \uC0AC\uC6A9: $1"
+  );
+  localized = localized.replace(
+    /^Bundled Java runtime could not be used \(version:\s*([^)]+)\)\. Reinstalling Java 21 runtime\.\.\.$/i,
+    "내장 Java 런타임 버전이 맞지 않아 Java 21을 다시 설치합니다 (현재 버전: $1)."
+  );
+  localized = localized.replace(
+    /^System Java runtime from PATH could not be used \(version:\s*([^)]+)\)\. Java 21 is required\.$/i,
+    "PATH의 Java 런타임을 사용할 수 없습니다. Java 21이 필요합니다 (현재 버전: $1)."
   );
   localized = localized.replace(
     /^Fabric runtime already installed:\s*(.+)$/i,
@@ -1755,8 +1891,12 @@ function setLaunchStatus(message, isError = false) {
   if (!launchStatus) {
     return;
   }
-  launchStatus.textContent = message || "";
-  launchStatus.classList.toggle("is-error", Boolean(message && isError));
+  const nextMessage = message || "";
+  const nextIsError = Boolean(nextMessage && isError);
+  if (launchStatus.textContent !== nextMessage) {
+    launchStatus.textContent = nextMessage;
+  }
+  launchStatus.classList.toggle("is-error", nextIsError);
 }
 
 function setPresetApplyStatus(message, isError = false) {
@@ -2022,7 +2162,7 @@ function updateLaunchButtonUi() {
   if (isLauncherUpdateInstallRunning) {
     label = "\uC5C5\uB370\uC774\uD2B8 \uC801\uC6A9 \uC911...";
   } else if (isLauncherUpdateGateRunning) {
-    label = "\uC5C5\uB370\uC774\uD2B8 \uD655\uC778 \uC911...";
+    label = "\uAC8C\uC784 \uC2DC\uC791";
   } else if (hasLauncherUpdateReady) {
     label = "\uB7F0\uCC98 \uC5C5\uB370\uC774\uD2B8";
   } else if (isLauncherUpdateDownloading) {
@@ -2030,7 +2170,7 @@ function updateLaunchButtonUi() {
   } else if (isModpackUpdateApplyRunning) {
     label = "업데이트 중...";
   } else if (isStartupModpackSyncRunning) {
-    label = "확인 중...";
+    label = "\uAC8C\uC784 \uC2DC\uC791";
   } else if (isLaunchRequestPending || isLauncherRunning) {
     label = "\uC2E4\uD589 \uC911...";
   } else if (hasPendingModpackUpdate) {
@@ -3195,6 +3335,10 @@ bindClick(newsPanelExpandButton, () => {
   applyNewsPanelExpandedState(!isNewsPanelExpanded);
 });
 
+bindClick(manualRefreshButton, () => {
+  void refreshLauncherDataFromButton();
+});
+
 bindClick(accountModelPanel, () => {
   if (!authState.signedIn) {
     return;
@@ -3253,6 +3397,50 @@ bindClick(settingsPickMinecraftDirectoryButton, async () => {
 
   await refreshProfilesForDirectory(pickedDirectory, "");
   setSettingsStatus("\uB9C8\uC778\uD06C\uB798\uD504\uD2B8 \uD3F4\uB354\uAC00 \uC5C5\uB370\uC774\uD2B8\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
+});
+
+bindClick(settingsAutoJavaPathButton, async () => {
+  if (!window.launcherApi || typeof window.launcherApi.autoSelectJava !== "function") {
+    setSettingsStatus("Java 자동 선택 기능을 사용할 수 없습니다.", true);
+    return;
+  }
+
+  const minecraftDirectory =
+    asText(settingsMinecraftDirectoryInput?.value) ||
+    asText(launcherSettings.minecraftDirectory) ||
+    asText(launcherDefaults.minecraftDirectory);
+  if (!minecraftDirectory) {
+    setSettingsStatus("Minecraft 폴더를 먼저 선택해 주세요.", true);
+    return;
+  }
+
+  if (settingsAutoJavaPathButton) {
+    settingsAutoJavaPathButton.disabled = true;
+  }
+  if (settingsPickJavaPathButton) {
+    settingsPickJavaPathButton.disabled = true;
+  }
+  setSettingsStatus("Java 21 실행 파일 자동 선택 중...");
+
+  try {
+    const result = await window.launcherApi.autoSelectJava({ minecraftDirectory });
+    if (!result?.ok || !asText(result?.javaPath)) {
+      setSettingsStatus(asText(result?.error) || "Java 실행 파일 자동 선택에 실패했습니다.", true);
+      return;
+    }
+
+    applyResolvedJavaPath(result.javaPath);
+    setSettingsStatus("Java 21 실행 파일을 자동 선택했습니다.");
+  } catch (error) {
+    setSettingsStatus(asText(error?.message) || "Java 실행 파일 자동 선택에 실패했습니다.", true);
+  } finally {
+    if (settingsAutoJavaPathButton) {
+      settingsAutoJavaPathButton.disabled = false;
+    }
+    if (settingsPickJavaPathButton) {
+      settingsPickJavaPathButton.disabled = false;
+    }
+  }
 });
 
 bindClick(settingsPickJavaPathButton, async () => {
@@ -3546,10 +3734,10 @@ Promise.resolve()
     applyWindowState(windowState);
     applyGitHubReleaseUi(githubRelease);
     updateUpdaterUi(updaterState);
+    setStartupProgress(STARTUP_SETTINGS_PROGRESS, "\uB7F0\uCC98 \uC124\uC815 \uBD88\uB7EC\uC624\uAE30 \uC644\uB8CC.");
     await ensureLatestLauncherOnStartup();
     startNewsPolling();
     startPlayerCountPolling();
-    setStartupProgress(STARTUP_SETTINGS_PROGRESS, "\uB7F0\uCC98 \uC124\uC815 \uBD88\uB7EC\uC624\uAE30 \uC644\uB8CC.");
     await runStartupModpackSync();
   })
   .then(async () => {
