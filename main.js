@@ -944,7 +944,11 @@ function normalizePresetModRuleSet(presets) {
 
   for (const preset of LAUNCHER_PRESET_OPTIONS) {
     const presetRule = presetRules[preset] && typeof presetRules[preset] === "object" ? presetRules[preset] : {};
-    const disableMods = Array.isArray(presetRule.disableMods) ? presetRule.disableMods : [];
+    const disableMods = Array.isArray(presetRule)
+      ? presetRule
+      : Array.isArray(presetRule.disableMods)
+        ? presetRule.disableMods
+        : [];
     rules[preset] = normalizePresetModPatterns(disableMods);
   }
 
