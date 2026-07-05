@@ -4128,9 +4128,22 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
 
   sendLog({
     level: "progress",
+    message: "Analyzing modpack archive contents..."
+  });
+  let topLevelEntries;
+  try {
+    topLevelEntries = (await listArchiveTopLevelEntries(cacheResult.archivePath)).filter((entry) =>
+      isAllowedManagedModpackPath(entry)
+    );
+  } catch (error) {
+    throw normalizeZipExtractionError(cacheResult.archivePath, error, "analyze");
+  }
+
+  sendLog({
+    level: "progress",
     message: "Cleaning previous modpack files..."
   });
-  const removedCount = await cleanManagedModpackEntries(modpackRoot, previousState);
+  const removedCount = await removeArchiveTopLevelEntries(modpackRoot, topLevelEntries);
 
   sendLog({
     level: "progress",
