@@ -56,6 +56,9 @@ const MODPACK_ALLOWED_TOP_LEVEL_DIRECTORIES = new Set([
 const MODPACK_MODS_DIRECTORY = "mods";
 const MODPACK_DISABLED_MODS_DIRECTORY = "mods-disabled";
 const MODPACK_ALLOWED_ROOT_FILES = new Set(["options.txt"]);
+const NETWORK_RETRY_ATTEMPTS = 3;
+const NETWORK_RETRY_DELAYS_MS = [800, 2000, 4000];
+const NETWORK_RETRYABLE_HTTP_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 const LAUNCHER_USER_DATA_DIRECTORY = ".bettermonlauncher";
 const LEGACY_USER_DATA_DIRECTORY_CANDIDATES = ["bettermon-launcher", "BetterMon Launcher"];
 const LAUNCHER_RUNTIME_DIRECTORY = "runtime";
@@ -743,6 +746,41 @@ function buildHttpHeaders(url, baseHeaders = {}) {
   return headers;
 }
 
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, Math.max(0, Number(ms) || 0));
+  });
+}
+
+function isRetryableHttpStatus(status, url = "") {
+  const normalizedStatus = Number(status);
+  return (
+    NETWORK_RETRYABLE_HTTP_STATUSES.has(normalizedStatus) ||
+    (normalizedStatus === 404 && isGitHubHttpUrl(url))
+  );
+}
+
+function isRetryableNetworkError(error, url = "") {
+  const status = Number(error?.status || 0);
+  if (status > 0) {
+    return isRetryableHttpStatus(status, url);
+  }
+
+  const code = asTrimmedText(error?.code);
+  const message = String(error?.message || error || "");
+  return (
+    /aborted|terminated|timeout|econnreset|enotfound|etimedout|network|fetch failed/i.test(message) ||
+    /^(ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|UND_ERR_.+)$/i.test(code)
+  );
+}
+
+async function waitForNetworkRetry(attemptIndex) {
+  const delayMs = NETWORK_RETRY_DELAYS_MS[Math.min(attemptIndex, NETWORK_RETRY_DELAYS_MS.length - 1)] || 0;
+  if (delayMs > 0) {
+    await delay(delayMs);
+  }
+}
+
 function normalizeSha256(value) {
   const sha = asTrimmedText(value).toLowerCase();
   if (!sha) {
@@ -1162,14 +1200,16 @@ async function getPathEntryType(targetPath) {
   }
 }
 
-async function downloadFile(url, destinationPath) {
+async function downloadFileOnce(url, destinationPath) {
   const response = await fetch(url, {
     redirect: "follow",
     cache: "no-store",
     headers: buildHttpHeaders(url)
   });
   if (!response.ok) {
-    throw new Error(`Download failed (${response.status}): ${url}`);
+    const error = new Error(`Download failed (${response.status}): ${url}`);
+    error.status = response.status;
+    throw error;
   }
   if (!response.body) {
     throw new Error(`Download response has no body: ${url}`);
@@ -1199,6 +1239,34 @@ async function downloadFile(url, destinationPath) {
     contentLength: expectedContentLength,
     bytesWritten
   };
+}
+
+async function downloadFile(url, destinationPath) {
+  let lastError = null;
+  for (let attempt = 0; attempt < NETWORK_RETRY_ATTEMPTS; attempt += 1) {
+    if (fs.existsSync(destinationPath)) {
+      await fs.promises.rm(destinationPath, { force: true });
+    }
+
+    try {
+      return await downloadFileOnce(url, destinationPath);
+    } catch (error) {
+      lastError = error;
+      if (fs.existsSync(destinationPath)) {
+        await fs.promises.rm(destinationPath, { force: true });
+      }
+      if (attempt >= NETWORK_RETRY_ATTEMPTS - 1 || !isRetryableNetworkError(error, url)) {
+        break;
+      }
+      sendLog({
+        level: "warn",
+        message: `Download failed, retrying (${attempt + 2}/${NETWORK_RETRY_ATTEMPTS}): ${String(error?.message || error)}`
+      });
+      await waitForNetworkRetry(attempt);
+    }
+  }
+
+  throw lastError || new Error(`Download failed: ${url}`);
 }
 
 async function readTextFromSource(source, label) {
@@ -1906,6 +1974,73 @@ function buildGitHubLatestReleaseAssetUrl(repository, assetName) {
   return `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases/latest/download/${encodeURIComponent(normalizedAssetName)}`;
 }
 
+function buildGitHubTaggedReleaseAssetUrl(repository, tagName, assetName) {
+  const normalizedRepository = normalizeRepositoryName(repository);
+  const normalizedTagName = asTrimmedText(tagName);
+  const normalizedAssetName = asTrimmedText(assetName);
+  if (!normalizedRepository || !normalizedTagName || !normalizedAssetName) {
+    return "";
+  }
+  const [owner, repo] = normalizedRepository.split("/");
+  return `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases/download/${encodeURIComponent(
+    normalizedTagName
+  )}/${encodeURIComponent(normalizedAssetName)}`;
+}
+
+function buildGitHubAssetDownloadHeaders(url) {
+  const headers = buildHttpHeaders(url);
+  if (isGitHubHttpUrl(url) && /api\.github\.com$/i.test(new URL(url).hostname)) {
+    headers.Accept = "application/octet-stream";
+  }
+  return headers;
+}
+
+async function fetchTextFromCandidateUrls(candidates, timeoutMs, label) {
+  const failures = [];
+  const seen = new Set();
+
+  for (const candidate of candidates) {
+    const url = asTrimmedText(candidate?.url || candidate);
+    if (!url || seen.has(url)) {
+      continue;
+    }
+    seen.add(url);
+
+    for (let attempt = 0; attempt < NETWORK_RETRY_ATTEMPTS; attempt += 1) {
+      try {
+        const response = await fetchWithTimeout(
+          url,
+          {
+            headers: buildGitHubAssetDownloadHeaders(url)
+          },
+          timeoutMs
+        );
+        if (!response.ok) {
+          failures.push(`${url} (${response.status})`);
+          if (attempt >= NETWORK_RETRY_ATTEMPTS - 1 || !isRetryableHttpStatus(response.status, url)) {
+            break;
+          }
+          await waitForNetworkRetry(attempt);
+          continue;
+        }
+        return {
+          text: await response.text(),
+          url: asTrimmedText(response.url) || url,
+          sourceKey: asTrimmedText(candidate?.sourceKey) || url
+        };
+      } catch (error) {
+        failures.push(`${url} (${String(error?.message || error)})`);
+        if (attempt >= NETWORK_RETRY_ATTEMPTS - 1 || !isRetryableNetworkError(error, url)) {
+          break;
+        }
+        await waitForNetworkRetry(attempt);
+      }
+    }
+  }
+
+  throw new Error(`Failed to load ${label}: ${failures.join(" | ")}`);
+}
+
 async function fetchModpackManifestSource() {
   const manifestConfig = readModpackManifestConfig();
   if (!manifestConfig.configured) {
@@ -1933,26 +2068,6 @@ async function fetchModpackManifestSource() {
   }
 
   const directManifestUrl = buildGitHubLatestReleaseAssetUrl(repository, manifestConfig.manifestAsset);
-  if (directManifestUrl) {
-    const directResponse = await fetchWithTimeout(
-      directManifestUrl,
-      {
-        headers: buildHttpHeaders(directManifestUrl)
-      },
-      manifestConfig.timeoutMs
-    );
-    if (directResponse.ok) {
-      const text = await directResponse.text();
-      const manifestLocation = directManifestUrl;
-      return {
-        text,
-        json: JSON.parse(text),
-        manifestLocation,
-        sourceKind: "http",
-        sourceKey: `github-latest:${repository}:${manifestConfig.manifestAsset}:${manifestLocation}`
-      };
-    }
-  }
 
   const [owner, repo] = repository.split("/");
   const apiUrl = `${manifestConfig.apiBaseUrl}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases/latest`;
@@ -1971,29 +2086,32 @@ async function fetchModpackManifestSource() {
   const manifestAsset = Array.isArray(release?.assets)
     ? release.assets.find((asset) => asTrimmedText(asset?.name) === manifestConfig.manifestAsset)
     : null;
-  const manifestUrl = asTrimmedText(manifestAsset?.browser_download_url || manifestAsset?.url);
-  if (!manifestUrl) {
+  if (!manifestAsset) {
     throw new Error(`GitHub Release asset not found: ${manifestConfig.manifestAsset}`);
   }
 
-  const manifestResponse = await fetchWithTimeout(
-    manifestUrl,
+  const tagName = asTrimmedText(release?.tag_name);
+  const taggedManifestUrl = buildGitHubTaggedReleaseAssetUrl(repository, tagName, manifestConfig.manifestAsset);
+  const manifestCandidates = [
+    { url: directManifestUrl, sourceKey: `github-latest:${repository}:${manifestConfig.manifestAsset}` },
+    { url: taggedManifestUrl, sourceKey: `github-tag:${repository}:${tagName}:${manifestConfig.manifestAsset}` },
     {
-      headers: buildHttpHeaders(manifestUrl)
+      url: asTrimmedText(manifestAsset?.browser_download_url),
+      sourceKey: `github-browser:${repository}:${tagName}:${manifestConfig.manifestAsset}`
     },
-    manifestConfig.timeoutMs
+    { url: asTrimmedText(manifestAsset?.url), sourceKey: `github-api-asset:${repository}:${tagName}:${manifestConfig.manifestAsset}` }
+  ];
+  const loadedManifest = await fetchTextFromCandidateUrls(
+    manifestCandidates,
+    manifestConfig.timeoutMs,
+    `modpack manifest (${manifestConfig.manifestAsset})`
   );
-  if (!manifestResponse.ok) {
-    throw new Error(`Failed to load modpack manifest (${manifestResponse.status}).`);
-  }
-
-  const text = await manifestResponse.text();
   return {
-    text,
-    json: JSON.parse(text),
-    manifestLocation: manifestUrl,
+    text: loadedManifest.text,
+    json: JSON.parse(loadedManifest.text),
+    manifestLocation: loadedManifest.url,
     sourceKind: "http",
-    sourceKey: `github:${repository}:${asTrimmedText(release?.tag_name)}:${manifestConfig.manifestAsset}`
+    sourceKey: loadedManifest.sourceKey
   };
 }
 
@@ -4037,15 +4155,40 @@ async function ensureManifestArchiveCached(modpackRoot, manifest) {
 
   const tempArchivePath = `${cacheArchivePath}.download`;
   let downloadInfo = null;
+  let downloadedSha1 = "";
   try {
-    downloadInfo = await downloadFile(archiveSource.value, tempArchivePath);
-    if (manifest.archive.size > 0 && Number(downloadInfo?.bytesWritten || 0) !== manifest.archive.size) {
-      throw new Error("Modpack archive size mismatch.");
-    }
+    let lastDownloadError = null;
+    for (let attempt = 0; attempt < NETWORK_RETRY_ATTEMPTS; attempt += 1) {
+      try {
+        downloadInfo = await downloadFile(archiveSource.value, tempArchivePath);
+        if (manifest.archive.size > 0 && Number(downloadInfo?.bytesWritten || 0) !== manifest.archive.size) {
+          throw new Error("Modpack archive size mismatch.");
+        }
 
-    const downloadedSha1 = await computeFileDigest(tempArchivePath, "sha1");
-    if (downloadedSha1 !== expectedSha1) {
-      throw new Error("Modpack archive SHA1 mismatch.");
+        downloadedSha1 = await computeFileDigest(tempArchivePath, "sha1");
+        if (downloadedSha1 !== expectedSha1) {
+          throw new Error("Modpack archive SHA1 mismatch.");
+        }
+        break;
+      } catch (error) {
+        lastDownloadError = error;
+        if (fs.existsSync(tempArchivePath)) {
+          await fs.promises.rm(tempArchivePath, { force: true });
+        }
+        if (attempt >= NETWORK_RETRY_ATTEMPTS - 1) {
+          break;
+        }
+        sendLog({
+          level: "warn",
+          message: `Modpack archive download verification failed, retrying (${attempt + 2}/${NETWORK_RETRY_ATTEMPTS}): ${String(
+            error?.message || error
+          )}`
+        });
+        await waitForNetworkRetry(attempt);
+      }
+    }
+    if (!downloadedSha1) {
+      throw lastDownloadError || new Error("Modpack archive download failed.");
     }
 
     await fs.promises.mkdir(path.dirname(cacheArchivePath), { recursive: true });
@@ -4471,7 +4614,14 @@ async function synchronizeModpack(options) {
   }
   const sessionKey = getSessionModpackKey(launcherPreset, modpackRoot);
   if (Boolean(options?.skipIfSessionSynced) && modpackSessionSyncedKeys.has(sessionKey)) {
-    return { ok: true, skipped: true, reason: "session-cached" };
+    const existingState = readModpackState(modpackRoot);
+    return {
+      ok: true,
+      skipped: true,
+      reason: "session-cached",
+      version: asTrimmedText(existingState?.version),
+      presetRules: existingState?.presetRules || null
+    };
   }
 
   const sourceFailures = [];
@@ -4515,7 +4665,13 @@ async function synchronizeModpack(options) {
       level: "warn",
       message: "Modpack source returned 404. Keeping previously applied modpack files."
     });
-    return { ok: true, skipped: true, reason: "source-404-using-existing-state" };
+    return {
+      ok: true,
+      skipped: true,
+      reason: "source-404-using-existing-state",
+      version: asTrimmedText(existingState?.version),
+      presetRules: existingState?.presetRules || null
+    };
   }
 
   throw new Error(`All configured modpack sources failed: ${sourceFailures.join(" | ")}`);
@@ -4528,7 +4684,31 @@ async function checkModpackUpdate(options) {
     throw new Error("Modpack target directory is missing.");
   }
 
-  const manifestSource = await fetchModpackManifestSource();
+  const previousState = readModpackState(modpackRoot);
+  let manifestSource;
+  try {
+    manifestSource = await fetchModpackManifestSource();
+  } catch (error) {
+    if (previousState && isModpackNotFoundFailure(String(error?.message || error))) {
+      sendLog({
+        level: "warn",
+        message: "Modpack manifest returned 404. Keeping previously applied modpack files."
+      });
+      return {
+        ok: true,
+        supported: true,
+        pending: false,
+        preset: launcherPreset,
+        reason: "manifest-404-using-existing-state",
+        currentVersion: asTrimmedText(previousState?.version),
+        latestVersion: asTrimmedText(previousState?.version),
+        currentArchiveSha1: normalizeSha1(previousState?.archiveSha1),
+        latestArchiveSha1: normalizeSha1(previousState?.archiveSha1),
+        presetRules: previousState?.presetRules || null
+      };
+    }
+    throw error;
+  }
   if (!manifestSource) {
     return {
       ok: true,
@@ -4545,7 +4725,6 @@ async function checkModpackUpdate(options) {
     );
   }
 
-  const previousState = readModpackState(modpackRoot);
   const currentArchiveSha1 = normalizeSha1(previousState?.archiveSha1);
   const latestArchiveSha1 = manifest.archive.sha1;
   const pending = currentArchiveSha1 !== latestArchiveSha1;
@@ -4580,7 +4759,8 @@ async function runModpackSyncFromPayload(payload, options = {}) {
       gameDirectory,
       skipIfSessionSynced: Boolean(options?.skipIfSessionSynced)
     });
-    const presetMods = await applyPresetModRules(modpackRoot, launcherPreset, result?.presetRules);
+    const statePresetRules = result?.presetRules || readModpackState(modpackRoot)?.presetRules || null;
+    const presetMods = await applyPresetModRules(modpackRoot, launcherPreset, statePresetRules);
     return { ok: true, ...result, presetMods };
   } catch (error) {
     return { ok: false, error: String(error?.message || error) };
