@@ -46,11 +46,14 @@ const DEFAULT_MODPACK_GITHUB_REPOSITORY = "ExamplePack";
 const MODPACK_GITHUB_MANIFEST_ASSET = "latest.json";
 const MODPACK_ALLOWED_TOP_LEVEL_DIRECTORIES = new Set([
   "mods",
+  "mods-disabled",
   "config",
   "defaultconfigs",
   "resourcepacks",
   "shaderpacks"
 ]);
+const MODPACK_MODS_DIRECTORY = "mods";
+const MODPACK_DISABLED_MODS_DIRECTORY = "mods-disabled";
 const MODPACK_ALLOWED_ROOT_FILES = new Set(["options.txt"]);
 const LAUNCHER_USER_DATA_DIRECTORY = ".bettermonlauncher";
 const LEGACY_USER_DATA_DIRECTORY_CANDIDATES = ["bettermon-launcher", "BetterMon Launcher"];
@@ -901,6 +904,193 @@ async function writeModpackState(modpackRoot, state) {
   const statePath = getModpackStatePath(modpackRoot);
   await fs.promises.mkdir(path.dirname(statePath), { recursive: true });
   await fs.promises.writeFile(statePath, JSON.stringify(state, null, 2), "utf8");
+}
+
+function normalizePresetModPattern(value) {
+  const rawValue =
+    value && typeof value === "object"
+      ? value.file || value.name || value.mod || value.pattern
+      : value;
+  const text = asTrimmedText(rawValue).replace(/\\/g, "/");
+  if (!text || text.includes("/") || text === "." || text === "..") {
+    return "";
+  }
+  return text;
+}
+
+function normalizePresetModPatterns(values) {
+  if (!Array.isArray(values)) {
+    return [];
+  }
+
+  const patterns = [];
+  const seen = new Set();
+  for (const value of values) {
+    const pattern = normalizePresetModPattern(value);
+    const key = process.platform === "win32" ? pattern.toLowerCase() : pattern;
+    if (!pattern || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    patterns.push(pattern);
+  }
+  return patterns;
+}
+
+function getPresetModRuleConfig() {
+  const config = readModpackConfig() || {};
+  const directPresets = config.presets && typeof config.presets === "object" ? config.presets : {};
+  const modpackConfig = config.modpack && typeof config.modpack === "object" ? config.modpack : {};
+  const modpackPresets = modpackConfig.presets && typeof modpackConfig.presets === "object" ? modpackConfig.presets : {};
+  const rules = {};
+
+  for (const preset of LAUNCHER_PRESET_OPTIONS) {
+    const directPreset = directPresets[preset] && typeof directPresets[preset] === "object" ? directPresets[preset] : {};
+    const modpackPreset = modpackPresets[preset] && typeof modpackPresets[preset] === "object" ? modpackPresets[preset] : {};
+    const directDisableMods = Array.isArray(directPreset.disableMods) ? directPreset.disableMods : [];
+    const modpackDisableMods = Array.isArray(modpackPreset.disableMods) ? modpackPreset.disableMods : [];
+    rules[preset] = normalizePresetModPatterns([...modpackDisableMods, ...directDisableMods]);
+  }
+
+  return rules;
+}
+
+function buildPresetModPatternMatcher(patterns) {
+  const exact = new Set();
+  const contains = [];
+  const wildcardRegexes = [];
+  for (const pattern of patterns) {
+    const normalized = process.platform === "win32" ? pattern.toLowerCase() : pattern;
+    if (/[?*]/.test(pattern)) {
+      const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+      wildcardRegexes.push(new RegExp(`^${escaped}$`, process.platform === "win32" ? "i" : ""));
+    } else if (!/\.jar$/i.test(pattern)) {
+      contains.push(normalized);
+    } else {
+      exact.add(normalized);
+    }
+  }
+
+  return (fileName) => {
+    const normalizedFileName = process.platform === "win32" ? asTrimmedText(fileName).toLowerCase() : asTrimmedText(fileName);
+    return (
+      exact.has(normalizedFileName) ||
+      contains.some((pattern) => normalizedFileName.includes(pattern)) ||
+      wildcardRegexes.some((regex) => regex.test(fileName))
+    );
+  };
+}
+
+async function listModDirectoryFiles(directoryPath) {
+  try {
+    const entries = await fs.promises.readdir(directoryPath, { withFileTypes: true });
+    return entries.filter((entry) => entry.isFile()).map((entry) => entry.name);
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+}
+
+async function moveModFileReplacing(sourcePath, targetPath) {
+  await fs.promises.mkdir(path.dirname(targetPath), { recursive: true });
+  await fs.promises.rm(targetPath, { force: true });
+  await fs.promises.rename(sourcePath, targetPath);
+}
+
+async function writePresetModState(modpackRoot, presetMods) {
+  const previousState = readModpackState(modpackRoot) || {};
+  await writeModpackState(modpackRoot, {
+    ...previousState,
+    presetMods,
+    preset: presetMods.preset || previousState.preset,
+    presetAppliedAt: presetMods.appliedAt
+  });
+}
+
+async function applyPresetModRules(modpackRoot, launcherPreset) {
+  const normalizedPreset = normalizeLauncherPreset(launcherPreset, "high");
+  const rules = getPresetModRuleConfig();
+  const activeDisablePatterns = rules[normalizedPreset] || [];
+  const managedPatterns = normalizePresetModPatterns(Object.values(rules).flat());
+  const appliedAt = new Date().toISOString();
+
+  if (managedPatterns.length === 0) {
+    return {
+      ok: true,
+      skipped: true,
+      preset: normalizedPreset,
+      movedToMods: 0,
+      movedToDisabled: 0,
+      managedMods: [],
+      disabledMods: []
+    };
+  }
+
+  const modsPath = path.join(modpackRoot, MODPACK_MODS_DIRECTORY);
+  const disabledModsPath = path.join(modpackRoot, MODPACK_DISABLED_MODS_DIRECTORY);
+  await fs.promises.mkdir(modsPath, { recursive: true });
+  await fs.promises.mkdir(disabledModsPath, { recursive: true });
+
+  const matchesManaged = buildPresetModPatternMatcher(managedPatterns);
+  const matchesActiveDisabled = buildPresetModPatternMatcher(activeDisablePatterns);
+  const currentModFiles = await listModDirectoryFiles(modsPath);
+  const currentDisabledModFiles = await listModDirectoryFiles(disabledModsPath);
+  const allKnownFiles = [...currentModFiles, ...currentDisabledModFiles];
+  const unmatchedDisabledMods = activeDisablePatterns.filter((pattern) => {
+    const matcher = buildPresetModPatternMatcher([pattern]);
+    return !allKnownFiles.some((fileName) => matcher(fileName));
+  });
+  const movedToMods = [];
+  const movedToDisabled = [];
+
+  for (const fileName of currentDisabledModFiles) {
+    if (!matchesManaged(fileName) || matchesActiveDisabled(fileName)) {
+      continue;
+    }
+    await moveModFileReplacing(path.join(disabledModsPath, fileName), path.join(modsPath, fileName));
+    movedToMods.push(fileName);
+  }
+
+  for (const fileName of currentModFiles) {
+    if (!matchesActiveDisabled(fileName)) {
+      continue;
+    }
+    await moveModFileReplacing(path.join(modsPath, fileName), path.join(disabledModsPath, fileName));
+    movedToDisabled.push(fileName);
+  }
+
+  const presetMods = {
+    preset: normalizedPreset,
+    appliedAt,
+    managedMods: managedPatterns,
+    disabledMods: activeDisablePatterns,
+    unmatchedDisabledMods,
+    movedToMods,
+    movedToDisabled,
+    skipped: movedToMods.length === 0 && movedToDisabled.length === 0
+  };
+  await writePresetModState(modpackRoot, presetMods);
+
+  if (movedToMods.length > 0 || movedToDisabled.length > 0) {
+    sendLog({
+      level: "info",
+      message: `Preset ${normalizedPreset} applied. Enabled ${movedToMods.length}, disabled ${movedToDisabled.length} mod(s).`
+    });
+  } else if (unmatchedDisabledMods.length > 0) {
+    sendLog({
+      level: "warn",
+      message: `Preset ${normalizedPreset} could not find configured mod(s): ${unmatchedDisabledMods.join(", ")}`
+    });
+  }
+
+  return {
+    ok: true,
+    ...presetMods,
+    movedToMods: movedToMods.length,
+    movedToDisabled: movedToDisabled.length
+  };
 }
 
 async function computeFileSha256(filePath) {
@@ -4314,13 +4504,15 @@ async function runModpackSyncFromPayload(payload, options = {}) {
   }
 
   try {
+    const modpackRoot = gameDirectory || minecraftDirectory;
     const result = await synchronizeModpack({
       launcherPreset,
       minecraftDirectory,
       gameDirectory,
       skipIfSessionSynced: Boolean(options?.skipIfSessionSynced)
     });
-    return { ok: true, ...result };
+    const presetMods = await applyPresetModRules(modpackRoot, launcherPreset);
+    return { ok: true, ...result, presetMods };
   } catch (error) {
     return { ok: false, error: String(error?.message || error) };
   }
@@ -4336,11 +4528,14 @@ async function runModpackUpdateCheckFromPayload(payload) {
   }
 
   try {
-    return await checkModpackUpdate({
+    const result = await checkModpackUpdate({
       launcherPreset,
       minecraftDirectory,
       gameDirectory
     });
+    const modpackRoot = gameDirectory || minecraftDirectory;
+    const presetMods = await applyPresetModRules(modpackRoot, launcherPreset);
+    return { ...result, presetMods };
   } catch (error) {
     return { ok: false, error: String(error?.message || error) };
   }

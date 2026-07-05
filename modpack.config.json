@@ -7,6 +7,17 @@
     "host": "server.example",
     "port": 25565
   },
+  "presets": {
+    "low": {
+      "disableMods": [
+        "DistantHorizons-3.1.2-b-1.21.1-fabric-neoforge.jar",
+        "wakes-0.4.1+1.21.1.jar"
+      ]
+    },
+    "high": {
+      "disableMods": []
+    }
+  },
   "news": {
     "url": "https://raw.githubusercontent.com/kimibi606/ExamplePack/main/launcher-news.json",
     "itemsPath": "items",

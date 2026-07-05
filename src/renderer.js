@@ -24,6 +24,7 @@ const PRESET_TRANSITION_SETTLE_MS = 120;
 const GITHUB_RELEASE_NOTES_MAX_ITEMS = 8;
 const JAVA_RAM_MIN_MB = 6144;
 const JAVA_RAM_STEP_MB = 512;
+const JAVA_PATH_AUTO_SELECT_PLACEHOLDERS = new Set(["java", "java.exe", "javaw", "javaw.exe"]);
 const DISCORD_INVITE_URL = "https://example.invalid/private";
 const SETTINGS_STORAGE_KEY = "bettermon.launcher.settings.v1";
 const NEWS_PANEL_EXPANDED_STORAGE_KEY = "bettermon.launcher.news.expanded.v1";
@@ -2121,6 +2122,54 @@ function applyResolvedJavaPath(resolvedJavaPath) {
   updateJavaPathStatus();
 }
 
+function shouldAutoSelectJavaPath(value) {
+  const javaPath = asText(value);
+  return !javaPath || JAVA_PATH_AUTO_SELECT_PLACEHOLDERS.has(javaPath.toLowerCase());
+}
+
+function getConfiguredMinecraftDirectory() {
+  return asText(launcherSettings.minecraftDirectory) || asText(launcherDefaults.minecraftDirectory);
+}
+
+async function ensureJavaPathAutoSelectedOnStartup() {
+  if (!window.launcherApi || typeof window.launcherApi.autoSelectJava !== "function") {
+    return false;
+  }
+  if (!shouldAutoSelectJavaPath(launcherSettings.javaPath)) {
+    return false;
+  }
+
+  const minecraftDirectory = getConfiguredMinecraftDirectory();
+  if (!minecraftDirectory) {
+    return false;
+  }
+
+  setStartupProgress(STARTUP_SETTINGS_PROGRESS + 2, "Java 21 실행 파일 자동 선택 중...");
+
+  try {
+    const result = await window.launcherApi.autoSelectJava({ minecraftDirectory });
+    if (!result?.ok || !asText(result?.javaPath)) {
+      setStartupProgress(
+        STARTUP_SETTINGS_PROGRESS + 4,
+        asText(result?.error) || "Java 21 실행 파일 자동 선택에 실패했습니다.",
+        true
+      );
+      return false;
+    }
+
+    applyResolvedJavaPath(result.javaPath);
+    setStartupProgress(STARTUP_SETTINGS_PROGRESS + 4, "Java 21 실행 파일 자동 선택 완료.");
+    return true;
+  } catch (error) {
+    setStartupProgress(
+      STARTUP_SETTINGS_PROGRESS + 4,
+      asText(error?.message) || "Java 21 실행 파일 자동 선택에 실패했습니다.",
+      true
+    );
+    return false;
+  }
+}
+
 function updateLaunchButtonUi() {
   if (!startLaunchButton) {
     return;
@@ -3712,6 +3761,7 @@ Promise.resolve()
     applyGitHubReleaseUi(githubRelease);
     updateUpdaterUi(updaterState);
     setStartupProgress(STARTUP_SETTINGS_PROGRESS, "\uB7F0\uCC98 \uC124\uC815 \uBD88\uB7EC\uC624\uAE30 \uC644\uB8CC.");
+    await ensureJavaPathAutoSelectedOnStartup();
     await ensureLatestLauncherOnStartup();
     startNewsPolling();
     startPlayerCountPolling();
