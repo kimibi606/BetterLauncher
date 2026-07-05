@@ -47,6 +47,7 @@ const MODPACK_GITHUB_MANIFEST_ASSET = "latest.json";
 const MODPACK_ALLOWED_TOP_LEVEL_DIRECTORIES = new Set([
   "mods",
   "mods-disabled",
+  "cobblemon",
   "config",
   "defaultconfigs",
   "resourcepacks",
@@ -937,22 +938,43 @@ function normalizePresetModPatterns(values) {
   return patterns;
 }
 
-function getPresetModRuleConfig() {
+function normalizePresetModRuleSet(presets) {
+  const presetRules = presets && typeof presets === "object" ? presets : {};
+  const rules = {};
+
+  for (const preset of LAUNCHER_PRESET_OPTIONS) {
+    const presetRule = presetRules[preset] && typeof presetRules[preset] === "object" ? presetRules[preset] : {};
+    const disableMods = Array.isArray(presetRule.disableMods) ? presetRule.disableMods : [];
+    rules[preset] = normalizePresetModPatterns(disableMods);
+  }
+
+  return rules;
+}
+
+function mergePresetModRuleSets(...ruleSets) {
+  const merged = {};
+  for (const preset of LAUNCHER_PRESET_OPTIONS) {
+    const values = [];
+    for (const ruleSet of ruleSets) {
+      if (ruleSet && Array.isArray(ruleSet[preset])) {
+        values.push(...ruleSet[preset]);
+      }
+    }
+    merged[preset] = normalizePresetModPatterns(values);
+  }
+  return merged;
+}
+
+function getPresetModRuleConfig(externalPresetRules = null) {
+  if (externalPresetRules && typeof externalPresetRules === "object") {
+    return normalizePresetModRuleSet(externalPresetRules);
+  }
+
   const config = readModpackConfig() || {};
   const directPresets = config.presets && typeof config.presets === "object" ? config.presets : {};
   const modpackConfig = config.modpack && typeof config.modpack === "object" ? config.modpack : {};
   const modpackPresets = modpackConfig.presets && typeof modpackConfig.presets === "object" ? modpackConfig.presets : {};
-  const rules = {};
-
-  for (const preset of LAUNCHER_PRESET_OPTIONS) {
-    const directPreset = directPresets[preset] && typeof directPresets[preset] === "object" ? directPresets[preset] : {};
-    const modpackPreset = modpackPresets[preset] && typeof modpackPresets[preset] === "object" ? modpackPresets[preset] : {};
-    const directDisableMods = Array.isArray(directPreset.disableMods) ? directPreset.disableMods : [];
-    const modpackDisableMods = Array.isArray(modpackPreset.disableMods) ? modpackPreset.disableMods : [];
-    rules[preset] = normalizePresetModPatterns([...modpackDisableMods, ...directDisableMods]);
-  }
-
-  return rules;
+  return mergePresetModRuleSets(normalizePresetModRuleSet(modpackPresets), normalizePresetModRuleSet(directPresets));
 }
 
 function buildPresetModPatternMatcher(patterns) {
@@ -1009,9 +1031,9 @@ async function writePresetModState(modpackRoot, presetMods) {
   });
 }
 
-async function applyPresetModRules(modpackRoot, launcherPreset) {
+async function applyPresetModRules(modpackRoot, launcherPreset, presetRules = null) {
   const normalizedPreset = normalizeLauncherPreset(launcherPreset, "high");
-  const rules = getPresetModRuleConfig();
+  const rules = getPresetModRuleConfig(presetRules);
   const activeDisablePatterns = rules[normalizedPreset] || [];
   const managedPatterns = normalizePresetModPatterns(Object.values(rules).flat());
   const appliedAt = new Date().toISOString();
@@ -2017,6 +2039,12 @@ function parseModpackManifest(manifestSource) {
   }
 
   const size = Number(archive.size || 0);
+  const rawPresetRules =
+    json.presets && typeof json.presets === "object"
+      ? json.presets
+      : json.modpack && typeof json.modpack === "object" && json.modpack.presets && typeof json.modpack.presets === "object"
+        ? json.modpack.presets
+        : null;
   return {
     id: asTrimmedText(json.id) || "bettermon",
     version: asTrimmedText(json.version) || archiveSha1.slice(0, 12),
@@ -2026,6 +2054,7 @@ function parseModpackManifest(manifestSource) {
       sha1: archiveSha1,
       size: Number.isFinite(size) && size > 0 ? size : 0
     },
+    presetRules: rawPresetRules ? normalizePresetModRuleSet(rawPresetRules) : null,
     sourceKey: asTrimmedText(manifestSource.sourceKey),
     manifestDigest: computeSha256FromText(manifestSource.text)
   };
@@ -4042,6 +4071,13 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
 
   const previousState = readModpackState(modpackRoot);
   if (normalizeSha1(previousState?.archiveSha1) === manifest.archive.sha1) {
+    await writeModpackState(modpackRoot, {
+      ...previousState,
+      version: manifest.version,
+      manifestSourceKey: manifest.sourceKey,
+      manifestDigest: manifest.manifestDigest,
+      presetRules: manifest.presetRules || null
+    });
     modpackSessionSyncedKeys.add(sessionKey);
     sendLog({
       level: "info",
@@ -4052,7 +4088,8 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
       skipped: true,
       version: manifest.version,
       fileCount: getManagedModpackEntriesFromState(previousState).length,
-      removedCount: 0
+      removedCount: 0,
+      presetRules: manifest.presetRules
     };
   }
 
@@ -4105,6 +4142,7 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
     archiveSha1: manifest.archive.sha1,
     archiveSize: manifest.archive.size,
     archiveCachePath: cacheResult.archivePath,
+    presetRules: manifest.presetRules || null,
     appliedAt: new Date().toISOString(),
     updatedCount: entries.length,
     skippedCount: 0,
@@ -4125,7 +4163,8 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
     skippedCount: 0,
     removedCount,
     version: manifest.version,
-    fileCount: entries.length
+    fileCount: entries.length,
+    presetRules: manifest.presetRules
   };
 }
 
@@ -4490,7 +4529,8 @@ async function checkModpackUpdate(options) {
     currentVersion: asTrimmedText(previousState?.version),
     latestVersion: manifest.version,
     currentArchiveSha1,
-    latestArchiveSha1
+    latestArchiveSha1,
+    presetRules: manifest.presetRules
   };
 }
 
@@ -4511,7 +4551,7 @@ async function runModpackSyncFromPayload(payload, options = {}) {
       gameDirectory,
       skipIfSessionSynced: Boolean(options?.skipIfSessionSynced)
     });
-    const presetMods = await applyPresetModRules(modpackRoot, launcherPreset);
+    const presetMods = await applyPresetModRules(modpackRoot, launcherPreset, result?.presetRules);
     return { ok: true, ...result, presetMods };
   } catch (error) {
     return { ok: false, error: String(error?.message || error) };
@@ -4534,7 +4574,7 @@ async function runModpackUpdateCheckFromPayload(payload) {
       gameDirectory
     });
     const modpackRoot = gameDirectory || minecraftDirectory;
-    const presetMods = await applyPresetModRules(modpackRoot, launcherPreset);
+    const presetMods = await applyPresetModRules(modpackRoot, launcherPreset, result?.presetRules);
     return { ...result, presetMods };
   } catch (error) {
     return { ok: false, error: String(error?.message || error) };
