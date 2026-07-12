@@ -9,7 +9,7 @@
     "dist": "electron-builder build",
     "dist:win": "electron-builder build --win nsis",
     "dist:dir": "electron-builder build --dir",
-    "release:github": "npm run check && npm run dist:dir && node scripts/write-app-update-config.js && electron-builder build --prepackaged dist/win-unpacked --win nsis --publish always"
+    "release:github": "npm run check && npm run dist:dir && node scripts/write-app-update-config.js && electron-builder build --prepackaged dist/win-unpacked --win nsis --publish never"
   },
   "keywords": [
     "minecraft",

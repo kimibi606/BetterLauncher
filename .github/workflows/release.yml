@@ -29,9 +29,34 @@ jobs:
       - name: Validate release
         run: npm run check
 
-      - name: Publish GitHub release
+      - name: Build release
         run: npm run release:github
+
+      - name: Publish release assets
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BETTERMON_GITHUB_OWNER: kimibi606
           BETTERMON_GITHUB_REPO: ExamplePack
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = "${{ github.ref_name }}"
+          $version = node -p "require('./package.json').version"
+          $repository = "$env:BETTERMON_GITHUB_OWNER/$env:BETTERMON_GITHUB_REPO"
+          $assets = @(
+            "dist/BetterMon Launcher Setup $version.exe",
+            "dist/BetterMon Launcher Setup $version.exe.blockmap",
+            "dist/latest.yml"
+          )
+
+          foreach ($asset in $assets) {
+            if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) {
+              throw "Required release asset is missing: $asset"
+            }
+          }
+
+          gh release view $tag --repo $repository *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --repo $repository --title $tag --generate-notes --verify-tag
+          }
+          gh release upload $tag @assets --repo $repository --clobber
