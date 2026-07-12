@@ -51,6 +51,7 @@
     "win": {
       "icon": "src/assets/app-icon.ico",
       "signExecutable": false,
+      "artifactName": "ExamplePack-Setup-${version}.${ext}",
       "target": [
         {
           "target": "nsis",

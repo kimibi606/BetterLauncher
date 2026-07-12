@@ -44,8 +44,8 @@ jobs:
           $version = node -p "require('./package.json').version"
           $repository = "$env:BETTERMON_GITHUB_OWNER/$env:BETTERMON_GITHUB_REPO"
           $assets = @(
-            "dist/BetterMon Launcher Setup $version.exe",
-            "dist/BetterMon Launcher Setup $version.exe.blockmap",
+            "dist/ExamplePack-Setup-$version.exe",
+            "dist/ExamplePack-Setup-$version.exe.blockmap",
             "dist/latest.yml"
           )
 
@@ -58,5 +58,14 @@ jobs:
           gh release view $tag --repo $repository *> $null
           if ($LASTEXITCODE -ne 0) {
             gh release create $tag --repo $repository --title $tag --generate-notes --verify-tag
+          }
+          $existingAssetNames = @(gh release view $tag --repo $repository --json assets --jq '.assets[].name')
+          @(
+            "BetterMon.Launcher.Setup.$version.exe",
+            "BetterMon.Launcher.Setup.$version.exe.blockmap"
+          ) | ForEach-Object {
+            if ($existingAssetNames -contains $_) {
+              gh release delete-asset $tag $_ --repo $repository --yes
+            }
           }
           gh release upload $tag @assets --repo $repository --clobber
