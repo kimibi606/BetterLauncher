@@ -2121,6 +2121,27 @@ async function fetchModpackManifestSource() {
 
   const directManifestUrl = buildGitHubLatestReleaseAssetUrl(repository, manifestConfig.manifestAsset);
 
+  // The public release asset URL does not consume the GitHub REST API quota.
+  // Try it first so a rate limit or a transient API 403 never prevents an
+  // already published modpack manifest from being loaded.
+  let directManifestFailure = null;
+  try {
+    const loadedManifest = await fetchTextFromCandidateUrls(
+      [{ url: directManifestUrl, sourceKey: `github-latest:${repository}:${manifestConfig.manifestAsset}` }],
+      manifestConfig.timeoutMs,
+      `modpack manifest (${manifestConfig.manifestAsset})`
+    );
+    return {
+      text: loadedManifest.text,
+      json: JSON.parse(loadedManifest.text),
+      manifestLocation: loadedManifest.url,
+      sourceKind: "http",
+      sourceKey: loadedManifest.sourceKey
+    };
+  } catch (error) {
+    directManifestFailure = error;
+  }
+
   const [owner, repo] = repository.split("/");
   const apiUrl = `${manifestConfig.apiBaseUrl}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases/latest`;
   const releaseResponse = await fetchWithTimeout(
@@ -2131,7 +2152,11 @@ async function fetchModpackManifestSource() {
     manifestConfig.timeoutMs
   );
   if (!releaseResponse.ok) {
-    throw new Error(`Failed to load latest modpack GitHub release (${releaseResponse.status}).`);
+    throw new Error(
+      `Failed to load latest modpack GitHub release (${releaseResponse.status}) after direct manifest download failed: ${String(
+        directManifestFailure?.message || directManifestFailure || "unknown error"
+      )}`
+    );
   }
 
   const release = await releaseResponse.json();
@@ -4649,6 +4674,12 @@ function isModpackNotFoundFailure(message) {
   return /\(404\)/.test(String(message || ""));
 }
 
+function isModpackTransientRemoteFailure(message) {
+  return /(\(40[38]\)|\(429\)|\(5\d\d\)|timed? out|network|fetch failed|econnreset|enotfound)/i.test(
+    String(message || "")
+  );
+}
+
 async function synchronizeModpack(options) {
   const launcherPreset = normalizeLauncherPreset(options?.launcherPreset, detectLauncherPreset().preset);
   const modpackRoot = asTrimmedText(options?.gameDirectory) || asTrimmedText(options?.minecraftDirectory);
@@ -4702,16 +4733,16 @@ async function synchronizeModpack(options) {
   }
 
   const existingState = readModpackState(modpackRoot);
-  if (sourceFailures.some((message) => isModpackNotFoundFailure(message)) && existingState) {
+  if (sourceFailures.some((message) => isModpackNotFoundFailure(message) || isModpackTransientRemoteFailure(message)) && existingState) {
     modpackSessionSyncedKeys.add(sessionKey);
     sendLog({
       level: "warn",
-      message: "Modpack source returned 404. Keeping previously applied modpack files."
+      message: "Modpack source is temporarily unavailable. Keeping previously applied modpack files."
     });
     return {
       ok: true,
       skipped: true,
-      reason: "source-404-using-existing-state",
+      reason: "source-unavailable-using-existing-state",
       version: asTrimmedText(existingState?.version),
       presetRules: existingState?.presetRules || null
     };
@@ -4732,17 +4763,21 @@ async function checkModpackUpdate(options) {
   try {
     manifestSource = await fetchModpackManifestSource();
   } catch (error) {
-    if (previousState && isModpackNotFoundFailure(String(error?.message || error))) {
+    if (
+      previousState &&
+      (isModpackNotFoundFailure(String(error?.message || error)) ||
+        isModpackTransientRemoteFailure(String(error?.message || error)))
+    ) {
       sendLog({
         level: "warn",
-        message: "Modpack manifest returned 404. Keeping previously applied modpack files."
+        message: "Modpack manifest is temporarily unavailable. Keeping previously applied modpack files."
       });
       return {
         ok: true,
         supported: true,
         pending: false,
         preset: launcherPreset,
-        reason: "manifest-404-using-existing-state",
+        reason: "manifest-unavailable-using-existing-state",
         currentVersion: asTrimmedText(previousState?.version),
         latestVersion: asTrimmedText(previousState?.version),
         currentArchiveSha1: normalizeSha1(previousState?.archiveSha1),
