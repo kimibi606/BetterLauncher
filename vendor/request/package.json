@@ -1,0 +1,10 @@
+{
+  "name": "request",
+  "version": "2.88.3-bettermon.1",
+  "description": "Minimal, SSRF-hardened request compatibility layer for BetterMon Launcher",
+  "main": "index.js",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}

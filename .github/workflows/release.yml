@@ -26,6 +26,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Validate release
+        run: npm run check
+
       - name: Publish GitHub release
         run: npm run release:github
         env:

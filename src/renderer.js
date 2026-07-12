@@ -2448,8 +2448,11 @@ async function ensureLatestLauncherOnStartup() {
     const result = await window.launcherApi.ensureLatestLauncherUpdate();
     if (!result?.ok) {
       const message = localizeStatusMessage(result?.error || "Launcher update check failed.");
-      setStartupProgress(startupProgressPercent, message, true);
-      await new Promise(() => {});
+      setStartupProgress(
+        STARTUP_SETTINGS_PROGRESS + 12,
+        `런처 업데이트를 확인하지 못했습니다. 현재 버전으로 계속합니다. (${message})`
+      );
+      return;
     }
 
     if (result.restarting) {
@@ -2479,8 +2482,9 @@ async function ensureLatestLauncherBeforeLaunch() {
   try {
     const result = await window.launcherApi.ensureLatestLauncherUpdate();
     if (!result?.ok) {
-      setLaunchStatus(localizeStatusMessage(result?.error || "Launcher update check failed."), true);
-      return false;
+      const message = localizeStatusMessage(result?.error || "Launcher update check failed.");
+      setLaunchStatus(`런처 업데이트를 확인하지 못해 현재 버전으로 계속합니다. (${message})`);
+      return true;
     }
 
     if (result.restarting) {

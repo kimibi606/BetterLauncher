@@ -8,7 +8,7 @@ const { Readable } = require("stream");
 const { pipeline } = require("stream/promises");
 const { fileURLToPath } = require("url");
 
-const { app, BrowserWindow, dialog, ipcMain, screen, shell, safeStorage } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, screen, session, shell, safeStorage } = require("electron");
 const { autoUpdater } = require("electron-updater");
 const { Client } = require("minecraft-launcher-core");
 
@@ -59,6 +59,8 @@ const MODPACK_ALLOWED_ROOT_FILES = new Set(["options.txt"]);
 const NETWORK_RETRY_ATTEMPTS = 3;
 const NETWORK_RETRY_DELAYS_MS = [800, 2000, 4000];
 const NETWORK_RETRYABLE_HTTP_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+const NETWORK_API_TIMEOUT_MS = 30000;
+const NETWORK_DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
 const LAUNCHER_USER_DATA_DIRECTORY = ".bettermonlauncher";
 const LEGACY_USER_DATA_DIRECTORY_CANDIDATES = ["bettermon-launcher", "BetterMon Launcher"];
 const LAUNCHER_RUNTIME_DIRECTORY = "runtime";
@@ -129,6 +131,7 @@ let cachedModpackConfigFingerprint = "";
 let cachedModpackConfigValue = null;
 const modpackSessionSyncedKeys = new Set();
 const modpackArchiveSessionCache = new Map();
+const modpackOperationPromises = new Map();
 let activeUpdaterCheckPromise = null;
 const updaterState = {
   enabled: false,
@@ -477,9 +480,59 @@ function migrateLegacyStateLayoutIfNeeded() {
 }
 
 configureLauncherUserDataPath();
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 function asTrimmedText(value) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function createRequestTimeoutSignal(timeoutMs) {
+  const normalizedTimeout = Math.max(1000, Number(timeoutMs) || NETWORK_API_TIMEOUT_MS);
+  return AbortSignal.timeout(normalizedTimeout);
+}
+
+async function writeJsonFileAtomic(filePath, value, options = {}) {
+  const targetPath = path.resolve(filePath);
+  const tempPath = `${targetPath}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
+  await fs.promises.mkdir(path.dirname(targetPath), { recursive: true });
+  try {
+    await fs.promises.writeFile(tempPath, JSON.stringify(value, null, 2), {
+      encoding: "utf8",
+      ...options
+    });
+    await fs.promises.rename(tempPath, targetPath);
+  } finally {
+    await fs.promises.rm(tempPath, { force: true }).catch(() => {});
+  }
+}
+
+function writeJsonFileAtomicSync(filePath, value, options = {}) {
+  const targetPath = path.resolve(filePath);
+  const tempPath = `${targetPath}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+  try {
+    fs.writeFileSync(tempPath, JSON.stringify(value, null, 2), {
+      encoding: "utf8",
+      ...options
+    });
+    fs.renameSync(tempPath, targetPath);
+  } finally {
+    fs.rmSync(tempPath, { force: true });
+  }
+}
+
+async function runModpackOperationExclusive(modpackRoot, operation) {
+  const key = normalizePathForCompare(modpackRoot);
+  const previous = modpackOperationPromises.get(key) || Promise.resolve();
+  const current = previous.catch(() => {}).then(operation);
+  modpackOperationPromises.set(key, current);
+  try {
+    return await current;
+  } finally {
+    if (modpackOperationPromises.get(key) === current) {
+      modpackOperationPromises.delete(key);
+    }
+  }
 }
 
 function parseJvmCustomArgs(rawValue) {
@@ -941,8 +994,7 @@ function readModpackState(modpackRoot) {
 
 async function writeModpackState(modpackRoot, state) {
   const statePath = getModpackStatePath(modpackRoot);
-  await fs.promises.mkdir(path.dirname(statePath), { recursive: true });
-  await fs.promises.writeFile(statePath, JSON.stringify(state, null, 2), "utf8");
+  await writeJsonFileAtomic(statePath, state);
 }
 
 function normalizePresetModPattern(value) {
@@ -1201,11 +1253,11 @@ async function getPathEntryType(targetPath) {
 }
 
 async function downloadFileOnce(url, destinationPath) {
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     redirect: "follow",
     cache: "no-store",
     headers: buildHttpHeaders(url)
-  });
+  }, NETWORK_DOWNLOAD_TIMEOUT_MS);
   if (!response.ok) {
     const error = new Error(`Download failed (${response.status}): ${url}`);
     error.status = response.status;
@@ -1275,11 +1327,11 @@ async function readTextFromSource(source, label) {
   }
 
   if (source.kind === "http") {
-    const response = await fetch(source.value, {
+    const response = await fetchWithTimeout(source.value, {
       redirect: "follow",
       cache: "no-store",
       headers: buildHttpHeaders(source.value)
-    });
+    }, NETWORK_API_TIMEOUT_MS);
     if (!response.ok) {
       throw new Error(`Failed to fetch ${label} (${response.status}).`);
     }
@@ -1393,12 +1445,12 @@ function normalizeZipExtractionError(archivePath, error, stage) {
 
 async function getHttpResourceFingerprint(url) {
   try {
-    const response = await fetch(url, {
+    const response = await fetchWithTimeout(url, {
       method: "HEAD",
       redirect: "follow",
       cache: "no-store",
       headers: buildHttpHeaders(url)
-    });
+    }, NETWORK_API_TIMEOUT_MS);
     if (!response.ok) {
       return "";
     }
@@ -2430,21 +2482,12 @@ function buildAutoConnectTarget() {
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = SERVER_STATUS_TIMEOUT_MS) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => {
-    controller.abort();
-  }, timeoutMs);
-
-  try {
-    return await fetch(url, {
-      redirect: "follow",
-      cache: "no-store",
-      ...options,
-      signal: controller.signal
-    });
-  } finally {
-    clearTimeout(timeout);
-  }
+  return fetch(url, {
+    redirect: "follow",
+    cache: "no-store",
+    ...options,
+    signal: createRequestTimeoutSignal(timeoutMs)
+  });
 }
 
 function hasMeaningfulPlayerCapacity(serverStatus) {
@@ -4751,17 +4794,19 @@ async function runModpackSyncFromPayload(payload, options = {}) {
     return { ok: false, error: "Minecraft directory is required." };
   }
 
+  const modpackRoot = gameDirectory || minecraftDirectory;
   try {
-    const modpackRoot = gameDirectory || minecraftDirectory;
-    const result = await synchronizeModpack({
-      launcherPreset,
-      minecraftDirectory,
-      gameDirectory,
-      skipIfSessionSynced: Boolean(options?.skipIfSessionSynced)
+    return await runModpackOperationExclusive(modpackRoot, async () => {
+      const result = await synchronizeModpack({
+        launcherPreset,
+        minecraftDirectory,
+        gameDirectory,
+        skipIfSessionSynced: Boolean(options?.skipIfSessionSynced)
+      });
+      const statePresetRules = result?.presetRules || readModpackState(modpackRoot)?.presetRules || null;
+      const presetMods = await applyPresetModRules(modpackRoot, launcherPreset, statePresetRules);
+      return { ok: true, ...result, presetMods };
     });
-    const statePresetRules = result?.presetRules || readModpackState(modpackRoot)?.presetRules || null;
-    const presetMods = await applyPresetModRules(modpackRoot, launcherPreset, statePresetRules);
-    return { ok: true, ...result, presetMods };
   } catch (error) {
     return { ok: false, error: String(error?.message || error) };
   }
@@ -4776,15 +4821,17 @@ async function runModpackUpdateCheckFromPayload(payload) {
     return { ok: false, error: "Minecraft directory is required." };
   }
 
+  const modpackRoot = gameDirectory || minecraftDirectory;
   try {
-    const result = await checkModpackUpdate({
-      launcherPreset,
-      minecraftDirectory,
-      gameDirectory
+    return await runModpackOperationExclusive(modpackRoot, async () => {
+      const result = await checkModpackUpdate({
+        launcherPreset,
+        minecraftDirectory,
+        gameDirectory
+      });
+      const presetMods = await applyPresetModRules(modpackRoot, launcherPreset, result?.presetRules);
+      return { ...result, presetMods };
     });
-    const modpackRoot = gameDirectory || minecraftDirectory;
-    const presetMods = await applyPresetModRules(modpackRoot, launcherPreset, result?.presetRules);
-    return { ...result, presetMods };
   } catch (error) {
     return { ok: false, error: String(error?.message || error) };
   }
@@ -4804,54 +4851,56 @@ async function prefetchModpackArchivesFromPayload(payload) {
     return { ok: false, error: "Minecraft directory is required." };
   }
 
-  let attemptedCount = 0;
-  let downloadedCount = 0;
-  let reusedCount = 0;
-  const failedPresets = [];
+  return runModpackOperationExclusive(modpackRoot, async () => {
+    let attemptedCount = 0;
+    let downloadedCount = 0;
+    let reusedCount = 0;
+    const failedPresets = [];
 
-  for (const preset of LAUNCHER_PRESET_OPTIONS) {
-    if (excludedPresets.has(preset)) {
-      continue;
-    }
-
-    const archiveSource = getModpackArchiveSource(preset);
-    if (!archiveSource) {
-      continue;
-    }
-
-    attemptedCount += 1;
-
-    try {
-      const cacheResult = await ensureModpackArchiveCached({
-        launcherPreset: preset,
-        modpackRoot,
-        archiveSource,
-        expectedSha256: getModpackArchiveSha256(preset),
-        downloadLogMessage: `Prefetching modpack archive (${preset.toUpperCase()})...`
-      });
-
-      if (cacheResult.usedCachedArchive) {
-        reusedCount += 1;
-      } else {
-        downloadedCount += 1;
+    for (const preset of LAUNCHER_PRESET_OPTIONS) {
+      if (excludedPresets.has(preset)) {
+        continue;
       }
-    } catch (error) {
-      const message = String(error?.message || error);
-      failedPresets.push(`${preset}: ${message}`);
-      sendLog({
-        level: "warn",
-        message: `Failed to prefetch modpack archive (${preset.toUpperCase()}): ${message}`
-      });
-    }
-  }
 
-  return {
-    ok: failedPresets.length === 0,
-    attemptedCount,
-    downloadedCount,
-    reusedCount,
-    failedPresets
-  };
+      const archiveSource = getModpackArchiveSource(preset);
+      if (!archiveSource) {
+        continue;
+      }
+
+      attemptedCount += 1;
+
+      try {
+        const cacheResult = await ensureModpackArchiveCached({
+          launcherPreset: preset,
+          modpackRoot,
+          archiveSource,
+          expectedSha256: getModpackArchiveSha256(preset),
+          downloadLogMessage: `Prefetching modpack archive (${preset.toUpperCase()})...`
+        });
+
+        if (cacheResult.usedCachedArchive) {
+          reusedCount += 1;
+        } else {
+          downloadedCount += 1;
+        }
+      } catch (error) {
+        const message = String(error?.message || error);
+        failedPresets.push(`${preset}: ${message}`);
+        sendLog({
+          level: "warn",
+          message: `Failed to prefetch modpack archive (${preset.toUpperCase()}): ${message}`
+        });
+      }
+    }
+
+    return {
+      ok: failedPresets.length === 0,
+      attemptedCount,
+      downloadedCount,
+      reusedCount,
+      failedPresets
+    };
+  });
 }
 
 async function prepareRuntimeFromPayload(payload) {
@@ -4980,10 +5029,8 @@ function readMicrosoftAuthCachePayload() {
 function writeMicrosoftAuthCachePayload(payload) {
   try {
     const filePath = getMicrosoftAuthCachePath();
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
     const packedPayload = packMicrosoftAuthCachePayload(payload);
-    fs.writeFileSync(filePath, JSON.stringify(packedPayload, null, 2), {
-      encoding: "utf8",
+    writeJsonFileAtomicSync(filePath, packedPayload, {
       mode: 0o600
     });
   } catch (error) {
@@ -5290,6 +5337,17 @@ async function checkForAppUpdates({ manual = false } = {}) {
     };
   }
 
+  if (updaterState.downloaded) {
+    return {
+      ok: true,
+      available: true,
+      downloading: false,
+      downloaded: true,
+      currentVersion: asTrimmedText(updaterState.currentVersion),
+      latestVersion: asTrimmedText(updaterState.latestVersion)
+    };
+  }
+
   if (activeUpdaterCheckPromise) {
     return activeUpdaterCheckPromise;
   }
@@ -5403,6 +5461,9 @@ function schedulePeriodicUpdateChecks() {
   }
 
   updaterPeriodicTimer = setInterval(() => {
+    if (updaterState.checking || updaterState.downloading || updaterState.downloaded) {
+      return;
+    }
     checkForAppUpdates().catch((error) => {
       const message = String(error?.message || error);
       sendLog({ level: "warn", message: `Scheduled update check failed: ${message}` });
@@ -5866,7 +5927,7 @@ function requestMicrosoftAuthorizationCode({ authorizeUrl, redirectUri, expected
 async function requestJsonWithAuthContext(url, options, contextMessage) {
   let response;
   try {
-    response = await fetch(url, options);
+    response = await fetchWithTimeout(url, options, NETWORK_API_TIMEOUT_MS);
   } catch (error) {
     throw new Error(`${contextMessage}: ${String(error?.message || error)}`);
   }
@@ -6126,7 +6187,7 @@ function signXboxRequestPayload({ method, requestPath, authorization = "", bodyT
 async function requestJsonResponseWithAuthContext(url, options, contextMessage) {
   let response;
   try {
-    response = await fetch(url, options);
+    response = await fetchWithTimeout(url, options, NETWORK_API_TIMEOUT_MS);
   } catch (error) {
     throw new Error(`${contextMessage}: ${String(error?.message || error)}`);
   }
@@ -7233,7 +7294,7 @@ async function ensureFabricVersionInDirectory(minecraftDirectory) {
     level: "progress",
     message: "Fetching Fabric loader metadata..."
   });
-  const versionsResponse = await fetch(versionsApiUrl, { redirect: "follow", cache: "no-store" });
+  const versionsResponse = await fetchWithTimeout(versionsApiUrl, {}, NETWORK_API_TIMEOUT_MS);
   if (!versionsResponse.ok) {
     throw new Error(`Failed to query Fabric loader versions (${versionsResponse.status}).`);
   }
@@ -7261,7 +7322,7 @@ async function ensureFabricVersionInDirectory(minecraftDirectory) {
     level: "progress",
     message: `Downloading Fabric profile (${loaderVersion})...`
   });
-  const profileResponse = await fetch(profileUrl, { redirect: "follow", cache: "no-store" });
+  const profileResponse = await fetchWithTimeout(profileUrl, {}, NETWORK_API_TIMEOUT_MS);
   if (!profileResponse.ok) {
     throw new Error(`Failed to download Fabric profile (${profileResponse.status}).`);
   }
@@ -7337,6 +7398,7 @@ function createWindow() {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
       webSecurity: true,
       allowRunningInsecureContent: false,
       webviewTag: false
@@ -7710,14 +7772,21 @@ ipcMain.handle("launcher:launch", async (_, payload) => {
     const fullscreen = Boolean(payload?.fullscreen);
     const autoConnectEnabled = payload?.autoConnect !== false;
     const versionType = "release";
-    const ramMin = Number(payload?.ramMin || 6144);
-    const ramMax = Number(payload?.ramMax || 6144);
+    const ramMin = asIntegerInRange(payload?.ramMin, 6144, 512, 262144);
+    const ramMax = asIntegerInRange(payload?.ramMax, 6144, 512, 262144);
+    const systemMemoryMb = Math.max(512, Math.floor(os.totalmem() / (1024 * 1024)));
 
     if (!minecraftDirectory) {
       return { ok: false, error: "Minecraft directory is required." };
     }
     if (!Number.isFinite(ramMin) || !Number.isFinite(ramMax) || ramMin <= 0 || ramMax <= 0 || ramMin > ramMax) {
       return { ok: false, error: "Memory values are invalid." };
+    }
+    if (ramMax > systemMemoryMb) {
+      return {
+        ok: false,
+        error: `Maximum memory cannot exceed installed system memory (${systemMemoryMb} MB).`
+      };
     }
 
     let resolvedJavaPath = "";
@@ -7988,6 +8057,7 @@ ipcMain.handle("launcher:launch", async (_, payload) => {
       const launchProcess = await launcher.launch({
         authorization,
         root: minecraftDirectory,
+        timeout: NETWORK_API_TIMEOUT_MS,
         version: launchVersionConfig,
         ...(autoConnectTarget.ok
           ? {
@@ -8059,24 +8129,40 @@ ipcMain.handle("launcher:launch", async (_, payload) => {
   }
 });
 
-app.whenReady().then(() => {
-  migrateLegacyUserDataIfNeeded();
-  migrateLegacyStateLayoutIfNeeded();
-
-  if (process.platform === "darwin" && app.dock && fs.existsSync(APP_ICON_PATH)) {
-    app.dock.setIcon(APP_ICON_PATH);
-  }
-
-  loadCachedMicrosoftAccount();
-  createWindow();
-  setupAutoUpdater();
-
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
-    }
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    withMainWindow((win) => {
+      if (win.isMinimized()) {
+        win.restore();
+      }
+      win.show();
+      win.focus();
+    });
   });
-});
+
+  app.whenReady().then(() => {
+    migrateLegacyUserDataIfNeeded();
+    migrateLegacyStateLayoutIfNeeded();
+
+    if (process.platform === "darwin" && app.dock && fs.existsSync(APP_ICON_PATH)) {
+      app.dock.setIcon(APP_ICON_PATH);
+    }
+
+    loadCachedMicrosoftAccount();
+    session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+    session.defaultSession.setPermissionCheckHandler(() => false);
+    createWindow();
+    setupAutoUpdater();
+
+    app.on("activate", () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        createWindow();
+      }
+    });
+  });
+}
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {

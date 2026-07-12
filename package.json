@@ -1,14 +1,15 @@
 {
   "name": "bettermon-launcher",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "description": "Custom Minecraft launcher built with Electron, JS and CSS.",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "check": "node --check main.js && node --check preload.js && node --check src/renderer.js && node --check vendor/request/index.js && node scripts/validate-release.js",
     "dist": "electron-builder build",
     "dist:win": "electron-builder build --win nsis",
     "dist:dir": "electron-builder build --dir",
-    "release:github": "npm run dist:dir && node scripts/patch-win-exe-icon.js && node scripts/write-app-update-config.js && electron-builder build --prepackaged dist/win-unpacked --win nsis --publish always"
+    "release:github": "npm run check && npm run dist:dir && node scripts/write-app-update-config.js && electron-builder build --prepackaged dist/win-unpacked --win nsis --publish always"
   },
   "keywords": [
     "minecraft",
@@ -18,14 +19,19 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "electron-updater": "^6.7.1",
+    "electron-updater": "^6.8.9",
     "minecraft-launcher-core": "^3.18.2",
-    "msmc": "^5.0.5"
+    "request": "file:vendor/request"
   },
   "devDependencies": {
-    "electron": "^35.0.1",
-    "electron-builder": "^26.0.12",
-    "rcedit": "^5.0.2"
+    "electron": "^43.1.0",
+    "electron-builder": "^26.15.3"
+  },
+  "overrides": {
+    "minecraft-launcher-core": {
+      "request": "$request",
+      "uuid": "^11.1.1"
+    }
   },
   "build": {
     "appId": "com.bettermon.launcher",
@@ -35,6 +41,7 @@
       "main.js",
       "preload.js",
       "src/**/*",
+      "vendor/request/**/*",
       "package.json",
       "modpack.config.json"
     ],
@@ -43,7 +50,7 @@
     },
     "win": {
       "icon": "src/assets/app-icon.ico",
-      "signAndEditExecutable": false,
+      "signExecutable": false,
       "target": [
         {
           "target": "nsis",
