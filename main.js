@@ -56,6 +56,10 @@ const MODPACK_ALLOWED_TOP_LEVEL_DIRECTORIES = new Set([
 const MODPACK_MODS_DIRECTORY = "mods";
 const MODPACK_DISABLED_MODS_DIRECTORY = "mods-disabled";
 const MODPACK_ALLOWED_ROOT_FILES = new Set(["options.txt"]);
+// These locations are owned by each player once created. A modpack update may
+// add missing files here, but must never replace their existing preferences.
+const MODPACK_USER_PRESERVED_TOP_LEVEL_DIRECTORIES = new Set(["config", "resourcepacks", "shaderpacks"]);
+const MODPACK_USER_PRESERVED_ROOT_FILES = new Set(["options.txt"]);
 const NETWORK_RETRY_ATTEMPTS = 3;
 const NETWORK_RETRY_DELAYS_MS = [800, 2000, 4000];
 const NETWORK_RETRYABLE_HTTP_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
@@ -946,6 +950,15 @@ function isAllowedManagedModpackPath(relativePath) {
   const normalized = normalizeRelativeModpackPath(relativePath);
   const topLevel = normalized.split("/")[0];
   return MODPACK_ALLOWED_TOP_LEVEL_DIRECTORIES.has(topLevel) || MODPACK_ALLOWED_ROOT_FILES.has(topLevel);
+}
+
+function isUserPreservedModpackPath(relativePath) {
+  const normalized = normalizeRelativeModpackPath(relativePath);
+  const topLevel = normalized.split("/")[0];
+  return (
+    MODPACK_USER_PRESERVED_TOP_LEVEL_DIRECTORIES.has(topLevel) ||
+    MODPACK_USER_PRESERVED_ROOT_FILES.has(topLevel)
+  );
 }
 
 function resolveModpackTargetPath(rootDirectory, relativePath) {
@@ -3907,6 +3920,9 @@ async function removeArchiveTopLevelEntries(modpackRoot, entries) {
     if (isLauncherManagedInternalModpackPath(normalized)) {
       continue;
     }
+    if (isUserPreservedModpackPath(normalized)) {
+      continue;
+    }
     const absolutePath = resolveModpackTargetPath(modpackRoot, normalized);
     if (!fs.existsSync(absolutePath)) {
       continue;
@@ -4005,11 +4021,15 @@ async function extractManagedZipArchive(archivePath, destinationPath) {
   const escapedDestination = escapePowerShellLiteral(path.resolve(destinationPath));
   const allowedDirectories = buildPowerShellStringArray(MODPACK_ALLOWED_TOP_LEVEL_DIRECTORIES);
   const allowedFiles = buildPowerShellStringArray(MODPACK_ALLOWED_ROOT_FILES);
+  const preservedDirectories = buildPowerShellStringArray(MODPACK_USER_PRESERVED_TOP_LEVEL_DIRECTORIES);
+  const preservedFiles = buildPowerShellStringArray(MODPACK_USER_PRESERVED_ROOT_FILES);
   const script = [
     "$ErrorActionPreference = 'Stop'",
     "Add-Type -AssemblyName System.IO.Compression.FileSystem",
     `$allowedDirectories = ${allowedDirectories}`,
     `$allowedFiles = ${allowedFiles}`,
+    `$preservedDirectories = ${preservedDirectories}`,
+    `$preservedFiles = ${preservedFiles}`,
     `$destinationRoot = [System.IO.Path]::GetFullPath('${escapedDestination}')`,
     "$trimChars = [char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)",
     "$destinationRootWithSeparator = $destinationRoot.TrimEnd($trimChars) + [System.IO.Path]::DirectorySeparatorChar",
@@ -4033,6 +4053,8 @@ async function extractManagedZipArchive(archivePath, destinationPath) {
     "    if ($target -ne $destinationRoot -and -not $target.StartsWith($destinationRootWithSeparator, [System.StringComparison]::OrdinalIgnoreCase)) {",
     "      throw \"ZIP entry escapes modpack root: $normalized\"",
     "    }",
+    "    $preserveExisting = ($preservedDirectories -contains $topLevel) -or ($preservedFiles -contains $topLevel)",
+    "    if ($preserveExisting -and (Test-Path -LiteralPath $target)) { continue }",
     "    if ($entry.FullName.EndsWith('/') -or $entry.FullName.EndsWith('\\')) {",
     "      [System.IO.Directory]::CreateDirectory($target) | Out-Null",
     "      continue",
