@@ -2261,6 +2261,7 @@ function parseModpackManifest(manifestSource) {
     id: asTrimmedText(json.id) || "bettermon",
     version: asTrimmedText(json.version) || archiveSha1.slice(0, 12),
     minecraftVersion: asTrimmedText(json.minecraftVersion),
+    resetExistingFiles: json.resetExistingFiles === true,
     archive: {
       source: archiveSource,
       sha1: archiveSha1,
@@ -3913,14 +3914,15 @@ async function listArchiveTopLevelEntries(archivePath) {
   return Array.from(new Set(lines));
 }
 
-async function removeArchiveTopLevelEntries(modpackRoot, entries) {
+async function removeArchiveTopLevelEntries(modpackRoot, entries, options = {}) {
+  const preserveUserData = options?.preserveUserData !== false;
   let removedCount = 0;
   for (const entry of entries) {
     const normalized = normalizeRelativeModpackPath(entry);
     if (isLauncherManagedInternalModpackPath(normalized)) {
       continue;
     }
-    if (isUserPreservedModpackPath(normalized)) {
+    if (preserveUserData && isUserPreservedModpackPath(normalized)) {
       continue;
     }
     const absolutePath = resolveModpackTargetPath(modpackRoot, normalized);
@@ -4012,7 +4014,7 @@ function buildPowerShellStringArray(values) {
     .join(",")})`;
 }
 
-async function extractManagedZipArchive(archivePath, destinationPath) {
+async function extractManagedZipArchive(archivePath, destinationPath, options = {}) {
   if (process.platform !== "win32") {
     throw new Error("ZIP modpack sync currently supports Windows only.");
   }
@@ -4023,6 +4025,7 @@ async function extractManagedZipArchive(archivePath, destinationPath) {
   const allowedFiles = buildPowerShellStringArray(MODPACK_ALLOWED_ROOT_FILES);
   const preservedDirectories = buildPowerShellStringArray(MODPACK_USER_PRESERVED_TOP_LEVEL_DIRECTORIES);
   const preservedFiles = buildPowerShellStringArray(MODPACK_USER_PRESERVED_ROOT_FILES);
+  const preserveExistingUserFiles = options?.preserveUserData !== false ? "$true" : "$false";
   const script = [
     "$ErrorActionPreference = 'Stop'",
     "Add-Type -AssemblyName System.IO.Compression.FileSystem",
@@ -4030,6 +4033,7 @@ async function extractManagedZipArchive(archivePath, destinationPath) {
     `$allowedFiles = ${allowedFiles}`,
     `$preservedDirectories = ${preservedDirectories}`,
     `$preservedFiles = ${preservedFiles}`,
+    `$preserveExistingUserFiles = ${preserveExistingUserFiles}`,
     `$destinationRoot = [System.IO.Path]::GetFullPath('${escapedDestination}')`,
     "$trimChars = [char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)",
     "$destinationRootWithSeparator = $destinationRoot.TrimEnd($trimChars) + [System.IO.Path]::DirectorySeparatorChar",
@@ -4054,7 +4058,7 @@ async function extractManagedZipArchive(archivePath, destinationPath) {
     "      throw \"ZIP entry escapes modpack root: $normalized\"",
     "    }",
     "    $preserveExisting = ($preservedDirectories -contains $topLevel) -or ($preservedFiles -contains $topLevel)",
-    "    if ($preserveExisting -and (Test-Path -LiteralPath $target)) { continue }",
+    "    if ($preserveExistingUserFiles -and $preserveExisting -and (Test-Path -LiteralPath $target)) { continue }",
     "    if ($entry.FullName.EndsWith('/') -or $entry.FullName.EndsWith('\\')) {",
     "      [System.IO.Directory]::CreateDirectory($target) | Out-Null",
     "      continue",
@@ -4372,11 +4376,17 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
     throw normalizeZipExtractionError(cacheResult.archivePath, error, "analyze");
   }
 
+  const shouldResetExistingFiles = manifest.resetExistingFiles;
+  const entriesToRemove = shouldResetExistingFiles
+    ? [...MODPACK_ALLOWED_TOP_LEVEL_DIRECTORIES, ...MODPACK_ALLOWED_ROOT_FILES]
+    : topLevelEntries;
   sendLog({
     level: "progress",
-    message: "Cleaning previous modpack files..."
+    message: shouldResetExistingFiles ? "Resetting existing modpack files..." : "Cleaning previous modpack files..."
   });
-  const removedCount = await removeArchiveTopLevelEntries(modpackRoot, topLevelEntries);
+  const removedCount = await removeArchiveTopLevelEntries(modpackRoot, entriesToRemove, {
+    preserveUserData: !shouldResetExistingFiles
+  });
 
   sendLog({
     level: "progress",
@@ -4384,7 +4394,9 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
   });
   let entries;
   try {
-    entries = await extractManagedZipArchive(cacheResult.archivePath, modpackRoot);
+    entries = await extractManagedZipArchive(cacheResult.archivePath, modpackRoot, {
+      preserveUserData: !shouldResetExistingFiles
+    });
   } catch (error) {
     throw normalizeZipExtractionError(cacheResult.archivePath, error, "extract");
   }
@@ -4404,6 +4416,7 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
     archiveSha1: manifest.archive.sha1,
     archiveSize: manifest.archive.size,
     archiveCachePath: cacheResult.archivePath,
+    resetExistingFiles: shouldResetExistingFiles,
     presetRules: manifest.presetRules || null,
     appliedAt: new Date().toISOString(),
     updatedCount: entries.length,

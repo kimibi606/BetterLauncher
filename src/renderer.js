@@ -1368,6 +1368,7 @@ function localizeStatusMessage(message) {
     "Fetching Fabric loader metadata...": "\uD328\uBE0C\uB9AD \uB85C\uB354 \uBA54\uD0C0\uB370\uC774\uD130 \uC870\uD68C \uC911...",
     "Analyzing modpack archive contents...": "\uBAA8\uB4DC\uD329 \uC544\uCE74\uC774\uBE0C \uB0B4\uC6A9 \uBD84\uC11D \uC911...",
     "Cleaning previous modpack files...": "\uAE30\uC874 \uBAA8\uB4DC\uD329 \uD30C\uC77C \uC815\uB9AC \uC911...",
+    "Resetting existing modpack files...": "\uAE30\uC874 \uBAA8\uB4DC\uD329 \uD30C\uC77C\uC744 \uCD08\uAE30\uD654\uD558\uB294 \uC911...",
     "Extracting modpack archive...": "\uBAA8\uB4DC\uD329 \uC544\uCE74\uC774\uBE0C \uCD94\uCD9C \uC911...",
     "Modpack distribution is already up to date.": "\uBAA8\uB4DC\uD329 \uBC30\uD3EC \uD30C\uC77C\uC774 \uCD5C\uC2E0 \uC0C1\uD0DC\uC785\uB2C8\uB2E4.",
     "Modpack archive is up to date (SHA256 pinned).": "\uBAA8\uB4DC\uD329 \uC544\uCE74\uC774\uBE0C\uAC00 \uCD5C\uC2E0 \uC0C1\uD0DC\uC785\uB2C8\uB2E4 (SHA256 \uACE0\uC815).",
