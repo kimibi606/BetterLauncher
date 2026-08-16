@@ -1,15 +1,16 @@
 {
   "name": "bettermon-launcher",
-  "version": "0.3.11",
+  "version": "0.3.12",
   "description": "Custom Minecraft launcher built with Electron, JS and CSS.",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "check": "node --check main.js && node --check preload.js && node --check src/renderer.js && node --check vendor/request/index.js && node scripts/validate-release.js",
+    "check": "node --check main.js && node --check preload.js && node --check src/renderer.js && node --check vendor/request/index.js && node --check scripts/publish-modpack-distribution.js && node scripts/validate-release.js",
     "dist": "electron-builder build",
     "dist:win": "electron-builder build --win nsis",
     "dist:dir": "electron-builder build --dir",
-    "release:github": "npm run check && npm run dist:dir && node scripts/write-app-update-config.js && electron-builder build --prepackaged dist/win-unpacked --win nsis --publish never"
+    "release:github": "npm run check && npm run dist:dir && node scripts/write-app-update-config.js && electron-builder build --prepackaged dist/win-unpacked --win nsis --publish never",
+    "modpack:publish": "node scripts/publish-modpack-distribution.js"
   },
   "keywords": [
     "minecraft",

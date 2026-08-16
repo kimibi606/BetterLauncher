@@ -18,9 +18,6 @@ const MODPACK_UPDATE_REFRESH_MS = 60000;
 const NEWS_REFRESH_DEFAULT_MS = 15000;
 const NEWS_REFRESH_MIN_MS = 5000;
 const NEWS_REFRESH_MAX_MS = 30 * 60 * 1000;
-const PRESET_TRANSITION_FADE_MS = 980;
-const PRESET_ICON_FADE_MS = 640;
-const PRESET_TRANSITION_SETTLE_MS = 120;
 const GITHUB_RELEASE_NOTES_MAX_ITEMS = 8;
 const JAVA_RAM_MIN_MB = 6144;
 const JAVA_RAM_STEP_MB = 512;
@@ -35,6 +32,7 @@ const LAUNCHER_BGM_DEFAULT_SOURCE = "./assets/audio/launcher_bgm.ogg";
 const LAUNCHER_BGM_GHOST_SOURCE = "./assets/audio/ghost_bgm.ogg";
 const LAUNCHER_BGM_GHOST_PROBABILITY = 0.01;
 const DEFAULT_LAUNCHER_BGM_VOLUME = 35;
+const DEFAULT_JVM_ARGS = "-XX:+UseZGC";
 
 const DEFAULT_SETTINGS = {
   gameWidth: 1280,
@@ -45,11 +43,10 @@ const DEFAULT_SETTINGS = {
   minecraftDirectory: "",
   selectedProfile: "",
   javaPath: "",
-  jvmArgs: "",
+  jvmArgs: DEFAULT_JVM_ARGS,
   ramMin: JAVA_RAM_MIN_MB,
   ramMax: JAVA_RAM_MIN_MB,
   dataDirectory: "",
-  launcherPreset: "",
   bgmVolume: DEFAULT_LAUNCHER_BGM_VOLUME,
   bgmMuted: false
 };
@@ -73,8 +70,6 @@ const startupProgressText = document.getElementById("startupProgressText");
 const accountModelPanel = document.getElementById("accountModelPanel");
 const accountModelImage = document.getElementById("accountModelImage");
 const accountModelName = document.getElementById("accountModelName");
-const launchPresetPanel = document.getElementById("launchPresetPanel");
-const launchPresetSelect = document.getElementById("launchPresetSelect");
 const newsPanel = document.getElementById("newsPanel");
 const newsList = document.getElementById("newsList");
 const newsPanelBadge = document.getElementById("newsPanelBadge");
@@ -114,7 +109,6 @@ const settingsJavaUsableMemory = document.getElementById("settingsJavaUsableMemo
 const settingsJavaPathStatus = document.getElementById("settingsJavaPathStatus");
 const settingsJvmArgsInput = document.getElementById("settingsJvmArgs");
 const settingsDataDirectoryInput = document.getElementById("settingsDataDirectory");
-const settingsLauncherPresetSelect = document.getElementById("settingsLauncherPreset");
 const settingsUpdateSummary = document.getElementById("settingsUpdateSummary");
 const settingsUpdateIndicator = document.getElementById("settingsUpdateIndicator");
 const settingsUpdateChannel = document.getElementById("settingsUpdateChannel");
@@ -125,7 +119,6 @@ const settingsAboutVersion = document.getElementById("settingsAboutVersion");
 const settingsAboutReleaseDate = document.getElementById("settingsAboutReleaseDate");
 const settingsAboutReleaseTitle = document.getElementById("settingsAboutReleaseTitle");
 const settingsAboutNewsList = document.getElementById("settingsAboutNewsList");
-const settingsPresetHint = document.getElementById("settingsPresetHint");
 const settingsNavItems = Array.from(document.querySelectorAll(".settings-nav-item[data-settings-tab]"));
 const settingsTabs = Array.from(document.querySelectorAll(".settings-tab"));
 
@@ -173,15 +166,10 @@ let isLauncherRunning = false;
 let detectedSystemProfile = null;
 let isStartupModpackSyncRunning = false;
 let hasStartupModpackSyncRun = false;
-let isPresetModpackSyncRunning = false;
 let isModpackUpdateApplyRunning = false;
 let modpackUpdateState = null;
-let pendingPresetSyncPreset = "";
 let isLauncherUpdateGateRunning = false;
 let isLauncherUpdateInstallRunning = false;
-let isBackgroundPresetPrefetchRunning = false;
-let activeBackgroundPresetCachePreset = "";
-let pendingBackgroundPresetCachePreset = "";
 let startupProgressPercent = 0;
 let startupOverlayDismissed = false;
 let launchLogCaptureUntil = 0;
@@ -197,8 +185,6 @@ let playerCountPollTimer = null;
 let isPlayerCountRequestPending = false;
 let modpackUpdatePollTimer = null;
 let isModpackUpdateCheckRunning = false;
-let presetTransitionTimeoutId = null;
-let presetTransitionSequenceId = 0;
 let updaterSnapshot = null;
 let githubReleaseSnapshot = null;
 let isGitHubReleaseRequestPending = false;
@@ -421,10 +407,6 @@ function switchScreen(targetScreen) {
     document.body.setAttribute("data-screen", next);
   }
 
-  if (previousScreen !== next) {
-    resetPresetTransitionEffects();
-  }
-
   for (const [screenKey, screenElement] of Object.entries(SCREEN_ELEMENTS)) {
     if (!screenElement) {
       continue;
@@ -540,9 +522,6 @@ function updateAccountModelUi() {
 
   if (!authState.signedIn) {
     accountModelPanel.hidden = true;
-    if (launchPresetPanel) {
-      launchPresetPanel.hidden = true;
-    }
     lastAccountModelKey = "";
     if (accountModelImage) {
       accountModelImage.onerror = null;
@@ -560,9 +539,6 @@ function updateAccountModelUi() {
   const displayName = asText(authState.profileName, "\uD50C\uB808\uC774\uC5B4");
   const modelKey = uuid || `name:${displayName.toLowerCase()}`;
   accountModelPanel.hidden = false;
-  if (launchPresetPanel) {
-    launchPresetPanel.hidden = false;
-  }
 
   if (accountModelName) {
     accountModelName.textContent = displayName;
@@ -1230,7 +1206,6 @@ function stopPlayerCountPolling() {
 function canRunBackgroundModpackUpdateCheck() {
   return !(
     isStartupModpackSyncRunning ||
-    isPresetModpackSyncRunning ||
     isModpackUpdateApplyRunning ||
     isLaunchRequestPending ||
     isLauncherRunning ||
@@ -1578,149 +1553,6 @@ function isSameDirectoryPath(left, right) {
   return Boolean(a && b && a === b);
 }
 
-function normalizeLauncherPreset(value, fallback = "high") {
-  const preset = asText(value).toLowerCase();
-  if (preset === "low" || preset === "high") {
-    return preset;
-  }
-  return fallback === "low" ? "low" : "high";
-}
-
-function getBackgroundImageUrlForPreset(preset) {
-  return normalizeLauncherPreset(preset, "high") === "low"
-    ? "./assets/background_low.png"
-    : "./assets/background_high.png";
-}
-
-function getCurrentBodyPreset() {
-  if (!document.body) {
-    return "";
-  }
-  const current = asText(document.body.getAttribute("data-launcher-preset")).toLowerCase();
-  return current === "low" || current === "high" ? current : "";
-}
-
-function ensurePresetTransitionOverlay() {
-  if (!document.body) {
-    return null;
-  }
-  let overlay = document.getElementById("presetTransitionOverlay");
-  if (overlay) {
-    return overlay;
-  }
-
-  overlay = document.createElement("div");
-  overlay.id = "presetTransitionOverlay";
-  overlay.className = "preset-transition-overlay";
-  document.body.appendChild(overlay);
-  return overlay;
-}
-
-function setPresetTransitionIconsHidden(hidden) {
-  if (!document.body) {
-    return;
-  }
-  document.body.classList.toggle("preset-icons-hidden", Boolean(hidden));
-}
-
-function resetPresetTransitionEffects() {
-  presetTransitionSequenceId += 1;
-  setPresetTransitionIconsHidden(false);
-
-  if (presetTransitionTimeoutId !== null) {
-    window.clearTimeout(presetTransitionTimeoutId);
-    presetTransitionTimeoutId = null;
-  }
-
-  const overlay = document.getElementById("presetTransitionOverlay");
-  if (overlay) {
-    overlay.classList.remove("is-fading");
-  }
-}
-
-function playPresetBackgroundTransition(previousPreset, nextPreset) {
-  const previous = normalizeLauncherPreset(previousPreset, "");
-  const next = normalizeLauncherPreset(nextPreset, "");
-  if (!previous || !next || previous === next || (currentScreen !== "launch" && currentScreen !== "settings")) {
-    return;
-  }
-
-  const overlay = ensurePresetTransitionOverlay();
-  if (!overlay) {
-    return;
-  }
-
-  overlay.style.background = `url("${getBackgroundImageUrlForPreset(previous)}") center / cover no-repeat`;
-  overlay.classList.remove("is-fading");
-  void overlay.offsetWidth;
-  overlay.classList.add("is-fading");
-
-  if (presetTransitionTimeoutId !== null) {
-    window.clearTimeout(presetTransitionTimeoutId);
-    presetTransitionTimeoutId = null;
-  }
-  presetTransitionTimeoutId = window.setTimeout(() => {
-    overlay.classList.remove("is-fading");
-    presetTransitionTimeoutId = null;
-  }, PRESET_TRANSITION_FADE_MS + 100);
-}
-
-async function runPresetLaunchTransition(previousPreset, nextPreset) {
-  const previous = normalizeLauncherPreset(previousPreset, "");
-  const next = normalizeLauncherPreset(nextPreset, getRecommendedLauncherPreset());
-
-  if (!document.body) {
-    return;
-  }
-
-  if (!previous || previous === next || currentScreen !== "launch") {
-    resetPresetTransitionEffects();
-    document.body.setAttribute("data-launcher-preset", next);
-    return;
-  }
-
-  const sequenceId = ++presetTransitionSequenceId;
-  setPresetTransitionIconsHidden(true);
-  await delay(PRESET_ICON_FADE_MS);
-  if (sequenceId !== presetTransitionSequenceId || currentScreen !== "launch") {
-    return;
-  }
-
-  document.body.setAttribute("data-launcher-preset", next);
-  playPresetBackgroundTransition(previous, next);
-
-  await delay(PRESET_TRANSITION_FADE_MS + PRESET_TRANSITION_SETTLE_MS);
-  if (sequenceId !== presetTransitionSequenceId || currentScreen !== "launch") {
-    return;
-  }
-
-  setPresetTransitionIconsHidden(false);
-}
-
-async function runPresetBackgroundOnlyTransition(previousPreset, nextPreset) {
-  const previous = normalizeLauncherPreset(previousPreset, "");
-  const next = normalizeLauncherPreset(nextPreset, getRecommendedLauncherPreset());
-
-  if (!document.body) {
-    return;
-  }
-
-  if (!previous || previous === next || currentScreen !== "settings") {
-    resetPresetTransitionEffects();
-    document.body.setAttribute("data-launcher-preset", next);
-    return;
-  }
-
-  const sequenceId = ++presetTransitionSequenceId;
-  document.body.setAttribute("data-launcher-preset", next);
-  playPresetBackgroundTransition(previous, next);
-
-  await delay(PRESET_TRANSITION_FADE_MS + PRESET_TRANSITION_SETTLE_MS);
-  if (sequenceId !== presetTransitionSequenceId || currentScreen !== "settings") {
-    return;
-  }
-}
-
 function normalizeSettings(raw, defaults = DEFAULT_SETTINGS) {
   const source = raw && typeof raw === "object" ? raw : {};
   const unifiedRamMb = asNumber(source.ramMax ?? source.ramMin, defaults.ramMax, JAVA_RAM_MIN_MB, 32768);
@@ -1739,10 +1571,7 @@ function normalizeSettings(raw, defaults = DEFAULT_SETTINGS) {
     ramMax: unifiedRamMb,
     dataDirectory: asText(source.dataDirectory, defaults.dataDirectory),
     bgmVolume: getNormalizedLauncherBgmVolume(source.bgmVolume ?? defaults.bgmVolume),
-    bgmMuted: asBoolean(source.bgmMuted, defaults.bgmMuted),
-    launcherPreset: asText(source.launcherPreset)
-      ? normalizeLauncherPreset(source.launcherPreset, asText(defaults.launcherPreset))
-      : asText(defaults.launcherPreset)
+    bgmMuted: asBoolean(source.bgmMuted, defaults.bgmMuted)
   };
 
   return normalized;
@@ -1879,13 +1708,6 @@ function setLaunchStatus(message, isError = false) {
     launchStatus.textContent = nextMessage;
   }
   launchStatus.classList.toggle("is-error", nextIsError);
-}
-
-function setPresetApplyStatus(message, isError = false) {
-  setLaunchStatus(message, isError);
-  if (currentScreen === "settings") {
-    setSettingsStatus(message, isError);
-  }
 }
 
 function clearLaunchStartTimeout() {
@@ -2037,75 +1859,6 @@ function applyStartupLogStatus(payload) {
   }
 }
 
-function getRecommendedLauncherPreset() {
-  return normalizeLauncherPreset(detectedSystemProfile?.preset, "high");
-}
-
-function updatePresetHint() {
-  if (!settingsPresetHint) {
-    return;
-  }
-
-  if (!detectedSystemProfile) {
-    settingsPresetHint.textContent = "";
-    return;
-  }
-
-  const cores = Number(detectedSystemProfile.logicalCores);
-  const memory = Number(detectedSystemProfile.totalMemoryGb);
-  const presetLabel = getRecommendedLauncherPreset() === "low" ? "\uC800\uC0AC\uC591" : "\uACE0\uC0AC\uC591";
-  const coresLabel =
-    Number.isFinite(cores) && cores > 0
-      ? `${cores}\uAC1C \uB17C\uB9AC \uCF54\uC5B4`
-      : "CPU \uCF54\uC5B4 \uC815\uBCF4 \uC5C6\uC74C";
-  const memoryLabel =
-    Number.isFinite(memory) && memory > 0
-      ? `${memory.toFixed(1)}GB RAM`
-      : "RAM \uC815\uBCF4 \uC5C6\uC74C";
-  settingsPresetHint.textContent = `\uC2DC\uC2A4\uD15C: ${coresLabel}, ${memoryLabel}. \uCD94\uCC9C \uD504\uB9AC\uC14B: ${presetLabel}.`;
-}
-
-function applyLauncherPreset(preset) {
-  const previousPreset = getCurrentBodyPreset();
-  const nextPreset = normalizeLauncherPreset(preset, getRecommendedLauncherPreset());
-  launcherSettings.launcherPreset = nextPreset;
-
-  if (settingsLauncherPresetSelect) {
-    settingsLauncherPresetSelect.value = nextPreset;
-  }
-  if (launchPresetSelect) {
-    launchPresetSelect.value = nextPreset;
-  }
-
-  if (!document.body) {
-    updatePresetHint();
-    return;
-  }
-
-  if (!previousPreset || previousPreset === nextPreset) {
-    resetPresetTransitionEffects();
-    document.body.setAttribute("data-launcher-preset", nextPreset);
-    updatePresetHint();
-    return;
-  }
-
-  if (currentScreen === "launch") {
-    void runPresetLaunchTransition(previousPreset, nextPreset);
-    updatePresetHint();
-    return;
-  }
-
-  if (currentScreen === "settings") {
-    void runPresetBackgroundOnlyTransition(previousPreset, nextPreset);
-    updatePresetHint();
-    return;
-  }
-
-  resetPresetTransitionEffects();
-  document.body.setAttribute("data-launcher-preset", nextPreset);
-  updatePresetHint();
-}
-
 function applyResolvedJavaPath(resolvedJavaPath) {
   const nextJavaPath = asText(resolvedJavaPath);
   if (!nextJavaPath) {
@@ -2183,7 +1936,6 @@ function updateLaunchButtonUi() {
     isLaunchRequestPending ||
     isLauncherRunning ||
     isStartupModpackSyncRunning ||
-    isPresetModpackSyncRunning ||
     isModpackUpdateApplyRunning ||
     isLauncherUpdateInstallRunning ||
     isLauncherUpdateGateRunning ||
@@ -2245,7 +1997,6 @@ function buildLaunchPayload() {
     username: asText(authState.profileName, "\uD50C\uB808\uC774\uC5B4"),
     version: "",
     versionType: "release",
-    launcherPreset: normalizeLauncherPreset(launcherSettings.launcherPreset, getRecommendedLauncherPreset()),
     gameWidth: Number(launcherSettings.gameWidth) || DEFAULT_SETTINGS.gameWidth,
     gameHeight: Number(launcherSettings.gameHeight) || DEFAULT_SETTINGS.gameHeight,
     fullscreen: Boolean(launcherSettings.fullscreen),
@@ -2261,179 +2012,9 @@ function buildLaunchPayload() {
 
 function buildModpackSyncPayload() {
   return {
-    launcherPreset: normalizeLauncherPreset(launcherSettings.launcherPreset, getRecommendedLauncherPreset()),
     minecraftDirectory: asText(launcherSettings.minecraftDirectory) || asText(launcherDefaults.minecraftDirectory),
     gameDirectory: ""
   };
-}
-
-function getLauncherPresetLabel(preset) {
-  return normalizeLauncherPreset(preset, getRecommendedLauncherPreset()) === "low" ? "저사양" : "고사양";
-}
-
-function getOtherLauncherPreset(preset) {
-  return normalizeLauncherPreset(preset, getRecommendedLauncherPreset()) === "low" ? "high" : "low";
-}
-
-async function prefetchLauncherPresetArchives(payload) {
-  if (!window.launcherApi || typeof window.launcherApi.prefetchModpackPresets !== "function") {
-    return null;
-  }
-
-  try {
-    return await window.launcherApi.prefetchModpackPresets(payload);
-  } catch {
-    return null;
-  }
-}
-
-async function runBackgroundPresetPrefetchIfIdle() {
-  if (isBackgroundPresetPrefetchRunning) {
-    return;
-  }
-
-  if (
-    isStartupOverlayVisible() ||
-    isStartupModpackSyncRunning ||
-    isPresetModpackSyncRunning ||
-    isModpackUpdateApplyRunning ||
-    isLaunchRequestPending ||
-    isLauncherRunning ||
-    isLauncherUpdateGateRunning
-  ) {
-    return;
-  }
-
-  const activePreset = normalizeLauncherPreset(
-    pendingBackgroundPresetCachePreset || launcherSettings.launcherPreset,
-    getRecommendedLauncherPreset()
-  );
-  activeBackgroundPresetCachePreset = getOtherLauncherPreset(activePreset);
-  const payload = {
-    ...buildModpackSyncPayload(),
-    excludePreset: activePreset
-  };
-  pendingBackgroundPresetCachePreset = "";
-
-  if (!payload.minecraftDirectory) {
-    return;
-  }
-
-  isBackgroundPresetPrefetchRunning = true;
-  try {
-    await prefetchLauncherPresetArchives(payload);
-  } finally {
-    isBackgroundPresetPrefetchRunning = false;
-    activeBackgroundPresetCachePreset = "";
-    await runQueuedPresetSyncIfIdle();
-    if (pendingBackgroundPresetCachePreset) {
-      await runBackgroundPresetPrefetchIfIdle();
-    }
-  }
-}
-
-function scheduleBackgroundPresetPrefetch(activePreset = launcherSettings.launcherPreset) {
-  pendingBackgroundPresetCachePreset = normalizeLauncherPreset(activePreset, getRecommendedLauncherPreset());
-  void runBackgroundPresetPrefetchIfIdle();
-}
-
-async function runQueuedPresetSyncIfIdle() {
-  if (!pendingPresetSyncPreset) {
-    return;
-  }
-  if (
-    isStartupModpackSyncRunning ||
-    isPresetModpackSyncRunning ||
-    isModpackUpdateApplyRunning ||
-    isLaunchRequestPending ||
-    isLauncherRunning ||
-    isLauncherUpdateGateRunning
-  ) {
-    return;
-  }
-
-  const nextPreset = pendingPresetSyncPreset;
-  pendingPresetSyncPreset = "";
-  await runLauncherPresetModpackSync(nextPreset);
-}
-
-async function runLauncherPresetModpackSync(preset) {
-  const nextPreset = normalizeLauncherPreset(preset, getRecommendedLauncherPreset());
-  const payload = {
-    ...buildModpackSyncPayload(),
-    launcherPreset: nextPreset
-  };
-  const presetLabel = getLauncherPresetLabel(nextPreset);
-
-  if (!payload.minecraftDirectory) {
-    const message = "마인크래프트 폴더가 설정되지 않아 프리셋을 바로 적용할 수 없습니다.";
-    setPresetApplyStatus(message, true);
-    return false;
-  }
-
-  if (!window.launcherApi || typeof window.launcherApi.syncModpack !== "function") {
-    const message = "프리셋 적용 기능을 사용할 수 없습니다.";
-    setPresetApplyStatus(message, true);
-    return false;
-  }
-
-  isPresetModpackSyncRunning = true;
-  updateLaunchButtonUi();
-
-  const applyingMessage = `${presetLabel} 프리셋 적용 중...`;
-  setPresetApplyStatus(applyingMessage);
-
-  try {
-    const result = await window.launcherApi.syncModpack(payload);
-    if (!result?.ok) {
-      const message = localizeStatusMessage(result?.error || "Modpack update failed.");
-      setPresetApplyStatus(message, true);
-      return false;
-    }
-
-    const appliedMessage = `${presetLabel} 프리셋이 적용되었습니다.`;
-    setPresetApplyStatus(appliedMessage);
-    modpackUpdateState = { ok: true, pending: false, preset: nextPreset, latestVersion: asText(result?.version) };
-    scheduleBackgroundPresetPrefetch(nextPreset);
-    return true;
-  } catch (error) {
-    const message = localizeStatusMessage(asText(error?.message) || "Modpack update failed.");
-    setPresetApplyStatus(message, true);
-    return false;
-  } finally {
-    isPresetModpackSyncRunning = false;
-    updateLaunchButtonUi();
-    await runQueuedPresetSyncIfIdle();
-    void runBackgroundPresetPrefetchIfIdle();
-  }
-}
-
-function requestLauncherPresetApply(preset) {
-  const nextPreset = normalizeLauncherPreset(preset, getRecommendedLauncherPreset());
-  const presetLabel = getLauncherPresetLabel(nextPreset);
-
-  if (isLauncherRunning || isLaunchRequestPending || isModpackUpdateApplyRunning || isLauncherUpdateGateRunning) {
-    pendingPresetSyncPreset = nextPreset;
-    const message = "게임 실행 중이라 프리셋 적용을 대기합니다. 게임 종료 후 자동 적용됩니다.";
-    setPresetApplyStatus(message);
-    return;
-  }
-
-  if (isBackgroundPresetPrefetchRunning && activeBackgroundPresetCachePreset === nextPreset) {
-    pendingPresetSyncPreset = nextPreset;
-    const message = `${presetLabel} 프리셋 캐시 다운로드를 마치는 중입니다. 완료 후 바로 적용합니다.`;
-    setPresetApplyStatus(message);
-    return;
-  }
-
-  if (isStartupModpackSyncRunning || isPresetModpackSyncRunning || isModpackUpdateApplyRunning) {
-    pendingPresetSyncPreset = nextPreset;
-    const message = `${presetLabel} 프리셋 적용 대기 중...`;
-    setPresetApplyStatus(message);
-    return;
-  }
-
-  void runLauncherPresetModpackSync(nextPreset);
 }
 
 async function ensureLatestLauncherOnStartup() {
@@ -2543,7 +2124,6 @@ async function runStartupModpackSync() {
     } else {
       setLaunchStatus("\uBAA8\uB4DC\uD329\uC774 \uCD5C\uC2E0 \uC0C1\uD0DC\uC785\uB2C8\uB2E4.");
       setStartupProgress(STARTUP_MODPACK_PROGRESS_DONE, "\uBAA8\uB4DC\uD329\uC774 \uCD5C\uC2E0 \uC0C1\uD0DC\uC785\uB2C8\uB2E4.");
-      scheduleBackgroundPresetPrefetch(payload.launcherPreset);
     }
   } catch (error) {
     const message = localizeStatusMessage(asText(error?.message) || "Modpack update check failed.");
@@ -2552,8 +2132,6 @@ async function runStartupModpackSync() {
   } finally {
     isStartupModpackSyncRunning = false;
     updateLaunchButtonUi();
-    await runQueuedPresetSyncIfIdle();
-    void runBackgroundPresetPrefetchIfIdle();
   }
 }
 
@@ -2568,8 +2146,6 @@ function applyLauncherState(nextState) {
   } else if (wasRunning) {
     clearLaunchStartTimeout();
     setLaunchStatus("\uB9C8\uC778\uD06C\uB798\uD504\uD2B8\uAC00 \uC885\uB8CC\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
-    void runQueuedPresetSyncIfIdle();
-    void runBackgroundPresetPrefetchIfIdle();
   }
 
   updateLaunchButtonUi();
@@ -2603,11 +2179,9 @@ async function runPendingModpackUpdate() {
     modpackUpdateState = {
       ok: true,
       pending: false,
-      preset: payload.launcherPreset,
       latestVersion: asText(result?.version) || asText(modpackUpdateState?.latestVersion)
     };
     setLaunchStatus("모드팩 업데이트가 완료되었습니다. 게임을 시작할 수 있습니다.");
-    scheduleBackgroundPresetPrefetch(payload.launcherPreset);
     return true;
   } catch (error) {
     const message = localizeStatusMessage(asText(error?.message) || "Modpack update failed.");
@@ -2616,8 +2190,6 @@ async function runPendingModpackUpdate() {
   } finally {
     isModpackUpdateApplyRunning = false;
     updateLaunchButtonUi();
-    await runQueuedPresetSyncIfIdle();
-    void runBackgroundPresetPrefetchIfIdle();
   }
 }
 
@@ -2671,11 +2243,6 @@ async function launchGame() {
 
   if (isLauncherUpdateGateRunning) {
     setLaunchStatus("\uB7F0\uCC98 \uC5C5\uB370\uC774\uD2B8 \uD655\uC778 \uC9C4\uD589 \uC911\uC785\uB2C8\uB2E4. \uC7A0\uC2DC \uAE30\uB2E4\uB824 \uC8FC\uC138\uC694.", true);
-    return;
-  }
-
-  if (isPresetModpackSyncRunning) {
-    setLaunchStatus("\uD504\uB9AC\uC14B \uC801\uC6A9 \uC9C4\uD589 \uC911\uC785\uB2C8\uB2E4. \uC7A0\uC2DC \uAE30\uB2E4\uB824 \uC8FC\uC138\uC694.", true);
     return;
   }
 
@@ -2751,8 +2318,6 @@ async function launchGame() {
   } finally {
     isLaunchRequestPending = false;
     updateLaunchButtonUi();
-    await runQueuedPresetSyncIfIdle();
-    void runBackgroundPresetPrefetchIfIdle();
   }
 }
 
@@ -2772,10 +2337,6 @@ function applySettingsToInputs(settings) {
   if (settingsAutoConnectInput) {
     settingsAutoConnectInput.checked = true;
     settingsAutoConnectInput.disabled = true;
-  }
-
-  if (settingsLauncherPresetSelect) {
-    settingsLauncherPresetSelect.value = normalizeLauncherPreset(settings.launcherPreset, getRecommendedLauncherPreset());
   }
 
   syncJavaMemoryControls();
@@ -2801,7 +2362,6 @@ function readSettingsFromInputs() {
       ...booleanValues,
       autoConnect: true,
       selectedProfile: settingsProfileSelect?.value,
-      launcherPreset: settingsLauncherPresetSelect?.value,
       bgmVolume: launcherSettings.bgmVolume,
       bgmMuted: launcherSettings.bgmMuted
     },
@@ -2947,12 +2507,10 @@ function openSettingsScreen(tabId = selectedSettingsTab) {
 
 function persistSettingsSnapshot() {
   const next = readSettingsFromInputs();
-  next.launcherPreset = normalizeLauncherPreset(next.launcherPreset, getRecommendedLauncherPreset());
   next.selectedProfile = settingsProfileSelect
     ? asText(settingsProfileSelect.value, asText(launcherSettings.selectedProfile))
     : asText(launcherSettings.selectedProfile);
   launcherSettings = next;
-  applyLauncherPreset(next.launcherPreset);
   writeStoredSettings(launcherSettings);
 }
 
@@ -3049,6 +2607,7 @@ async function initializeSettings() {
         ...DEFAULT_SETTINGS,
         minecraftDirectory: asText(defaults?.minecraftDirectory),
         javaPath: asText(defaults?.javaPath),
+        jvmArgs: asText(defaults?.jvmArgs) || DEFAULT_SETTINGS.jvmArgs,
         ramMin: Number(defaults?.ramMin) || DEFAULT_SETTINGS.ramMin,
         ramMax: Number(defaults?.ramMax) || DEFAULT_SETTINGS.ramMax,
         dataDirectory: asText(defaults?.minecraftDirectory)
@@ -3067,17 +2626,6 @@ async function initializeSettings() {
     writeStoredSettings(launcherSettings);
   }
 
-  if (!asText(launcherSettings.launcherPreset)) {
-    launcherSettings.launcherPreset = getRecommendedLauncherPreset();
-    writeStoredSettings(launcherSettings);
-  } else {
-    launcherSettings.launcherPreset = normalizeLauncherPreset(
-      launcherSettings.launcherPreset,
-      getRecommendedLauncherPreset()
-    );
-  }
-
-  applyLauncherPreset(launcherSettings.launcherPreset);
   applySettingsToInputs(launcherSettings);
   await refreshProfilesForDirectory(launcherSettings.minecraftDirectory, launcherSettings.selectedProfile);
 }
@@ -3334,7 +2882,6 @@ async function runMicrosoftLogin() {
 }
 
 switchScreen("login");
-applyLauncherPreset(getRecommendedLauncherPreset());
 updateLaunchButtonUi();
 updateSettingsAboutReleaseUi();
 renderSettingsAboutNewsItems();
@@ -3582,25 +3129,6 @@ if (settingsProfileSelect) {
   });
 }
 
-if (settingsLauncherPresetSelect) {
-  settingsLauncherPresetSelect.addEventListener("change", () => {
-    const nextPreset = normalizeLauncherPreset(settingsLauncherPresetSelect.value, getRecommendedLauncherPreset());
-    applyLauncherPreset(nextPreset);
-    writeStoredSettings(launcherSettings);
-    setSettingsStatus("");
-    requestLauncherPresetApply(nextPreset);
-  });
-}
-
-if (launchPresetSelect) {
-  launchPresetSelect.addEventListener("change", () => {
-    const nextPreset = normalizeLauncherPreset(launchPresetSelect.value, getRecommendedLauncherPreset());
-    applyLauncherPreset(nextPreset);
-    writeStoredSettings(launcherSettings);
-    requestLauncherPresetApply(nextPreset);
-  });
-}
-
 bindClick(bgmToggleButton, () => {
   const currentlyMuted = isLauncherBgmMuted();
   const currentVolume = getNormalizedLauncherBgmVolume(launcherSettings.bgmVolume);
@@ -3739,7 +3267,6 @@ window.launcherApi.onLog((payload) => {
 });
 
 window.addEventListener("beforeunload", () => {
-  resetPresetTransitionEffects();
   stopNewsPolling();
   stopPlayerCountPolling();
   stopModpackUpdatePolling();
@@ -3783,7 +3310,6 @@ Promise.resolve()
     setStartupProgress(STARTUP_COMPLETE_PROGRESS, "\uC2DC\uC791 \uC644\uB8CC.");
     await hideStartupOverlay();
     void startLauncherBgmPlayback();
-    void runBackgroundPresetPrefetchIfIdle();
   })
   .catch(async (error) => {
     const message = localizeStatusMessage(

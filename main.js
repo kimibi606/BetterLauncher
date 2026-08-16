@@ -46,15 +46,12 @@ const DEFAULT_MODPACK_GITHUB_REPOSITORY = "ExamplePack";
 const MODPACK_GITHUB_MANIFEST_ASSET = "latest.json";
 const MODPACK_ALLOWED_TOP_LEVEL_DIRECTORIES = new Set([
   "mods",
-  "mods-disabled",
   "cobblemon",
   "config",
   "defaultconfigs",
   "resourcepacks",
   "shaderpacks"
 ]);
-const MODPACK_MODS_DIRECTORY = "mods";
-const MODPACK_DISABLED_MODS_DIRECTORY = "mods-disabled";
 const MODPACK_ALLOWED_ROOT_FILES = new Set(["options.txt"]);
 // These locations are owned by each player once created. A modpack update may
 // add missing files here, but must never replace their existing preferences.
@@ -93,6 +90,7 @@ const FIXED_MINECRAFT_VERSION = "1.21.1";
 const FIXED_MOD_LOADER = "fabric";
 const FIXED_JAVA_MAJOR_VERSION = 21;
 const FIXED_JAVA_REQUIREMENT_LABEL = `Java ${FIXED_JAVA_MAJOR_VERSION}`;
+const DEFAULT_JVM_ARGS = "-XX:+UseZGC";
 const WINDOWS_JAVA_RUNTIME_URL = `https://api.adoptium.net/v3/binary/latest/${FIXED_JAVA_MAJOR_VERSION}/ga/windows/x64/jre/hotspot/normal/eclipse`;
 const APP_UPDATE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
 const APP_ICON_PATH = path.join(
@@ -119,7 +117,6 @@ const GITHUB_RELEASE_TIMEOUT_DEFAULT_MS = 7000;
 const GITHUB_RELEASE_TIMEOUT_MIN_MS = 1000;
 const GITHUB_RELEASE_TIMEOUT_MAX_MS = 60000;
 const WINDOW_ROUNDED_RADIUS_PX = 10;
-const LAUNCHER_PRESET_OPTIONS = ["low", "high"];
 const EXTERNAL_OPEN_URL_MAX_LENGTH = 2048;
 
 let mainWindow;
@@ -578,22 +575,16 @@ function detectLauncherPreset() {
   const logicalCores = cpuInfo.length;
   const totalMemoryGb = Number((os.totalmem() / (1024 ** 3)).toFixed(1));
   const cpuModel = asTrimmedText(cpuInfo[0]?.model) || "Unknown CPU";
-  const recommendedLow = totalMemoryGb <= 8 || logicalCores <= 4;
 
   return {
-    preset: recommendedLow ? "low" : "high",
     logicalCores,
     totalMemoryGb,
     cpuModel
   };
 }
 
-function normalizeLauncherPreset(value, fallback = "high") {
-  const preset = asTrimmedText(value).toLowerCase();
-  if (preset === "low" || preset === "high") {
-    return preset;
-  }
-  return fallback === "low" ? "low" : "high";
+function normalizeLauncherPreset() {
+  return "default";
 }
 
 function isHttpUrl(value) {
@@ -1008,218 +999,6 @@ function readModpackState(modpackRoot) {
 async function writeModpackState(modpackRoot, state) {
   const statePath = getModpackStatePath(modpackRoot);
   await writeJsonFileAtomic(statePath, state);
-}
-
-function normalizePresetModPattern(value) {
-  const rawValue =
-    value && typeof value === "object"
-      ? value.file || value.name || value.mod || value.pattern
-      : value;
-  const text = asTrimmedText(rawValue).replace(/\\/g, "/");
-  if (!text || text.includes("/") || text === "." || text === "..") {
-    return "";
-  }
-  return text;
-}
-
-function normalizePresetModPatterns(values) {
-  if (!Array.isArray(values)) {
-    return [];
-  }
-
-  const patterns = [];
-  const seen = new Set();
-  for (const value of values) {
-    const pattern = normalizePresetModPattern(value);
-    const key = process.platform === "win32" ? pattern.toLowerCase() : pattern;
-    if (!pattern || seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    patterns.push(pattern);
-  }
-  return patterns;
-}
-
-function normalizePresetModRuleSet(presets) {
-  const presetRules = presets && typeof presets === "object" ? presets : {};
-  const rules = {};
-
-  for (const preset of LAUNCHER_PRESET_OPTIONS) {
-    const presetRule = presetRules[preset] && typeof presetRules[preset] === "object" ? presetRules[preset] : {};
-    const disableMods = Array.isArray(presetRule)
-      ? presetRule
-      : Array.isArray(presetRule.disableMods)
-        ? presetRule.disableMods
-        : [];
-    rules[preset] = normalizePresetModPatterns(disableMods);
-  }
-
-  return rules;
-}
-
-function mergePresetModRuleSets(...ruleSets) {
-  const merged = {};
-  for (const preset of LAUNCHER_PRESET_OPTIONS) {
-    const values = [];
-    for (const ruleSet of ruleSets) {
-      if (ruleSet && Array.isArray(ruleSet[preset])) {
-        values.push(...ruleSet[preset]);
-      }
-    }
-    merged[preset] = normalizePresetModPatterns(values);
-  }
-  return merged;
-}
-
-function getPresetModRuleConfig(externalPresetRules = null) {
-  if (externalPresetRules && typeof externalPresetRules === "object") {
-    return normalizePresetModRuleSet(externalPresetRules);
-  }
-
-  const config = readModpackConfig() || {};
-  const directPresets = config.presets && typeof config.presets === "object" ? config.presets : {};
-  const modpackConfig = config.modpack && typeof config.modpack === "object" ? config.modpack : {};
-  const modpackPresets = modpackConfig.presets && typeof modpackConfig.presets === "object" ? modpackConfig.presets : {};
-  return mergePresetModRuleSets(normalizePresetModRuleSet(modpackPresets), normalizePresetModRuleSet(directPresets));
-}
-
-function buildPresetModPatternMatcher(patterns) {
-  const exact = new Set();
-  const contains = [];
-  const wildcardRegexes = [];
-  for (const pattern of patterns) {
-    const normalized = process.platform === "win32" ? pattern.toLowerCase() : pattern;
-    if (/[?*]/.test(pattern)) {
-      const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
-      wildcardRegexes.push(new RegExp(`^${escaped}$`, process.platform === "win32" ? "i" : ""));
-    } else if (!/\.jar$/i.test(pattern)) {
-      contains.push(normalized);
-    } else {
-      exact.add(normalized);
-    }
-  }
-
-  return (fileName) => {
-    const normalizedFileName = process.platform === "win32" ? asTrimmedText(fileName).toLowerCase() : asTrimmedText(fileName);
-    return (
-      exact.has(normalizedFileName) ||
-      contains.some((pattern) => normalizedFileName.includes(pattern)) ||
-      wildcardRegexes.some((regex) => regex.test(fileName))
-    );
-  };
-}
-
-async function listModDirectoryFiles(directoryPath) {
-  try {
-    const entries = await fs.promises.readdir(directoryPath, { withFileTypes: true });
-    return entries.filter((entry) => entry.isFile()).map((entry) => entry.name);
-  } catch (error) {
-    if (error && error.code === "ENOENT") {
-      return [];
-    }
-    throw error;
-  }
-}
-
-async function moveModFileReplacing(sourcePath, targetPath) {
-  await fs.promises.mkdir(path.dirname(targetPath), { recursive: true });
-  await fs.promises.rm(targetPath, { force: true });
-  await fs.promises.rename(sourcePath, targetPath);
-}
-
-async function writePresetModState(modpackRoot, presetMods) {
-  const previousState = readModpackState(modpackRoot) || {};
-  await writeModpackState(modpackRoot, {
-    ...previousState,
-    presetMods,
-    preset: presetMods.preset || previousState.preset,
-    presetAppliedAt: presetMods.appliedAt
-  });
-}
-
-async function applyPresetModRules(modpackRoot, launcherPreset, presetRules = null) {
-  const normalizedPreset = normalizeLauncherPreset(launcherPreset, "high");
-  const rules = getPresetModRuleConfig(presetRules);
-  const activeDisablePatterns = rules[normalizedPreset] || [];
-  const managedPatterns = normalizePresetModPatterns(Object.values(rules).flat());
-  const appliedAt = new Date().toISOString();
-
-  if (managedPatterns.length === 0) {
-    return {
-      ok: true,
-      skipped: true,
-      preset: normalizedPreset,
-      movedToMods: 0,
-      movedToDisabled: 0,
-      managedMods: [],
-      disabledMods: []
-    };
-  }
-
-  const modsPath = path.join(modpackRoot, MODPACK_MODS_DIRECTORY);
-  const disabledModsPath = path.join(modpackRoot, MODPACK_DISABLED_MODS_DIRECTORY);
-  await fs.promises.mkdir(modsPath, { recursive: true });
-  await fs.promises.mkdir(disabledModsPath, { recursive: true });
-
-  const matchesManaged = buildPresetModPatternMatcher(managedPatterns);
-  const matchesActiveDisabled = buildPresetModPatternMatcher(activeDisablePatterns);
-  const currentModFiles = await listModDirectoryFiles(modsPath);
-  const currentDisabledModFiles = await listModDirectoryFiles(disabledModsPath);
-  const allKnownFiles = [...currentModFiles, ...currentDisabledModFiles];
-  const unmatchedDisabledMods = activeDisablePatterns.filter((pattern) => {
-    const matcher = buildPresetModPatternMatcher([pattern]);
-    return !allKnownFiles.some((fileName) => matcher(fileName));
-  });
-  const movedToMods = [];
-  const movedToDisabled = [];
-
-  for (const fileName of currentDisabledModFiles) {
-    if (!matchesManaged(fileName) || matchesActiveDisabled(fileName)) {
-      continue;
-    }
-    await moveModFileReplacing(path.join(disabledModsPath, fileName), path.join(modsPath, fileName));
-    movedToMods.push(fileName);
-  }
-
-  for (const fileName of currentModFiles) {
-    if (!matchesActiveDisabled(fileName)) {
-      continue;
-    }
-    await moveModFileReplacing(path.join(modsPath, fileName), path.join(disabledModsPath, fileName));
-    movedToDisabled.push(fileName);
-  }
-
-  const presetMods = {
-    preset: normalizedPreset,
-    appliedAt,
-    managedMods: managedPatterns,
-    disabledMods: activeDisablePatterns,
-    unmatchedDisabledMods,
-    movedToMods,
-    movedToDisabled,
-    skipped: movedToMods.length === 0 && movedToDisabled.length === 0
-  };
-  await writePresetModState(modpackRoot, presetMods);
-
-  if (movedToMods.length > 0 || movedToDisabled.length > 0) {
-    sendLog({
-      level: "info",
-      message: `Preset ${normalizedPreset} applied. Enabled ${movedToMods.length}, disabled ${movedToDisabled.length} mod(s).`
-    });
-  } else if (unmatchedDisabledMods.length > 0) {
-    sendLog({
-      level: "warn",
-      message: `Preset ${normalizedPreset} could not find configured mod(s): ${unmatchedDisabledMods.join(", ")}`
-    });
-  }
-
-  return {
-    ok: true,
-    ...presetMods,
-    movedToMods: movedToMods.length,
-    movedToDisabled: movedToDisabled.length
-  };
 }
 
 async function computeFileSha256(filePath) {
@@ -2236,40 +2015,52 @@ function parseModpackManifest(manifestSource) {
     throw new Error("Invalid modpack manifest JSON.");
   }
   const archive = json.archive && typeof json.archive === "object" ? json.archive : null;
-  if (!archive) {
-    throw new Error("Modpack manifest is missing archive.");
-  }
-
-  const archiveSha1 = normalizeSha1(archive.sha1);
-  if (!archiveSha1) {
-    throw new Error("Modpack manifest archive.sha1 is missing or invalid.");
-  }
-
-  const archiveSource = resolveModpackManifestArchiveSource(manifestSource, archive.url);
-  if (!archiveSource) {
-    throw new Error("Modpack manifest archive.url is missing or invalid.");
-  }
-
-  const size = Number(archive.size || 0);
-  const rawPresetRules =
-    json.presets && typeof json.presets === "object"
-      ? json.presets
-      : json.modpack && typeof json.modpack === "object" && json.modpack.presets && typeof json.modpack.presets === "object"
-        ? json.modpack.presets
-        : null;
-  return {
+  const manifestDigest = computeSha256FromText(manifestSource.text);
+  const baseManifest = {
     id: asTrimmedText(json.id) || "bettermon",
-    version: asTrimmedText(json.version) || archiveSha1.slice(0, 12),
     minecraftVersion: asTrimmedText(json.minecraftVersion),
     resetExistingFiles: json.resetExistingFiles === true,
-    archive: {
-      source: archiveSource,
-      sha1: archiveSha1,
-      size: Number.isFinite(size) && size > 0 ? size : 0
-    },
-    presetRules: rawPresetRules ? normalizePresetModRuleSet(rawPresetRules) : null,
     sourceKey: asTrimmedText(manifestSource.sourceKey),
-    manifestDigest: computeSha256FromText(manifestSource.text)
+    manifestDigest
+  };
+
+  if (archive) {
+    const archiveSha1 = normalizeSha1(archive.sha1);
+    if (!archiveSha1) {
+      throw new Error("Modpack manifest archive.sha1 is missing or invalid.");
+    }
+
+    const archiveSource = resolveModpackManifestArchiveSource(manifestSource, archive.url);
+    if (!archiveSource) {
+      throw new Error("Modpack manifest archive.url is missing or invalid.");
+    }
+
+    const size = Number(archive.size || 0);
+    return {
+      ...baseManifest,
+      version: asTrimmedText(json.version) || archiveSha1.slice(0, 12),
+      archive: {
+        source: archiveSource,
+        sha1: archiveSha1,
+        size: Number.isFinite(size) && size > 0 ? size : 0
+      }
+    };
+  }
+
+  const parsedDistribution = parseDistributionIndex(json, "", {
+    defaultBaseUrl: getDistributionSourceBaseUrl({
+      kind: manifestSource.sourceKind,
+      value: manifestSource.manifestLocation
+    })
+  });
+  if (parsedDistribution.files.length === 0 && parsedDistribution.delete.length === 0) {
+    throw new Error("Modpack manifest is missing archive or distribution files.");
+  }
+
+  return {
+    ...baseManifest,
+    version: asTrimmedText(parsedDistribution.version || json.version) || manifestDigest.slice(0, 12),
+    distribution: parsedDistribution
   };
 }
 
@@ -3012,64 +2803,38 @@ function selectFirstModpackSource(candidates, configPath) {
   return null;
 }
 
-function getModpackDistributionSource(preset) {
-  const normalizedPreset = normalizeLauncherPreset(preset, "high");
-  const presetEnvKey = `BETTERMON_MODPACK_DISTRIBUTION_${normalizedPreset.toUpperCase()}_URL`;
-  const fromPresetEnv = asTrimmedText(process.env[presetEnvKey]);
+function getModpackDistributionSource() {
   const fromCommonEnv = asTrimmedText(process.env.BETTERMON_MODPACK_DISTRIBUTION_URL);
 
   const config = readModpackConfig();
   const configPath = asTrimmedText(config?.__configPath);
-  const fromConfigPreset = asTrimmedText(config?.distributionByPreset?.[normalizedPreset]);
   const fromConfigDefault = asTrimmedText(config?.distributionUrl);
 
   return selectFirstModpackSource(
-    [fromPresetEnv, fromCommonEnv, fromConfigPreset, fromConfigDefault].filter(
-      (candidate) => !isZipArchiveLocation(candidate)
-    ),
+    [fromCommonEnv, fromConfigDefault].filter((candidate) => !isZipArchiveLocation(candidate)),
     configPath
   );
 }
 
-function getModpackArchiveSource(preset) {
-  const normalizedPreset = normalizeLauncherPreset(preset, "high");
-  const archivePresetEnvKey = `BETTERMON_MODPACK_ARCHIVE_${normalizedPreset.toUpperCase()}_URL`;
-  const zipPresetEnvKey = `BETTERMON_MODPACK_ZIP_${normalizedPreset.toUpperCase()}_URL`;
-  const distributionPresetEnvKey = `BETTERMON_MODPACK_DISTRIBUTION_${normalizedPreset.toUpperCase()}_URL`;
-  const fromArchivePresetEnv = asTrimmedText(process.env[archivePresetEnvKey]);
-  const fromZipPresetEnv = asTrimmedText(process.env[zipPresetEnvKey]);
-  const fromDistributionPresetEnv = asTrimmedText(process.env[distributionPresetEnvKey]);
+function getModpackArchiveSource() {
   const fromArchiveCommonEnv = asTrimmedText(process.env.BETTERMON_MODPACK_ARCHIVE_URL);
   const fromZipCommonEnv = asTrimmedText(process.env.BETTERMON_MODPACK_ZIP_URL);
   const fromDistributionCommonEnv = asTrimmedText(process.env.BETTERMON_MODPACK_DISTRIBUTION_URL);
 
   const config = readModpackConfig();
   const configPath = asTrimmedText(config?.__configPath);
-  const fromArchiveConfigPreset = asTrimmedText(config?.archiveByPreset?.[normalizedPreset]);
-  const fromZipConfigPreset = asTrimmedText(config?.zipByPreset?.[normalizedPreset]);
-  const fromDistributionConfigPreset = asTrimmedText(config?.distributionByPreset?.[normalizedPreset]);
   const fromArchiveConfigDefault = asTrimmedText(config?.archiveUrl);
   const fromZipConfigDefault = asTrimmedText(config?.zipUrl);
   const fromDistributionConfigDefault = asTrimmedText(config?.distributionUrl);
 
   const candidates = [
-    fromArchivePresetEnv,
-    fromZipPresetEnv,
     fromArchiveCommonEnv,
     fromZipCommonEnv,
-    fromArchiveConfigPreset,
-    fromZipConfigPreset,
     fromArchiveConfigDefault,
     fromZipConfigDefault
   ];
-  if (isZipArchiveLocation(fromDistributionPresetEnv)) {
-    candidates.push(fromDistributionPresetEnv);
-  }
   if (isZipArchiveLocation(fromDistributionCommonEnv)) {
     candidates.push(fromDistributionCommonEnv);
-  }
-  if (isZipArchiveLocation(fromDistributionConfigPreset)) {
-    candidates.push(fromDistributionConfigPreset);
   }
   if (isZipArchiveLocation(fromDistributionConfigDefault)) {
     candidates.push(fromDistributionConfigDefault);
@@ -3078,19 +2843,7 @@ function getModpackArchiveSource(preset) {
   return selectFirstModpackSource(candidates, configPath);
 }
 
-function getModpackArchiveSha256(preset) {
-  const normalizedPreset = normalizeLauncherPreset(preset, "high");
-  const archivePresetEnvKey = `BETTERMON_MODPACK_ARCHIVE_${normalizedPreset.toUpperCase()}_SHA256`;
-  const zipPresetEnvKey = `BETTERMON_MODPACK_ZIP_${normalizedPreset.toUpperCase()}_SHA256`;
-  const fromArchivePresetEnv = normalizeSha256(process.env[archivePresetEnvKey]);
-  if (fromArchivePresetEnv) {
-    return fromArchivePresetEnv;
-  }
-  const fromZipPresetEnv = normalizeSha256(process.env[zipPresetEnvKey]);
-  if (fromZipPresetEnv) {
-    return fromZipPresetEnv;
-  }
-
+function getModpackArchiveSha256() {
   const fromArchiveCommonEnv = normalizeSha256(process.env.BETTERMON_MODPACK_ARCHIVE_SHA256);
   if (fromArchiveCommonEnv) {
     return fromArchiveCommonEnv;
@@ -3101,15 +2854,6 @@ function getModpackArchiveSha256(preset) {
   }
 
   const config = readModpackConfig();
-  const fromArchiveConfigPreset = normalizeSha256(config?.archiveSha256ByPreset?.[normalizedPreset]);
-  if (fromArchiveConfigPreset) {
-    return fromArchiveConfigPreset;
-  }
-  const fromZipConfigPreset = normalizeSha256(config?.zipSha256ByPreset?.[normalizedPreset]);
-  if (fromZipConfigPreset) {
-    return fromZipConfigPreset;
-  }
-
   const fromArchiveConfigDefault = normalizeSha256(config?.archiveSha256);
   if (fromArchiveConfigDefault) {
     return fromArchiveConfigDefault;
@@ -3306,6 +3050,18 @@ function collectDistributionModuleArtifacts(modules, output, basePath = "") {
   }
 }
 
+function hasDistributionPayload(source) {
+  return (
+    source &&
+    typeof source === "object" &&
+    (Array.isArray(source.files) ||
+      Array.isArray(source.modules) ||
+      Array.isArray(source.delete) ||
+      Array.isArray(source.remove) ||
+      Boolean(asTrimmedText(source.baseUrl)))
+  );
+}
+
 function parseDistributionIndex(distributionJson, preset, options = {}) {
   const normalizedPreset = normalizeLauncherPreset(preset, "high");
   if (!distributionJson || typeof distributionJson !== "object") {
@@ -3316,7 +3072,7 @@ function parseDistributionIndex(distributionJson, preset, options = {}) {
   let sourceKey = "";
   if (distributionJson.presets && typeof distributionJson.presets === "object") {
     const presetSection = distributionJson.presets[normalizedPreset];
-    if (presetSection && typeof presetSection === "object") {
+    if (hasDistributionPayload(presetSection)) {
       source = presetSection;
       sourceKey = `presets.${normalizedPreset}`;
     }
@@ -4315,7 +4071,7 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
     return null;
   }
 
-  const manifest = parseModpackManifest(manifestSource);
+  const manifest = parseModpackManifest(manifestSource, launcherPreset);
   if (manifest.minecraftVersion && manifest.minecraftVersion !== FIXED_MINECRAFT_VERSION) {
     throw new Error(
       `Modpack Minecraft version does not match launcher version: ${manifest.minecraftVersion} != ${FIXED_MINECRAFT_VERSION}`
@@ -4323,13 +4079,85 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
   }
 
   const previousState = readModpackState(modpackRoot);
+  if (manifest.distribution) {
+    const parsedDistribution = manifest.distribution;
+    const nextManagedFiles = parsedDistribution.files.map((file) => file.path);
+    const nextManagedPathKeys = new Set(nextManagedFiles.map((filePath) => buildModpackPathKey(filePath)));
+    const previousManagedFiles = normalizeStateManagedFiles(previousState?.managedFiles);
+    const staleManagedFiles = previousManagedFiles.filter(
+      (filePath) => !nextManagedPathKeys.has(buildModpackPathKey(filePath))
+    );
+    const deleteEntries = buildUniqueModpackPathList([...(parsedDistribution.delete || []), ...staleManagedFiles]);
+    let removedCount = 0;
+    if (deleteEntries.length > 0) {
+      sendLog({
+        level: "progress",
+        message: `Removing obsolete modpack entries (${deleteEntries.length})...`
+      });
+      removedCount = await removeDistributionEntries(modpackRoot, deleteEntries);
+    }
+
+    if (parsedDistribution.files.length > 0) {
+      sendLog({
+        level: "progress",
+        message: `Applying modpack manifest files (${parsedDistribution.files.length})...`
+      });
+    }
+    const applyResult = await applyDistributionFiles(modpackRoot, parsedDistribution.files);
+    const unchanged = applyResult.updatedCount === 0 && removedCount === 0;
+    const signature = `distribution:${launcherPreset}:manifest:${manifest.sourceKey}:${manifest.manifestDigest}`;
+    await writeModpackState(modpackRoot, {
+      signature,
+      preset: launcherPreset,
+      sourceType: "distribution",
+      id: manifest.id,
+      version: manifest.version,
+      minecraftVersion: manifest.minecraftVersion || FIXED_MINECRAFT_VERSION,
+      manifestSourceKey: manifest.sourceKey,
+      manifestDigest: manifest.manifestDigest,
+      distributionSource: manifestSource.manifestLocation,
+      distributionSourceKey: manifest.sourceKey,
+      distributionDigest: manifest.manifestDigest,
+      distributionSection: parsedDistribution.sourceKey,
+      appliedAt: new Date().toISOString(),
+      updatedCount: applyResult.updatedCount,
+      skippedCount: applyResult.skippedCount,
+      removedCount,
+      fileCount: parsedDistribution.files.length,
+      managedFiles: nextManagedFiles,
+      managedFileHashes: buildManagedFileHashesState(parsedDistribution.files)
+    });
+    modpackSessionSyncedKeys.add(sessionKey);
+
+    if (unchanged) {
+      sendLog({
+        level: "info",
+        message: `Modpack ${manifest.version} is already up to date.`
+      });
+    } else {
+      sendLog({
+        level: "info",
+        message: `Modpack ${manifest.version} sync completed. Updated ${applyResult.updatedCount}, skipped ${applyResult.skippedCount}, removed ${removedCount}.`
+      });
+    }
+
+    return {
+      ok: true,
+      skipped: unchanged,
+      updatedCount: applyResult.updatedCount,
+      skippedCount: applyResult.skippedCount,
+      removedCount,
+      version: manifest.version,
+      fileCount: parsedDistribution.files.length
+    };
+  }
+
   if (normalizeSha1(previousState?.archiveSha1) === manifest.archive.sha1) {
     await writeModpackState(modpackRoot, {
       ...previousState,
       version: manifest.version,
       manifestSourceKey: manifest.sourceKey,
-      manifestDigest: manifest.manifestDigest,
-      presetRules: manifest.presetRules || null
+      manifestDigest: manifest.manifestDigest
     });
     modpackSessionSyncedKeys.add(sessionKey);
     sendLog({
@@ -4341,8 +4169,7 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
       skipped: true,
       version: manifest.version,
       fileCount: getManagedModpackEntriesFromState(previousState).length,
-      removedCount: 0,
-      presetRules: manifest.presetRules
+      removedCount: 0
     };
   }
 
@@ -4417,7 +4244,6 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
     archiveSize: manifest.archive.size,
     archiveCachePath: cacheResult.archivePath,
     resetExistingFiles: shouldResetExistingFiles,
-    presetRules: manifest.presetRules || null,
     appliedAt: new Date().toISOString(),
     updatedCount: entries.length,
     skippedCount: 0,
@@ -4438,15 +4264,14 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
     skippedCount: 0,
     removedCount,
     version: manifest.version,
-    fileCount: entries.length,
-    presetRules: manifest.presetRules
+    fileCount: entries.length
   };
 }
 
 async function synchronizeModpackDistribution({ launcherPreset, modpackRoot, sessionKey, distributionSource }) {
   sendLog({
     level: "info",
-    message: `Checking modpack distribution (${launcherPreset.toUpperCase()})...`
+    message: "Checking modpack distribution..."
   });
 
   const distributionText = await readTextFromSource(distributionSource, "modpack distribution index");
@@ -4546,7 +4371,7 @@ async function applyArchiveToModpack({
     expectedSha256,
     knownRemoteFingerprint,
     knownLocalFingerprint,
-    downloadLogMessage: `Downloading modpack archive (${launcherPreset.toUpperCase()})...`
+    downloadLogMessage: "Downloading modpack archive..."
   });
   const extractionArchivePath = cacheResult.archivePath;
   const archiveHash = cacheResult.archiveHash;
@@ -4611,7 +4436,7 @@ async function applyArchiveToModpack({
 async function synchronizeModpackArchive({ launcherPreset, modpackRoot, sessionKey, archiveSource }) {
   sendLog({
     level: "info",
-    message: `Checking modpack archive (${launcherPreset.toUpperCase()})...`
+    message: "Checking modpack archive..."
   });
 
   const expectedSha256 = getModpackArchiveSha256(launcherPreset);
@@ -4728,8 +4553,7 @@ async function synchronizeModpack(options) {
       ok: true,
       skipped: true,
       reason: "session-cached",
-      version: asTrimmedText(existingState?.version),
-      presetRules: existingState?.presetRules || null
+      version: asTrimmedText(existingState?.version)
     };
   }
 
@@ -4763,7 +4587,7 @@ async function synchronizeModpack(options) {
 
   if (!distributionSource && !archiveSource && sourceFailures.length === 0) {
     throw new Error(
-      `No modpack source is configured for preset "${launcherPreset}". Configure archiveByPreset/archiveUrl (or zipByPreset/zipUrl) in modpack.config.json.`
+      "No modpack source is configured. Configure archiveUrl (or zipUrl) in modpack.config.json."
     );
   }
 
@@ -4778,8 +4602,7 @@ async function synchronizeModpack(options) {
       ok: true,
       skipped: true,
       reason: "source-unavailable-using-existing-state",
-      version: asTrimmedText(existingState?.version),
-      presetRules: existingState?.presetRules || null
+      version: asTrimmedText(existingState?.version)
     };
   }
 
@@ -4816,8 +4639,7 @@ async function checkModpackUpdate(options) {
         currentVersion: asTrimmedText(previousState?.version),
         latestVersion: asTrimmedText(previousState?.version),
         currentArchiveSha1: normalizeSha1(previousState?.archiveSha1),
-        latestArchiveSha1: normalizeSha1(previousState?.archiveSha1),
-        presetRules: previousState?.presetRules || null
+        latestArchiveSha1: normalizeSha1(previousState?.archiveSha1)
       };
     }
     throw error;
@@ -4831,11 +4653,30 @@ async function checkModpackUpdate(options) {
     };
   }
 
-  const manifest = parseModpackManifest(manifestSource);
+  const manifest = parseModpackManifest(manifestSource, launcherPreset);
   if (manifest.minecraftVersion && manifest.minecraftVersion !== FIXED_MINECRAFT_VERSION) {
     throw new Error(
       `Modpack Minecraft version does not match launcher version: ${manifest.minecraftVersion} != ${FIXED_MINECRAFT_VERSION}`
     );
+  }
+
+  if (manifest.distribution) {
+    const currentDistributionDigest = asTrimmedText(previousState?.distributionDigest || previousState?.manifestDigest);
+    const latestDistributionDigest = manifest.manifestDigest;
+    const pending =
+      asTrimmedText(previousState?.sourceType).toLowerCase() !== "distribution" ||
+      currentDistributionDigest !== latestDistributionDigest;
+    return {
+      ok: true,
+      supported: true,
+      pending,
+      preset: launcherPreset,
+      currentVersion: asTrimmedText(previousState?.version),
+      latestVersion: manifest.version,
+      currentDistributionDigest,
+      latestDistributionDigest,
+      fileCount: manifest.distribution.files.length
+    };
   }
 
   const currentArchiveSha1 = normalizeSha1(previousState?.archiveSha1);
@@ -4850,8 +4691,7 @@ async function checkModpackUpdate(options) {
     currentVersion: asTrimmedText(previousState?.version),
     latestVersion: manifest.version,
     currentArchiveSha1,
-    latestArchiveSha1,
-    presetRules: manifest.presetRules
+    latestArchiveSha1
   };
 }
 
@@ -4873,9 +4713,7 @@ async function runModpackSyncFromPayload(payload, options = {}) {
         gameDirectory,
         skipIfSessionSynced: Boolean(options?.skipIfSessionSynced)
       });
-      const statePresetRules = result?.presetRules || readModpackState(modpackRoot)?.presetRules || null;
-      const presetMods = await applyPresetModRules(modpackRoot, launcherPreset, statePresetRules);
-      return { ok: true, ...result, presetMods };
+      return { ok: true, ...result };
     });
   } catch (error) {
     return { ok: false, error: String(error?.message || error) };
@@ -4899,78 +4737,11 @@ async function runModpackUpdateCheckFromPayload(payload) {
         minecraftDirectory,
         gameDirectory
       });
-      const presetMods = await applyPresetModRules(modpackRoot, launcherPreset, result?.presetRules);
-      return { ...result, presetMods };
+      return { ...result };
     });
   } catch (error) {
     return { ok: false, error: String(error?.message || error) };
   }
-}
-
-async function prefetchModpackArchivesFromPayload(payload) {
-  const minecraftDirectory = asTrimmedText(payload?.minecraftDirectory);
-  const gameDirectory = asTrimmedText(payload?.gameDirectory);
-  const modpackRoot = gameDirectory || minecraftDirectory;
-  const excludedPresets = new Set(
-    (Array.isArray(payload?.excludePresets) ? payload.excludePresets : [payload?.excludePreset])
-      .map((value) => normalizeLauncherPreset(value, ""))
-      .filter(Boolean)
-  );
-
-  if (!modpackRoot) {
-    return { ok: false, error: "Minecraft directory is required." };
-  }
-
-  return runModpackOperationExclusive(modpackRoot, async () => {
-    let attemptedCount = 0;
-    let downloadedCount = 0;
-    let reusedCount = 0;
-    const failedPresets = [];
-
-    for (const preset of LAUNCHER_PRESET_OPTIONS) {
-      if (excludedPresets.has(preset)) {
-        continue;
-      }
-
-      const archiveSource = getModpackArchiveSource(preset);
-      if (!archiveSource) {
-        continue;
-      }
-
-      attemptedCount += 1;
-
-      try {
-        const cacheResult = await ensureModpackArchiveCached({
-          launcherPreset: preset,
-          modpackRoot,
-          archiveSource,
-          expectedSha256: getModpackArchiveSha256(preset),
-          downloadLogMessage: `Prefetching modpack archive (${preset.toUpperCase()})...`
-        });
-
-        if (cacheResult.usedCachedArchive) {
-          reusedCount += 1;
-        } else {
-          downloadedCount += 1;
-        }
-      } catch (error) {
-        const message = String(error?.message || error);
-        failedPresets.push(`${preset}: ${message}`);
-        sendLog({
-          level: "warn",
-          message: `Failed to prefetch modpack archive (${preset.toUpperCase()}): ${message}`
-        });
-      }
-    }
-
-    return {
-      ok: failedPresets.length === 0,
-      attemptedCount,
-      downloadedCount,
-      reusedCount,
-      failedPresets
-    };
-  });
 }
 
 async function prepareRuntimeFromPayload(payload) {
@@ -7583,7 +7354,7 @@ ipcMain.handle("launcher:get-defaults", () => {
     minecraftDirectory: getDefaultMinecraftDir(),
     systemMinecraftDirectory: getSystemMinecraftDir(),
     javaPath: "",
-    jvmArgs: "",
+    jvmArgs: DEFAULT_JVM_ARGS,
     ramMin: 6144,
     ramMax: 6144
   };
@@ -7795,17 +7566,6 @@ ipcMain.handle("launcher:check-modpack-update", async (_, payload) => {
   const result = await runModpackUpdateCheckFromPayload(payload);
   if (!result.ok) {
     sendLog({ level: "warn", message: `Modpack update check failed: ${result.error}` });
-  }
-  return result;
-});
-
-ipcMain.handle("launcher:prefetch-modpacks", async (_, payload) => {
-  const result = await prefetchModpackArchivesFromPayload(payload);
-  if (!result.ok && Array.isArray(result.failedPresets) && result.failedPresets.length > 0) {
-    sendLog({
-      level: "warn",
-      message: `Modpack prefetch finished with warnings: ${result.failedPresets.join(" | ")}`
-    });
   }
   return result;
 });
