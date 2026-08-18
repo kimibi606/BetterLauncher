@@ -1,6 +1,6 @@
 {
   "name": "bettermon-launcher",
-  "version": "0.3.12",
+  "version": "0.3.13",
   "description": "Custom Minecraft launcher built with Electron, JS and CSS.",
   "main": "main.js",
   "scripts": {

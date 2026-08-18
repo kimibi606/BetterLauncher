@@ -57,6 +57,10 @@ const MODPACK_ALLOWED_ROOT_FILES = new Set(["options.txt"]);
 // add missing files here, but must never replace their existing preferences.
 const MODPACK_USER_PRESERVED_TOP_LEVEL_DIRECTORIES = new Set(["config", "resourcepacks", "shaderpacks"]);
 const MODPACK_USER_PRESERVED_ROOT_FILES = new Set(["options.txt"]);
+const MODPACK_FULL_RESET_PRESERVED_TOP_LEVEL_ENTRIES = new Set([
+  MODPACK_STATE_DIRECTORY.toLowerCase(),
+  ".bettermonlauncher"
+]);
 const NETWORK_RETRY_ATTEMPTS = 3;
 const NETWORK_RETRY_DELAYS_MS = [800, 2000, 4000];
 const NETWORK_RETRYABLE_HTTP_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
@@ -2020,6 +2024,10 @@ function parseModpackManifest(manifestSource) {
     id: asTrimmedText(json.id) || "bettermon",
     minecraftVersion: asTrimmedText(json.minecraftVersion),
     resetExistingFiles: json.resetExistingFiles === true,
+    resetMinecraftDirectory:
+      json.resetMinecraftDirectory === true ||
+      json.resetMinecraft === true ||
+      ["minecraft", "full"].includes(asTrimmedText(json.resetScope).toLowerCase()),
     sourceKey: asTrimmedText(manifestSource.sourceKey),
     manifestDigest
   };
@@ -3691,6 +3699,28 @@ async function removeArchiveTopLevelEntries(modpackRoot, entries, options = {}) 
   return removedCount;
 }
 
+async function resetMinecraftDirectoryContents(modpackRoot) {
+  let removedCount = 0;
+  const entries = await fs.promises.readdir(modpackRoot, { withFileTypes: true });
+  for (const entry of entries) {
+    const entryName = asTrimmedText(entry.name);
+    if (!entryName || MODPACK_FULL_RESET_PRESERVED_TOP_LEVEL_ENTRIES.has(entryName.toLowerCase())) {
+      continue;
+    }
+
+    const absolutePath = path.join(modpackRoot, entryName);
+    const resolvedRoot = path.resolve(modpackRoot);
+    const resolvedTarget = path.resolve(absolutePath);
+    if (resolvedTarget === resolvedRoot || !resolvedTarget.startsWith(`${resolvedRoot}${path.sep}`)) {
+      throw new Error(`Refusing to reset path outside Minecraft directory: ${entryName}`);
+    }
+
+    await fs.promises.rm(absolutePath, { recursive: true, force: true });
+    removedCount += 1;
+  }
+  return removedCount;
+}
+
 function getManagedModpackEntriesFromState(state) {
   const entries = Array.isArray(state?.entries) && state.entries.length > 0 ? state.entries : state?.managedFiles;
   return normalizeStateManagedFiles(entries);
@@ -4203,17 +4233,24 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
     throw normalizeZipExtractionError(cacheResult.archivePath, error, "analyze");
   }
 
-  const shouldResetExistingFiles = manifest.resetExistingFiles;
+  const shouldResetMinecraftDirectory = manifest.resetMinecraftDirectory;
+  const shouldResetExistingFiles = shouldResetMinecraftDirectory || manifest.resetExistingFiles;
   const entriesToRemove = shouldResetExistingFiles
     ? [...MODPACK_ALLOWED_TOP_LEVEL_DIRECTORIES, ...MODPACK_ALLOWED_ROOT_FILES]
     : topLevelEntries;
   sendLog({
     level: "progress",
-    message: shouldResetExistingFiles ? "Resetting existing modpack files..." : "Cleaning previous modpack files..."
+    message: shouldResetMinecraftDirectory
+      ? "Resetting Minecraft directory..."
+      : shouldResetExistingFiles
+        ? "Resetting existing modpack files..."
+        : "Cleaning previous modpack files..."
   });
-  const removedCount = await removeArchiveTopLevelEntries(modpackRoot, entriesToRemove, {
-    preserveUserData: !shouldResetExistingFiles
-  });
+  const removedCount = shouldResetMinecraftDirectory
+    ? await resetMinecraftDirectoryContents(modpackRoot)
+    : await removeArchiveTopLevelEntries(modpackRoot, entriesToRemove, {
+        preserveUserData: !shouldResetExistingFiles
+      });
 
   sendLog({
     level: "progress",
@@ -4244,6 +4281,7 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
     archiveSize: manifest.archive.size,
     archiveCachePath: cacheResult.archivePath,
     resetExistingFiles: shouldResetExistingFiles,
+    resetMinecraftDirectory: shouldResetMinecraftDirectory,
     appliedAt: new Date().toISOString(),
     updatedCount: entries.length,
     skippedCount: 0,
