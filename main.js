@@ -3812,6 +3812,7 @@ async function extractManagedZipArchive(archivePath, destinationPath, options = 
   const preservedDirectories = buildPowerShellStringArray(MODPACK_USER_PRESERVED_TOP_LEVEL_DIRECTORIES);
   const preservedFiles = buildPowerShellStringArray(MODPACK_USER_PRESERVED_ROOT_FILES);
   const preserveExistingUserFiles = options?.preserveUserData !== false ? "$true" : "$false";
+  const includeAllFiles = options?.includeAllFiles === true ? "$true" : "$false";
   const script = [
     "$ErrorActionPreference = 'Stop'",
     "Add-Type -AssemblyName System.IO.Compression.FileSystem",
@@ -3820,6 +3821,7 @@ async function extractManagedZipArchive(archivePath, destinationPath, options = 
     `$preservedDirectories = ${preservedDirectories}`,
     `$preservedFiles = ${preservedFiles}`,
     `$preserveExistingUserFiles = ${preserveExistingUserFiles}`,
+    `$includeAllFiles = ${includeAllFiles}`,
     `$destinationRoot = [System.IO.Path]::GetFullPath('${escapedDestination}')`,
     "$trimChars = [char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)",
     "$destinationRootWithSeparator = $destinationRoot.TrimEnd($trimChars) + [System.IO.Path]::DirectorySeparatorChar",
@@ -3838,7 +3840,7 @@ async function extractManagedZipArchive(archivePath, destinationPath, options = 
     "    $normalized = Normalize-ZipPath $entry.FullName",
     "    if ($null -eq $normalized) { continue }",
     "    $topLevel = $normalized.Split('/')[0]",
-    "    if (-not ($allowedDirectories -contains $topLevel) -and -not ($allowedFiles -contains $topLevel)) { continue }",
+    "    if (-not $includeAllFiles -and -not ($allowedDirectories -contains $topLevel) -and -not ($allowedFiles -contains $topLevel)) { continue }",
     "    $target = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($destinationRoot, ($normalized -replace '/', [System.IO.Path]::DirectorySeparatorChar)))",
     "    if ($target -ne $destinationRoot -and -not $target.StartsWith($destinationRootWithSeparator, [System.StringComparison]::OrdinalIgnoreCase)) {",
     "      throw \"ZIP entry escapes modpack root: $normalized\"",
@@ -4259,7 +4261,8 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
   let entries;
   try {
     entries = await extractManagedZipArchive(cacheResult.archivePath, modpackRoot, {
-      preserveUserData: !shouldResetExistingFiles
+      preserveUserData: !shouldResetExistingFiles,
+      includeAllFiles: shouldResetMinecraftDirectory
     });
   } catch (error) {
     throw normalizeZipExtractionError(cacheResult.archivePath, error, "extract");
