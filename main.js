@@ -389,7 +389,15 @@ function migrateLegacyUserDataIfNeeded() {
         }
       }
       fs.mkdirSync(path.dirname(markerPath), { recursive: true });
-      fs.writeFileSync(markerPath, JSON.stringify({ from: legacyDirectoryName, migratedAt: new Date().toISOString() }));
+      let markerHandle;
+      try {
+        markerHandle = fs.openSync(markerPath, "wx", 0o600);
+        fs.writeFileSync(markerHandle, JSON.stringify({ from: legacyDirectoryName, migratedAt: new Date().toISOString() }));
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+      } finally {
+        if (markerHandle !== undefined) fs.closeSync(markerHandle);
+      }
       sendLog({
         level: "info",
         message: `Migrated launcher data from "${legacyDirectoryName}" to "${LAUNCHER_USER_DATA_DIRECTORY}".`

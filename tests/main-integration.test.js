@@ -254,7 +254,7 @@ test("OS encryption failure never writes a plaintext login token", async (t) => 
   context.testToken = { access_token: "sensitive-access-token", refreshToken: "sensitive-refresh-token" };
   vm.runInContext("writeMicrosoftAuthCachePayload(testToken);", context);
   const cachePath = vm.runInContext("getMicrosoftAuthCachePath()", context);
-  assert.equal(fs.existsSync(cachePath), false);
+  await assert.rejects(fs.promises.readFile(cachePath), { code: "ENOENT" });
   await fs.promises.mkdir(path.dirname(cachePath), { recursive: true });
   await fs.promises.writeFile(cachePath, JSON.stringify(context.testToken), { flag: "wx" });
   assert.equal(vm.runInContext("readMicrosoftAuthCachePayload()", context), null);
