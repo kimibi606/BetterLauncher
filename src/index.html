@@ -6,7 +6,7 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://starlightskins.lunareclipse.studio https://mc-heads.net https://minotar.net; media-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none';"
     />
-    <title>BetterMon 런처</title>
+    <title>BetterLauncher</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
@@ -16,7 +16,7 @@
         <div class="window-resizable-vert frame-drag-padder"></div>
         <div class="window-content">
           <div class="window-title-dock">
-            <span class="window-title">BetterMon Launcher</span>
+            <span class="window-title">BetterLauncher</span>
           </div>
           <div class="window-controls">
             <button id="windowMinimize" class="window-btn" type="button" aria-label="최소화">–</button>
@@ -158,6 +158,14 @@
         <span class="player-count-label">접속 인원</span>
         <span id="playerCountValue" class="player-count-value">확인 중...</span>
         <span id="playerCountTooltip" class="player-count-tooltip" aria-hidden="true"></span>
+      </section>
+
+      <section class="project-picker" aria-label="모드팩 프로젝트 선택">
+        <label for="projectSelect">모드팩 프로젝트</label>
+        <select id="projectSelect" disabled aria-describedby="projectDescription">
+          <option value="">프로젝트 불러오는 중...</option>
+        </select>
+        <p id="projectDescription" class="project-description" aria-live="polite"></p>
       </section>
 
       <section class="start-launch-area" aria-label="게임 실행">
@@ -336,7 +344,7 @@
                   <button id="settingsPickJavaPath" type="button" class="secondary">파일 선택</button>
                 </div>
                 <p class="settings-java-note">
-                  게임 실행 전에 Java 실행 파일의 유효성을 검사합니다. 64비트 Java 21이 필요합니다.
+                  게임 실행 전에 Java 실행 파일의 유효성을 검사합니다. 선택한 모드팩에 맞는 64비트 Java가 필요합니다.
                   <br />
                   Java 실행 파일의 경로는 보통 <code>bin/javaw.exe</code>로 끝나야 합니다.
                 </p>
@@ -356,7 +364,7 @@
                     실행 시 JVM에 전달할 추가 인수를 설정합니다. <code>-Xms</code>와 <code>-Xmx</code>는 포함되지 않아야 합니다.
                   </p>
                   <p class="settings-java-note">
-                    Java 21 (HotSpot VM) 기준으로 동작하는 JVM 인수를 사용하는 것을 권장합니다.
+                    선택한 Java (HotSpot VM) 기준으로 동작하는 JVM 인수를 사용하는 것을 권장합니다.
                   </p>
                 </div>
               </section>
@@ -420,10 +428,10 @@
                   <img
                     class="settings-about-launcher-icon"
                     src="./assets/app-icon.png"
-                    alt="BetterMon 런처 아이콘"
+                    alt="BetterLauncher 아이콘"
                     loading="lazy"
                   />
-                  <h4>BetterMon Launcher</h4>
+                  <h4>BetterLauncher</h4>
                 </header>
 
                 <div class="settings-about-divider" aria-hidden="true"></div>
@@ -445,7 +453,7 @@
                 <div class="settings-about-divider" aria-hidden="true"></div>
 
                 <p class="settings-about-release-description">
-                  BetterMon 런처 최신 변경사항입니다. 실행 전에 핵심 변경점을 확인하세요.
+                  BetterLauncher 최신 변경사항입니다. 실행 전에 핵심 변경점을 확인하세요.
                 </p>
 
                 <ul id="settingsAboutNewsList" class="settings-about-news-list">

@@ -914,6 +914,61 @@ body[data-screen="launch"] .start-launch-area {
   background-color: #657ac4;
 }
 
+.project-picker {
+  position: fixed;
+  left: 20px;
+  bottom: 118px;
+  z-index: 80;
+  width: min(350px, calc(100vw - 40px));
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 10px;
+  background: rgba(8, 12, 20, 0.72);
+  backdrop-filter: blur(6px);
+  -webkit-app-region: no-drag;
+}
+
+.project-picker label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.project-picker select {
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 6px;
+  background: #131b2b;
+  color: var(--text);
+  font: inherit;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.project-picker select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.project-picker select:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.project-description {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+#discordButton[hidden] {
+  display: none;
+}
+
 .start-launch-area {
   position: fixed;
   left: 18px;

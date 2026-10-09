@@ -22,8 +22,8 @@ const GITHUB_RELEASE_NOTES_MAX_ITEMS = 8;
 const JAVA_RAM_MIN_MB = 6144;
 const JAVA_RAM_STEP_MB = 512;
 const JAVA_PATH_AUTO_SELECT_PLACEHOLDERS = new Set(["java", "java.exe", "javaw", "javaw.exe"]);
-const DISCORD_INVITE_URL = "https://example.invalid/private";
-const SETTINGS_STORAGE_KEY = "bettermon.launcher.settings.v1";
+const LEGACY_SETTINGS_STORAGE_KEY = "bettermon.launcher.settings.v1";
+const SELECTED_PROJECT_STORAGE_KEY = "betterlauncher.selected-project.v1";
 const NEWS_PANEL_EXPANDED_STORAGE_KEY = "bettermon.launcher.news.expanded.v1";
 const LOGIN_WAITING_ENTER_DELAY_MS = 220;
 const LOGIN_GATE_ENTER_DELAY_MS = 180;
@@ -83,6 +83,11 @@ const bgmToggleButton = document.getElementById("bgmToggleButton");
 const bgmVolumeSlider = document.getElementById("bgmVolumeSlider");
 const bgmVolumeValue = document.getElementById("bgmVolumeValue");
 const startLaunchButton = document.getElementById("startLaunchButton");
+const projectSelect = document.getElementById("projectSelect");
+const projectDescription = document.getElementById("projectDescription");
+let projects = [];
+let selectedProjectId = "";
+let isProjectSwitching = false;
 const launchStatus = document.getElementById("launchStatus");
 const settingsCloseButton = document.getElementById("settingsCloseButton");
 const settingsDoneButton = document.getElementById("settingsDoneButton");
@@ -1031,8 +1036,10 @@ async function refreshLauncherNews(options = {}) {
   }
 
   isNewsRequestPending = true;
+  const requestedProjectId = selectedProjectId;
   try {
-    const snapshot = await window.launcherApi.getNews({ forceRefresh });
+    const snapshot = await window.launcherApi.getNews({ forceRefresh, projectId: requestedProjectId });
+    if (requestedProjectId !== selectedProjectId) return false;
     const nextRefreshMs = clampNewsRefreshMs(snapshot?.refreshMs, newsRefreshMs);
     if (nextRefreshMs !== newsRefreshMs) {
       newsRefreshMs = nextRefreshMs;
@@ -1043,6 +1050,7 @@ async function refreshLauncherNews(options = {}) {
     applyLauncherNewsUi(snapshot, { forceRender });
     return !snapshot || snapshot.ok !== false;
   } catch {
+    if (requestedProjectId !== selectedProjectId) return false;
     setNewsBadgeText("\uC624\uD504\uB77C\uC778");
     return false;
   } finally {
@@ -1168,11 +1176,14 @@ async function refreshPlayerCount() {
   }
 
   isPlayerCountRequestPending = true;
+  const requestedProjectId = selectedProjectId;
   try {
-    const snapshot = await window.launcherApi.getServerStatus();
+    const snapshot = await window.launcherApi.getServerStatus({ projectId: requestedProjectId });
+    if (requestedProjectId !== selectedProjectId) return false;
     applyPlayerCountUi(snapshot);
     return !snapshot || snapshot.ok !== false;
   } catch (error) {
+    if (requestedProjectId !== selectedProjectId) return false;
     setPlayerCountText("\uD655\uC778 \uC2E4\uD328", true);
     setPlayerCountTooltip(String(error?.message || error));
     return false;
@@ -1205,6 +1216,7 @@ function stopPlayerCountPolling() {
 
 function canRunBackgroundModpackUpdateCheck() {
   return !(
+    isProjectSwitching ||
     isStartupModpackSyncRunning ||
     isModpackUpdateApplyRunning ||
     isLaunchRequestPending ||
@@ -1231,8 +1243,10 @@ async function refreshModpackUpdateStatus(options = {}) {
   }
 
   isModpackUpdateCheckRunning = true;
+  updateLaunchButtonUi();
   try {
     const result = await window.launcherApi.checkModpackUpdate(payload);
+    if (payload.projectId !== selectedProjectId) return false;
     if (!result?.ok) {
       if (!silent) {
         setLaunchStatus(localizeStatusMessage(result?.error || "Modpack update check failed."), true);
@@ -1251,6 +1265,7 @@ async function refreshModpackUpdateStatus(options = {}) {
     return true;
   } finally {
     isModpackUpdateCheckRunning = false;
+    updateLaunchButtonUi();
   }
 }
 
@@ -1386,20 +1401,20 @@ function localizeStatusMessage(message) {
     "\uC124\uC815\uB41C Java \uB7F0\uD0C0\uC784\uC744 \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC5B4 \uC790\uB3D9 \uD0D0\uC9C0\uB97C \uC2DC\uB3C4\uD569\uB2C8\uB2E4 (\uBC84\uC804: $1)."
   );
   localized = localized.replace(
-    /^Configured Java runtime could not be used \(version:\s*([^)]+)\)\. Java 21 is required\. Trying automatic Java detection\.\.\.$/i,
-    "설정된 Java 런타임을 사용할 수 없습니다. Java 21이 필요합니다 (현재 버전: $1)."
+    /^Configured Java runtime could not be used \(version:\s*([^)]+)\)\. Java (\d+) is required\. Trying automatic Java detection\.\.\.$/i,
+    "설정된 Java 런타임을 사용할 수 없습니다. Java $2가 필요합니다 (현재 버전: $1)."
   );
   localized = localized.replace(
     /^Using bundled Java runtime:\s*(.+)$/i,
     "\uB0B4\uC7A5 Java \uB7F0\uD0C0\uC784 \uC0AC\uC6A9: $1"
   );
   localized = localized.replace(
-    /^Bundled Java runtime could not be used \(version:\s*([^)]+)\)\. Reinstalling Java 21 runtime\.\.\.$/i,
-    "내장 Java 런타임 버전이 맞지 않아 Java 21을 다시 설치합니다 (현재 버전: $1)."
+    /^Bundled Java runtime could not be used \(version:\s*([^)]+)\)\. Reinstalling Java (\d+) runtime\.\.\.$/i,
+    "내장 Java 런타임 버전이 맞지 않아 Java $2를 다시 설치합니다 (현재 버전: $1)."
   );
   localized = localized.replace(
-    /^System Java runtime from PATH could not be used \(version:\s*([^)]+)\)\. Java 21 is required\.$/i,
-    "PATH의 Java 런타임을 사용할 수 없습니다. Java 21이 필요합니다 (현재 버전: $1)."
+    /^System Java runtime from PATH could not be used \(version:\s*([^)]+)\)\. Java (\d+) is required\.$/i,
+    "PATH의 Java 런타임을 사용할 수 없습니다. Java $2가 필요합니다 (현재 버전: $1)."
   );
   localized = localized.replace(
     /^Fabric runtime already installed:\s*(.+)$/i,
@@ -1670,7 +1685,9 @@ function bindJavaMemoryControlEvents() {
 
 function readStoredSettings() {
   try {
-    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    const storageKey = `betterlauncher.project.${selectedProjectId}.settings.v1`;
+    const raw = localStorage.getItem(storageKey) ||
+      (selectedProjectId === "bettermon" ? localStorage.getItem(LEGACY_SETTINGS_STORAGE_KEY) : null);
     if (!raw) {
       return normalizeSettings({}, launcherDefaults);
     }
@@ -1684,7 +1701,8 @@ function readStoredSettings() {
 
 function writeStoredSettings(settings) {
   try {
-    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+    if (!selectedProjectId) return;
+    localStorage.setItem(`betterlauncher.project.${selectedProjectId}.settings.v1`, JSON.stringify(settings));
   } catch {
     // ignore storage failures
   }
@@ -1886,6 +1904,7 @@ function getConfiguredMinecraftDirectory() {
 }
 
 async function ensureJavaPathAutoSelectedOnStartup() {
+  if (!projects.find((entry) => entry.id === selectedProjectId)?.manifestConfigured) return false;
   if (!window.launcherApi || typeof window.launcherApi.autoSelectJava !== "function") {
     return false;
   }
@@ -1898,26 +1917,26 @@ async function ensureJavaPathAutoSelectedOnStartup() {
     return false;
   }
 
-  setStartupProgress(STARTUP_SETTINGS_PROGRESS + 2, "Java 21 실행 파일 자동 선택 중...");
+  setStartupProgress(STARTUP_SETTINGS_PROGRESS + 2, `Java ${projects.find((entry) => entry.id === selectedProjectId)?.javaMajor || 21} 실행 파일 자동 선택 중...`);
 
   try {
-    const result = await window.launcherApi.autoSelectJava({ minecraftDirectory });
+    const result = await window.launcherApi.autoSelectJava({ minecraftDirectory, projectId: selectedProjectId });
     if (!result?.ok || !asText(result?.javaPath)) {
       setStartupProgress(
         STARTUP_SETTINGS_PROGRESS + 4,
-        asText(result?.error) || "Java 21 실행 파일 자동 선택에 실패했습니다.",
+        asText(result?.error) || "Java 실행 파일 자동 선택에 실패했습니다.",
         true
       );
       return false;
     }
 
     applyResolvedJavaPath(result.javaPath);
-    setStartupProgress(STARTUP_SETTINGS_PROGRESS + 4, "Java 21 실행 파일 자동 선택 완료.");
+    setStartupProgress(STARTUP_SETTINGS_PROGRESS + 4, "Java 실행 파일 자동 선택 완료.");
     return true;
   } catch (error) {
     setStartupProgress(
       STARTUP_SETTINGS_PROGRESS + 4,
-      asText(error?.message) || "Java 21 실행 파일 자동 선택에 실패했습니다.",
+      asText(error?.message) || "Java 실행 파일 자동 선택에 실패했습니다.",
       true
     );
     return false;
@@ -1933,6 +1952,7 @@ function updateLaunchButtonUi() {
   const hasLauncherUpdateReady = isLauncherUpdateReadyToInstall();
   const isLauncherUpdateDownloading = isLauncherUpdateDownloadInProgress();
   const busy =
+    isProjectSwitching ||
     isLaunchRequestPending ||
     isLauncherRunning ||
     isStartupModpackSyncRunning ||
@@ -1958,7 +1978,9 @@ function updateLaunchButtonUi() {
   } else if (hasPendingModpackUpdate) {
     label = "업데이트";
   }
-  startLaunchButton.disabled = busy || (!authState.signedIn && !hasLauncherUpdateReady);
+  const project = projects.find((entry) => entry.id === selectedProjectId);
+  startLaunchButton.disabled = busy || (!hasLauncherUpdateReady && (!authState.signedIn || !project?.manifestConfigured));
+  if (projectSelect) projectSelect.disabled = busy || isModpackUpdateCheckRunning || projects.length === 0;
   startLaunchButton.textContent = label;
   startLaunchButton.setAttribute("aria-label", label);
   startLaunchButton.setAttribute("aria-busy", busy ? "true" : "false");
@@ -1994,6 +2016,7 @@ function buildLaunchPayload() {
     asText(launcherDefaults.javaPath);
 
   return {
+    projectId: selectedProjectId,
     username: asText(authState.profileName, "\uD50C\uB808\uC774\uC5B4"),
     version: "",
     versionType: "release",
@@ -2012,6 +2035,7 @@ function buildLaunchPayload() {
 
 function buildModpackSyncPayload() {
   return {
+    projectId: selectedProjectId,
     minecraftDirectory: asText(launcherSettings.minecraftDirectory) || asText(launcherDefaults.minecraftDirectory),
     gameDirectory: ""
   };
@@ -2086,6 +2110,10 @@ async function runStartupModpackSync() {
     return;
   }
   hasStartupModpackSyncRun = true;
+  if (!projects.find((entry) => entry.id === selectedProjectId)?.manifestConfigured) {
+    setLaunchStatus("모드팩 배포 주소를 설정하면 설치하고 실행할 수 있습니다.");
+    return;
+  }
 
   const payload = buildModpackSyncPayload();
   if (!payload.minecraftDirectory) {
@@ -2229,6 +2257,7 @@ async function launchGame() {
     setLaunchStatus("런처 업데이트를 다운로드 중입니다. 완료되면 적용해 주세요.");
     return;
   }
+  if (isProjectSwitching) return;
 
   if (!authState.signedIn) {
     setLaunchStatus("Microsoft\uB85C \uBA3C\uC800 \uB85C\uADF8\uC778\uD574 \uC8FC\uC138\uC694.", true);
@@ -2567,7 +2596,7 @@ async function refreshProfilesForDirectory(minecraftDirectory, selectedProfile =
   }
 
   try {
-    const result = await window.launcherApi.loadProfiles({ minecraftDirectory: targetDirectory });
+    const result = await window.launcherApi.loadProfiles({ minecraftDirectory: targetDirectory, projectId: selectedProjectId });
     if (!result?.ok) {
       loadedProfiles = [];
       fillProfileSelect([], "");
@@ -2585,14 +2614,24 @@ async function refreshProfilesForDirectory(minecraftDirectory, selectedProfile =
   }
 }
 
-async function initializeSettings() {
+async function initializeSettings(projectId = "") {
   let defaults = null;
 
   try {
-    defaults = await window.launcherApi.getDefaults();
+    defaults = await window.launcherApi.getDefaults({ projectId });
   } catch {
     defaults = null;
   }
+  if (!defaults?.projectId) throw new Error(defaults?.error || "모드팩 프로젝트 설정을 불러올 수 없습니다.");
+  projects = Array.isArray(defaults.projects) ? defaults.projects : [];
+  if (!projectId && !selectedProjectId) {
+    let storedProjectId = "";
+    try { storedProjectId = localStorage.getItem(SELECTED_PROJECT_STORAGE_KEY) || ""; } catch { /* unavailable storage */ }
+    if (storedProjectId && storedProjectId !== defaults.projectId && projects.some((entry) => entry.id === storedProjectId)) {
+      return initializeSettings(storedProjectId);
+    }
+  }
+  selectedProjectId = defaults.projectId;
 
   try {
     const systemProfile = await window.launcherApi.getSystemProfile();
@@ -2619,6 +2658,11 @@ async function initializeSettings() {
   }
 
   launcherSettings = readStoredSettings();
+  if (selectedProjectId === "bettermon" && (defaults.legacyMinecraftDirectories || []).some((directory) =>
+    isSameDirectoryPath(launcherSettings.minecraftDirectory, directory))) {
+    launcherSettings.minecraftDirectory = launcherDefaults.minecraftDirectory;
+    launcherSettings.dataDirectory = launcherDefaults.minecraftDirectory;
+  }
   const systemMinecraftDirectory = asText(defaults?.systemMinecraftDirectory);
   if (isSameDirectoryPath(launcherSettings.minecraftDirectory, systemMinecraftDirectory)) {
     launcherSettings.minecraftDirectory = asText(launcherDefaults.minecraftDirectory);
@@ -2627,7 +2671,65 @@ async function initializeSettings() {
   }
 
   applySettingsToInputs(launcherSettings);
+  writeStoredSettings(launcherSettings);
+  renderProjectPicker();
+  try { localStorage.setItem(SELECTED_PROJECT_STORAGE_KEY, selectedProjectId); } catch { /* unavailable storage */ }
   await refreshProfilesForDirectory(launcherSettings.minecraftDirectory, launcherSettings.selectedProfile);
+}
+
+function renderProjectPicker() {
+  if (projectSelect) {
+    projectSelect.replaceChildren();
+    for (const project of projects) {
+      const option = document.createElement("option");
+      option.value = project.id;
+      option.textContent = project.name;
+      projectSelect.appendChild(option);
+    }
+    projectSelect.value = selectedProjectId;
+  }
+  const project = projects.find((entry) => entry.id === selectedProjectId);
+  if (projectDescription) {
+    projectDescription.textContent = project
+      ? `${project.minecraftVersion} · ${project.modLoader} · Java ${project.javaMajor}${project.description ? " — " + project.description : ""}${project.manifestConfigured ? "" : " · 배포 준비 중"}`
+      : "등록된 모드팩 프로젝트가 없습니다.";
+  }
+  if (discordButton) {
+    discordButton.hidden = !project?.discordUrl;
+    discordButton.setAttribute("aria-label", `${project?.name || "모드팩"} 디스코드`);
+  }
+  updateLaunchButtonUi();
+}
+
+async function switchProject(projectId) {
+  if (!projectId || projectId === selectedProjectId || isProjectSwitching) return;
+  if (isLaunchRequestPending || isLauncherRunning || isModpackUpdateApplyRunning || isStartupModpackSyncRunning || isModpackUpdateCheckRunning) {
+    if (projectSelect) projectSelect.value = selectedProjectId;
+    return;
+  }
+  writeStoredSettings(launcherSettings);
+  const previousProjectId = selectedProjectId;
+  isProjectSwitching = true;
+  updateLaunchButtonUi();
+  try {
+    await initializeSettings(projectId);
+    modpackUpdateState = null;
+    currentNewsItems = [];
+    renderNewsItems([], true);
+    renderSettingsAboutNewsItems();
+    setPlayerCountText("확인 중...", false);
+    setPlayerCountTooltip("");
+    setLaunchStatus(`${projects.find((entry) => entry.id === projectId)?.name || projectId} 선택됨`);
+    await refreshModpackUpdateStatus();
+    void refreshLauncherNews({ forceRefresh: true, forceRender: true });
+    void refreshPlayerCount();
+  } catch (error) {
+    await initializeSettings(previousProjectId).catch(() => {});
+    setLaunchStatus(asText(error?.message) || "모드팩을 선택할 수 없습니다.", true);
+  } finally {
+    isProjectSwitching = false;
+    updateLaunchButtonUi();
+  }
 }
 
 async function saveSettings(closeAfterSave = true) {
@@ -2900,9 +3002,17 @@ bindClick(gateMicrosoftLoginButton, async () => {
   await runMicrosoftLogin();
 });
 
+if (projectSelect) {
+  projectSelect.addEventListener("change", () => {
+    void switchProject(projectSelect.value);
+  });
+}
+
 bindClick(discordButton, async (event) => {
   event.preventDefault();
-  const result = await window.launcherApi.openExternal(DISCORD_INVITE_URL);
+  const discordUrl = projects.find((entry) => entry.id === selectedProjectId)?.discordUrl;
+  if (!discordUrl) return;
+  const result = await window.launcherApi.openExternal(discordUrl);
   if (!result?.ok && gateAuthStatus) {
     gateAuthStatus.textContent = "\uB514\uC2A4\uCF54\uB4DC \uB9C1\uD06C\uB97C \uC5F4 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.";
   }
@@ -2997,17 +3107,17 @@ bindClick(settingsAutoJavaPathButton, async () => {
   if (settingsPickJavaPathButton) {
     settingsPickJavaPathButton.disabled = true;
   }
-  setSettingsStatus("Java 21 실행 파일 자동 선택 중...");
+  setSettingsStatus(`Java ${projects.find((entry) => entry.id === selectedProjectId)?.javaMajor || 21} 실행 파일 자동 선택 중...`);
 
   try {
-    const result = await window.launcherApi.autoSelectJava({ minecraftDirectory });
+    const result = await window.launcherApi.autoSelectJava({ minecraftDirectory, projectId: selectedProjectId });
     if (!result?.ok || !asText(result?.javaPath)) {
       setSettingsStatus(asText(result?.error) || "Java 실행 파일 자동 선택에 실패했습니다.", true);
       return;
     }
 
     applyResolvedJavaPath(result.javaPath);
-    setSettingsStatus("Java 21 실행 파일을 자동 선택했습니다.");
+    setSettingsStatus("Java 실행 파일을 자동 선택했습니다.");
   } catch (error) {
     setSettingsStatus(asText(error?.message) || "Java 실행 파일 자동 선택에 실패했습니다.", true);
   } finally {

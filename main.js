@@ -7,6 +7,10 @@ const { spawn } = require("child_process");
 const { Readable } = require("stream");
 const { pipeline } = require("stream/promises");
 const { fileURLToPath } = require("url");
+const { AsyncLocalStorage } = require("async_hooks");
+const { readProjects, resolveProject, getProjectDirectory } = require("./lib/projects");
+const { downloadDistributionFile } = require("./lib/distribution-download");
+const projectContext = new AsyncLocalStorage();
 
 const { app, BrowserWindow, dialog, ipcMain, screen, session, shell, safeStorage } = require("electron");
 const { autoUpdater } = require("electron-updater");
@@ -33,17 +37,16 @@ const MICROSOFT_MINECRAFT_CLIENT_ID = "00000000402b5328";
 const MICROSOFT_MINECRAFT_AUTH_REPLY_URL = "https://login.live.com/oauth20_desktop.srf";
 const MICROSOFT_MINECRAFT_REQUESTED_SCOPE = "service::user.auth.xboxlive.com::MBI_SSL";
 const MINECRAFT_LAUNCHER_LOGIN_URL = "https://api.minecraftservices.com/launcher/login";
-const MINECRAFT_SERVICES_USER_AGENT = "BetterMon Launcher (Minecraft Launcher compatible auth)";
+const MINECRAFT_SERVICES_USER_AGENT = "BetterLauncher (Minecraft Launcher compatible auth)";
 const WINDOWS_EPOCH_SECONDS = 11644473600n;
 const WINDOWS_TICKS_PER_SECOND = 10000000n;
 const MINECRAFT_ENTITLEMENTS_URL = "https://api.minecraftservices.com/entitlements/mcstore";
 const MINECRAFT_PROFILE_URL = "https://api.minecraftservices.com/minecraft/profile";
 const MODPACK_CONFIG_FILE = "modpack.config.json";
-const MODPACK_STATE_DIRECTORY = ".bettermon";
+const MODPACK_STATE_DIRECTORY = ".betterlauncher";
+const LEGACY_MODPACK_STATE_DIRECTORY = ".bettermon";
 const MODPACK_STATE_FILE = "modpack-state.json";
 const LEGACY_MODPACK_STATE_FILE = "modpack_state.json";
-const DEFAULT_MODPACK_GITHUB_REPOSITORY = "ExamplePack";
-const MODPACK_GITHUB_MANIFEST_ASSET = "latest.json";
 const MODPACK_ALLOWED_TOP_LEVEL_DIRECTORIES = new Set([
   "mods",
   "cobblemon",
@@ -59,6 +62,8 @@ const MODPACK_USER_PRESERVED_TOP_LEVEL_DIRECTORIES = new Set(["config", "resourc
 const MODPACK_USER_PRESERVED_ROOT_FILES = new Set(["options.txt"]);
 const MODPACK_FULL_RESET_PRESERVED_TOP_LEVEL_ENTRIES = new Set([
   MODPACK_STATE_DIRECTORY.toLowerCase(),
+  LEGACY_MODPACK_STATE_DIRECTORY,
+  ".betterlauncher",
   ".bettermonlauncher"
 ]);
 const NETWORK_RETRY_ATTEMPTS = 3;
@@ -66,8 +71,8 @@ const NETWORK_RETRY_DELAYS_MS = [800, 2000, 4000];
 const NETWORK_RETRYABLE_HTTP_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 const NETWORK_API_TIMEOUT_MS = 30000;
 const NETWORK_DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
-const LAUNCHER_USER_DATA_DIRECTORY = ".bettermonlauncher";
-const LEGACY_USER_DATA_DIRECTORY_CANDIDATES = ["bettermon-launcher", "BetterMon Launcher"];
+const LAUNCHER_USER_DATA_DIRECTORY = ".betterlauncher";
+const LEGACY_USER_DATA_DIRECTORY_CANDIDATES = [".bettermonlauncher", "bettermon-launcher", "BetterMon Launcher"];
 const LAUNCHER_RUNTIME_DIRECTORY = "runtime";
 const LAUNCHER_SESSION_DIRECTORY = "session";
 const LAUNCHER_STATE_DIRECTORY = "state";
@@ -90,12 +95,7 @@ const LEGACY_SESSION_DATA_ENTRY_NAMES = [
   "Preferences",
   "SharedStorage"
 ];
-const FIXED_MINECRAFT_VERSION = "1.21.1";
-const FIXED_MOD_LOADER = "fabric";
-const FIXED_JAVA_MAJOR_VERSION = 21;
-const FIXED_JAVA_REQUIREMENT_LABEL = `Java ${FIXED_JAVA_MAJOR_VERSION}`;
 const DEFAULT_JVM_ARGS = "-XX:+UseZGC";
-const WINDOWS_JAVA_RUNTIME_URL = `https://api.adoptium.net/v3/binary/latest/${FIXED_JAVA_MAJOR_VERSION}/ga/windows/x64/jre/hotspot/normal/eclipse`;
 const APP_UPDATE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
 const APP_ICON_PATH = path.join(
   __dirname,
@@ -353,16 +353,13 @@ function configureLauncherUserDataPath() {
 }
 
 function getDefaultMinecraftDir() {
-  try {
-    return path.join(app.getPath("userData"), "minecraft");
-  } catch {
-    return path.join(process.cwd(), ".bettermon_minecraft");
-  }
+  return getProjectDirectory(app.getPath("userData"), getCurrentProject().id);
 }
 
 function migrateLegacyUserDataIfNeeded() {
   const targetUserDataPath = app.getPath("userData");
-  if (!targetUserDataPath || fs.existsSync(targetUserDataPath)) {
+  const markerPath = path.join(targetUserDataPath, "state", "legacy-data-migrated.json");
+  if (!targetUserDataPath || fs.existsSync(markerPath)) {
     return;
   }
 
@@ -380,6 +377,8 @@ function migrateLegacyUserDataIfNeeded() {
     try {
       fs.mkdirSync(path.dirname(targetUserDataPath), { recursive: true });
       copyDirectoryRecursiveSync(legacyPath, targetUserDataPath);
+      fs.mkdirSync(path.dirname(markerPath), { recursive: true });
+      fs.writeFileSync(markerPath, JSON.stringify({ from: legacyDirectoryName, migratedAt: new Date().toISOString() }));
       sendLog({
         level: "info",
         message: `Migrated launcher data from "${legacyDirectoryName}" to "${LAUNCHER_USER_DATA_DIRECTORY}".`
@@ -482,6 +481,9 @@ function migrateLegacyStateLayoutIfNeeded() {
   migrateLegacySessionDataIfNeeded();
   migrateLegacyMicrosoftAuthCacheIfNeeded();
   migrateLegacyUpdaterConfigIfNeeded();
+  const legacyMinecraftPath = path.join(app.getPath("userData"), "minecraft");
+  const bettermonPath = getProjectDirectory(app.getPath("userData"), "bettermon");
+  movePathWithFallback(legacyMinecraftPath, bettermonPath);
 }
 
 configureLauncherUserDataPath();
@@ -529,7 +531,14 @@ function writeJsonFileAtomicSync(filePath, value, options = {}) {
 async function runModpackOperationExclusive(modpackRoot, operation) {
   const key = normalizePathForCompare(modpackRoot);
   const previous = modpackOperationPromises.get(key) || Promise.resolve();
-  const current = previous.catch(() => {}).then(operation);
+  const current = previous.catch(() => {}).then(() => {
+    const state = readModpackState(modpackRoot);
+    const owner = state?.projectId || state?.id;
+    if (owner && owner !== getCurrentProject().id) {
+      throw new Error(`This Minecraft directory belongs to another modpack project: ${owner}`);
+    }
+    return operation();
+  });
   modpackOperationPromises.set(key, current);
   try {
     return await current;
@@ -785,12 +794,12 @@ function buildHttpHeaders(url, baseHeaders = {}) {
     return headers;
   }
 
-  headers["User-Agent"] = headers["User-Agent"] || "BetterMonLauncher/0.1";
+  headers["User-Agent"] = headers["User-Agent"] || "BetterLauncher/0.3";
   if (/api\.github\.com$/i.test(new URL(url).hostname)) {
     headers.Accept = headers.Accept || "application/vnd.github+json";
   }
 
-  const token = asTrimmedText(process.env.BETTERMON_GITHUB_TOKEN || process.env.GITHUB_TOKEN);
+  const token = asTrimmedText((process.env.BETTERLAUNCHER_GITHUB_TOKEN || process.env.BETTERMON_GITHUB_TOKEN) || process.env.GITHUB_TOKEN);
   if (token) {
     headers.Authorization = `Bearer ${token}`;
   }
@@ -874,9 +883,9 @@ function getSessionModpackKey(preset, modpackRoot) {
   const normalizedRoot = path.resolve(modpackRoot);
   const normalizedPreset = normalizeLauncherPreset(preset, "high");
   if (process.platform === "win32") {
-    return `${normalizedPreset}|${normalizedRoot.toLowerCase()}`;
+    return `${getCurrentProject().id}|${normalizedPreset}|${normalizedRoot.toLowerCase()}`;
   }
-  return `${normalizedPreset}|${normalizedRoot}`;
+  return `${getCurrentProject().id}|${normalizedPreset}|${normalizedRoot}`;
 }
 
 function getModpackArchiveCacheKey(preset, modpackRoot) {
@@ -932,7 +941,8 @@ function isLauncherManagedInternalModpackPath(relativePath) {
   const normalized = normalizeRelativeModpackPath(relativePath);
   const normalizedKey = buildModpackPathKey(normalized);
   const stateDirectoryKey = buildModpackPathKey(MODPACK_STATE_DIRECTORY);
-  return normalizedKey === stateDirectoryKey || normalizedKey.startsWith(`${stateDirectoryKey}/`);
+  return [stateDirectoryKey, buildModpackPathKey(LEGACY_MODPACK_STATE_DIRECTORY)].some((key) =>
+    normalizedKey === key || normalizedKey.startsWith(`${key}/`));
 }
 
 function assertModpackPathDoesNotTargetInternalState(relativePath, label = "Modpack path") {
@@ -970,6 +980,9 @@ function buildModpackPathKey(normalizedRelativePath) {
 }
 
 function getModpackStatePath(modpackRoot) {
+  const legacyDirectory = path.join(modpackRoot, LEGACY_MODPACK_STATE_DIRECTORY);
+  const stateDirectory = path.join(modpackRoot, MODPACK_STATE_DIRECTORY);
+  movePathWithFallback(legacyDirectory, stateDirectory);
   return path.join(modpackRoot, MODPACK_STATE_DIRECTORY, MODPACK_STATE_FILE);
 }
 
@@ -1002,7 +1015,7 @@ function readModpackState(modpackRoot) {
 
 async function writeModpackState(modpackRoot, state) {
   const statePath = getModpackStatePath(modpackRoot);
-  await writeJsonFileAtomic(statePath, state);
+  await writeJsonFileAtomic(statePath, { ...state, projectId: getCurrentProject().id });
 }
 
 async function computeFileSha256(filePath) {
@@ -1313,7 +1326,7 @@ function getFileFingerprint(filePath) {
   }
 }
 
-function readModpackConfig() {
+function readLauncherConfig() {
   const configPaths = getModpackConfigCandidatePaths();
   for (const configPath of configPaths) {
     const fingerprint = getFileFingerprint(configPath);
@@ -1545,7 +1558,7 @@ function readLauncherNewsConfig() {
   const newsConfig = config && config.news && typeof config.news === "object" ? config.news : {};
 
   const envSource = asTrimmedText(
-    process.env.BETTERMON_NEWS_URL || process.env.BETTERMON_NEWS_SOURCE || process.env.BETTERMON_NEWS_PATH
+    (process.env.BETTERLAUNCHER_NEWS_URL || process.env.BETTERMON_NEWS_URL) || (process.env.BETTERLAUNCHER_NEWS_SOURCE || process.env.BETTERMON_NEWS_SOURCE) || (process.env.BETTERLAUNCHER_NEWS_PATH || process.env.BETTERMON_NEWS_PATH)
   );
   const sourceRaw = asTrimmedText(
     envSource ||
@@ -1558,8 +1571,8 @@ function readLauncherNewsConfig() {
   );
   const source = resolveLauncherNewsSource(sourceRaw, configPath);
   const fallbackSourceRaw = asTrimmedText(
-    process.env.BETTERMON_NEWS_FALLBACK_URL ||
-      process.env.BETTERMON_NEWS_FALLBACK_SOURCE ||
+    (process.env.BETTERLAUNCHER_NEWS_FALLBACK_URL || process.env.BETTERMON_NEWS_FALLBACK_URL) ||
+      (process.env.BETTERLAUNCHER_NEWS_FALLBACK_SOURCE || process.env.BETTERMON_NEWS_FALLBACK_SOURCE) ||
       newsConfig.fallbackUrl ||
       newsConfig.fallbackSource ||
       newsConfig.publicUrl ||
@@ -1568,25 +1581,25 @@ function readLauncherNewsConfig() {
   );
   const fallbackSource = resolveLauncherNewsSource(fallbackSourceRaw, configPath);
   const refreshMs = asIntegerInRange(
-    process.env.BETTERMON_NEWS_REFRESH_MS || newsConfig.refreshMs || config?.newsRefreshMs,
+    (process.env.BETTERLAUNCHER_NEWS_REFRESH_MS || process.env.BETTERMON_NEWS_REFRESH_MS) || newsConfig.refreshMs || config?.newsRefreshMs,
     NEWS_REFRESH_DEFAULT_MS,
     NEWS_REFRESH_MIN_MS,
     NEWS_REFRESH_MAX_MS
   );
   const timeoutMs = asIntegerInRange(
-    process.env.BETTERMON_NEWS_TIMEOUT_MS || newsConfig.timeoutMs || config?.newsTimeoutMs,
+    (process.env.BETTERLAUNCHER_NEWS_TIMEOUT_MS || process.env.BETTERMON_NEWS_TIMEOUT_MS) || newsConfig.timeoutMs || config?.newsTimeoutMs,
     NEWS_TIMEOUT_DEFAULT_MS,
     NEWS_TIMEOUT_MIN_MS,
     NEWS_TIMEOUT_MAX_MS
   );
   const requestedMaxItems = asIntegerInRange(
-    process.env.BETTERMON_NEWS_MAX_ITEMS || newsConfig.maxItems || config?.newsMaxItems,
+    (process.env.BETTERLAUNCHER_NEWS_MAX_ITEMS || process.env.BETTERMON_NEWS_MAX_ITEMS) || newsConfig.maxItems || config?.newsMaxItems,
     NEWS_MAX_ITEMS_DEFAULT,
     1,
     NEWS_MAX_ITEMS_LIMIT
   );
   const maxItems = Math.max(NEWS_MAX_ITEMS_DEFAULT, requestedMaxItems);
-  const itemsPath = asTrimmedText(process.env.BETTERMON_NEWS_ITEMS_PATH || newsConfig.itemsPath || config?.newsItemsPath);
+  const itemsPath = asTrimmedText((process.env.BETTERLAUNCHER_NEWS_ITEMS_PATH || process.env.BETTERMON_NEWS_ITEMS_PATH) || newsConfig.itemsPath || config?.newsItemsPath);
   const inlineItems = Array.isArray(newsConfig.items)
     ? newsConfig.items
     : Array.isArray(config?.newsItems)
@@ -1605,25 +1618,25 @@ function readLauncherNewsConfig() {
 }
 
 function readGitHubReleaseConfig() {
-  const config = readModpackConfig();
+  const config = readLauncherConfig();
   const githubConfig = config && config.github && typeof config.github === "object" ? config.github : {};
   const owner = asTrimmedText(
-    process.env.BETTERMON_GH_OWNER ||
-      process.env.BETTERMON_GITHUB_OWNER ||
+    (process.env.BETTERLAUNCHER_GH_OWNER || process.env.BETTERMON_GH_OWNER) ||
+      (process.env.BETTERLAUNCHER_GITHUB_OWNER || process.env.BETTERMON_GITHUB_OWNER) ||
       githubConfig.owner ||
       config?.githubOwner
   );
   const repo = asTrimmedText(
-    process.env.BETTERMON_GH_REPO ||
-      process.env.BETTERMON_GITHUB_REPO ||
+    (process.env.BETTERLAUNCHER_GH_REPO || process.env.BETTERMON_GH_REPO) ||
+      (process.env.BETTERLAUNCHER_GITHUB_REPO || process.env.BETTERMON_GITHUB_REPO) ||
       githubConfig.repo ||
       config?.githubRepo
   );
   const apiBaseUrl = asTrimmedText(
-    process.env.BETTERMON_GITHUB_API_BASE || githubConfig.apiBaseUrl || githubConfig.apiBase || config?.githubApiBase
+    (process.env.BETTERLAUNCHER_GITHUB_API_BASE || process.env.BETTERMON_GITHUB_API_BASE) || githubConfig.apiBaseUrl || githubConfig.apiBase || config?.githubApiBase
   );
   const timeoutMs = asIntegerInRange(
-    process.env.BETTERMON_GITHUB_TIMEOUT_MS || githubConfig.timeoutMs || config?.githubTimeoutMs,
+    (process.env.BETTERLAUNCHER_GITHUB_TIMEOUT_MS || process.env.BETTERMON_GITHUB_TIMEOUT_MS) || githubConfig.timeoutMs || config?.githubTimeoutMs,
     GITHUB_RELEASE_TIMEOUT_DEFAULT_MS,
     GITHUB_RELEASE_TIMEOUT_MIN_MS,
     GITHUB_RELEASE_TIMEOUT_MAX_MS
@@ -1754,237 +1767,67 @@ async function getLatestGitHubReleaseSnapshot(options = {}) {
   }
 }
 
-function readModpackManifestConfig() {
-  const config = readModpackConfig();
-  const modpackConfig = config && config.modpack && typeof config.modpack === "object" ? config.modpack : {};
-  const modpackGithubConfig =
-    modpackConfig.github && typeof modpackConfig.github === "object" ? modpackConfig.github : {};
-  const manifestUrl = asTrimmedText(
-    process.env.BETTERMON_MODPACK_MANIFEST_URL || modpackConfig.manifestUrl || config?.modpackManifestUrl
-  );
-  const repository = asTrimmedText(
-    process.env.BETTERMON_MODPACK_GITHUB_REPOSITORY ||
-      process.env.BETTERMON_MODPACK_GH_REPOSITORY ||
-      modpackGithubConfig.repository ||
-      modpackConfig.githubRepository ||
-      config?.modpackGithubRepository ||
-      DEFAULT_MODPACK_GITHUB_REPOSITORY
-  );
-  const apiBaseUrl = asTrimmedText(
-    process.env.BETTERMON_MODPACK_GITHUB_API_BASE ||
-      modpackGithubConfig.apiBaseUrl ||
-      modpackGithubConfig.apiBase ||
-      modpackConfig.githubApiBaseUrl ||
-      config?.modpackGithubApiBase
-  );
-  const manifestAsset = asTrimmedText(
-    process.env.BETTERMON_MODPACK_GITHUB_MANIFEST_ASSET ||
-      modpackGithubConfig.manifestAsset ||
-      modpackConfig.manifestAsset ||
-      config?.modpackGithubManifestAsset ||
-      MODPACK_GITHUB_MANIFEST_ASSET
-  );
-  const timeoutMs = asIntegerInRange(
-    process.env.BETTERMON_MODPACK_GITHUB_TIMEOUT_MS ||
-      modpackGithubConfig.timeoutMs ||
-      modpackConfig.timeoutMs ||
-      config?.modpackGithubTimeoutMs,
-    GITHUB_RELEASE_TIMEOUT_DEFAULT_MS,
-    GITHUB_RELEASE_TIMEOUT_MIN_MS,
-    GITHUB_RELEASE_TIMEOUT_MAX_MS
-  );
+function getCurrentProject() {
+  return projectContext.getStore() || resolveProject(readLauncherConfig() || {});
+}
 
+function readModpackConfig() {
+  const config = readLauncherConfig() || {};
+  const project = getCurrentProject();
   return {
-    manifestUrl,
-    repository,
-    apiBaseUrl: (apiBaseUrl || "https://api.github.com").replace(/\/+$/g, ""),
-    manifestAsset: manifestAsset || MODPACK_GITHUB_MANIFEST_ASSET,
-    timeoutMs,
-    configured: Boolean(manifestUrl || repository)
+    ...(project.legacy ? config : { __configPath: config.__configPath, github: config.github }),
+    modpack: project.modpack,
+    serverStatus: project.serverStatus,
+    news: project.news
   };
 }
 
-function normalizeRepositoryName(value) {
-  const repository = asTrimmedText(value).replace(/^\/+|\/+$/g, "");
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
-    return "";
-  }
-  return repository;
+function getProjectMinecraftVersion() { return getCurrentProject().minecraftVersion; }
+function getProjectModLoader() { return getCurrentProject().modLoader; }
+function getProjectJavaMajor() { return getCurrentProject().javaMajor; }
+function getProjectJavaLabel() { return 'Java ' + getProjectJavaMajor(); }
+function getWindowsJavaRuntimeUrl() {
+  return 'https://api.adoptium.net/v3/binary/latest/' + getProjectJavaMajor() + '/ga/windows/x64/jre/hotspot/normal/eclipse';
 }
 
-function buildGitHubLatestReleaseAssetUrl(repository, assetName) {
-  const normalizedRepository = normalizeRepositoryName(repository);
-  const normalizedAssetName = asTrimmedText(assetName);
-  if (!normalizedRepository || !normalizedAssetName) {
-    return "";
-  }
-  const [owner, repo] = normalizedRepository.split("/");
-  return `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases/latest/download/${encodeURIComponent(normalizedAssetName)}`;
-}
-
-function buildGitHubTaggedReleaseAssetUrl(repository, tagName, assetName) {
-  const normalizedRepository = normalizeRepositoryName(repository);
-  const normalizedTagName = asTrimmedText(tagName);
-  const normalizedAssetName = asTrimmedText(assetName);
-  if (!normalizedRepository || !normalizedTagName || !normalizedAssetName) {
-    return "";
-  }
-  const [owner, repo] = normalizedRepository.split("/");
-  return `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases/download/${encodeURIComponent(
-    normalizedTagName
-  )}/${encodeURIComponent(normalizedAssetName)}`;
-}
-
-function buildGitHubAssetDownloadHeaders(url) {
-  const headers = buildHttpHeaders(url);
-  if (isGitHubHttpUrl(url) && /api\.github\.com$/i.test(new URL(url).hostname)) {
-    headers.Accept = "application/octet-stream";
-  }
-  return headers;
-}
-
-async function fetchTextFromCandidateUrls(candidates, timeoutMs, label) {
-  const failures = [];
-  const seen = new Set();
-
-  for (const candidate of candidates) {
-    const url = asTrimmedText(candidate?.url || candidate);
-    if (!url || seen.has(url)) {
-      continue;
-    }
-    seen.add(url);
-
-    for (let attempt = 0; attempt < NETWORK_RETRY_ATTEMPTS; attempt += 1) {
-      try {
-        const response = await fetchWithTimeout(
-          url,
-          {
-            headers: buildGitHubAssetDownloadHeaders(url)
-          },
-          timeoutMs
-        );
-        if (!response.ok) {
-          failures.push(`${url} (${response.status})`);
-          if (attempt >= NETWORK_RETRY_ATTEMPTS - 1 || !isRetryableHttpStatus(response.status, url)) {
-            break;
+function registerProjectHandler(channel, callback) {
+  ipcMain.handle(channel, async (event, payload = {}) => {
+    try {
+      const project = resolveProject(readLauncherConfig() || {}, payload?.projectId);
+      for (const directory of [payload?.minecraftDirectory, payload?.gameDirectory].filter(Boolean)) {
+        const root = normalizePathForCompare(directory);
+        for (const other of readProjects(readLauncherConfig() || {})) {
+          if (other.id === project.id) continue;
+          const otherRoot = normalizePathForCompare(getProjectDirectory(app.getPath("userData"), other.id));
+          if (root === otherRoot || root.startsWith(otherRoot + path.sep)) {
+            throw new Error(`This Minecraft directory belongs to another modpack project: ${other.id}`);
           }
-          await waitForNetworkRetry(attempt);
-          continue;
         }
-        return {
-          text: await response.text(),
-          url: asTrimmedText(response.url) || url,
-          sourceKey: asTrimmedText(candidate?.sourceKey) || url
-        };
-      } catch (error) {
-        failures.push(`${url} (${String(error?.message || error)})`);
-        if (attempt >= NETWORK_RETRY_ATTEMPTS - 1 || !isRetryableNetworkError(error, url)) {
-          break;
-        }
-        await waitForNetworkRetry(attempt);
+        const state = readModpackState(directory);
+        const owner = state?.projectId || state?.id;
+        if (owner && owner !== project.id) throw new Error(`This Minecraft directory belongs to another modpack project: ${owner}`);
       }
+      return await projectContext.run(project, () => callback(event, payload));
+    } catch (error) {
+      return { ok: false, error: String(error?.message || error) };
     }
-  }
-
-  throw new Error(`Failed to load ${label}: ${failures.join(" | ")}`);
+  });
 }
 
 async function fetchModpackManifestSource() {
-  const manifestConfig = readModpackManifestConfig();
-  if (!manifestConfig.configured) {
-    return null;
+  const project = getCurrentProject();
+  const configuredUrl = asTrimmedText(project.modpack.manifestUrl);
+  const manifestUrl = asTrimmedText(process.env.BETTERLAUNCHER_MODPACK_MANIFEST_URL) || configuredUrl;
+  if (!manifestUrl) {
+    throw new Error('모드팩 배포 주소가 설정되지 않았습니다. modpack.config.json의 projects[].modpack.manifestUrl을 설정해 주세요.');
   }
-
-  if (manifestConfig.manifestUrl) {
-    const source = normalizeModpackArchiveSource(manifestConfig.manifestUrl, "");
-    if (!source) {
-      throw new Error(`Invalid modpack manifest URL: ${manifestConfig.manifestUrl}`);
-    }
-    const text = await readTextFromSource(source, "modpack manifest");
-    return {
-      text,
-      json: JSON.parse(text),
-      manifestLocation: source.value,
-      sourceKind: source.kind,
-      sourceKey: source.signatureKey
-    };
-  }
-
-  const repository = normalizeRepositoryName(manifestConfig.repository);
-  if (!repository) {
-    throw new Error(`Invalid modpack GitHub repository: ${manifestConfig.repository}`);
-  }
-
-  const directManifestUrl = buildGitHubLatestReleaseAssetUrl(repository, manifestConfig.manifestAsset);
-
-  // The public release asset URL does not consume the GitHub REST API quota.
-  // Try it first so a rate limit or a transient API 403 never prevents an
-  // already published modpack manifest from being loaded.
-  let directManifestFailure = null;
-  try {
-    const loadedManifest = await fetchTextFromCandidateUrls(
-      [{ url: directManifestUrl, sourceKey: `github-latest:${repository}:${manifestConfig.manifestAsset}` }],
-      manifestConfig.timeoutMs,
-      `modpack manifest (${manifestConfig.manifestAsset})`
-    );
-    return {
-      text: loadedManifest.text,
-      json: JSON.parse(loadedManifest.text),
-      manifestLocation: loadedManifest.url,
-      sourceKind: "http",
-      sourceKey: loadedManifest.sourceKey
-    };
-  } catch (error) {
-    directManifestFailure = error;
-  }
-
-  const [owner, repo] = repository.split("/");
-  const apiUrl = `${manifestConfig.apiBaseUrl}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases/latest`;
-  const releaseResponse = await fetchWithTimeout(
-    apiUrl,
-    {
-      headers: buildHttpHeaders(apiUrl)
-    },
-    manifestConfig.timeoutMs
-  );
-  if (!releaseResponse.ok) {
-    throw new Error(
-      `Failed to load latest modpack GitHub release (${releaseResponse.status}) after direct manifest download failed: ${String(
-        directManifestFailure?.message || directManifestFailure || "unknown error"
-      )}`
-    );
-  }
-
-  const release = await releaseResponse.json();
-  const manifestAsset = Array.isArray(release?.assets)
-    ? release.assets.find((asset) => asTrimmedText(asset?.name) === manifestConfig.manifestAsset)
-    : null;
-  if (!manifestAsset) {
-    throw new Error(`GitHub Release asset not found: ${manifestConfig.manifestAsset}`);
-  }
-
-  const tagName = asTrimmedText(release?.tag_name);
-  const taggedManifestUrl = buildGitHubTaggedReleaseAssetUrl(repository, tagName, manifestConfig.manifestAsset);
-  const manifestCandidates = [
-    { url: directManifestUrl, sourceKey: `github-latest:${repository}:${manifestConfig.manifestAsset}` },
-    { url: taggedManifestUrl, sourceKey: `github-tag:${repository}:${tagName}:${manifestConfig.manifestAsset}` },
-    {
-      url: asTrimmedText(manifestAsset?.browser_download_url),
-      sourceKey: `github-browser:${repository}:${tagName}:${manifestConfig.manifestAsset}`
-    },
-    { url: asTrimmedText(manifestAsset?.url), sourceKey: `github-api-asset:${repository}:${tagName}:${manifestConfig.manifestAsset}` }
-  ];
-  const loadedManifest = await fetchTextFromCandidateUrls(
-    manifestCandidates,
-    manifestConfig.timeoutMs,
-    `modpack manifest (${manifestConfig.manifestAsset})`
-  );
+  const config = readLauncherConfig();
+  const source = resolveLauncherNewsSource(manifestUrl, config?.__configPath || path.join(__dirname, MODPACK_CONFIG_FILE));
+  if (!source) throw new Error('Invalid modpack manifest URL: ' + manifestUrl);
+  const text = await readTextFromSource(source, 'modpack manifest');
   return {
-    text: loadedManifest.text,
-    json: JSON.parse(loadedManifest.text),
-    manifestLocation: loadedManifest.url,
-    sourceKind: "http",
-    sourceKey: loadedManifest.sourceKey
+    text, json: JSON.parse(text), manifestLocation: source.value, sourceKind: source.kind,
+    sourceKey: source.signatureKey || source.value
   };
 }
 
@@ -2013,15 +1856,18 @@ function resolveModpackManifestArchiveSource(manifestSource, archiveUrl) {
   return null;
 }
 
-function parseModpackManifest(manifestSource) {
+function parseModpackManifest(manifestSource, preset) {
   const json = manifestSource?.json;
   if (!json || typeof json !== "object") {
     throw new Error("Invalid modpack manifest JSON.");
   }
+  if (asTrimmedText(json.id) && json.id !== getCurrentProject().id) {
+    throw new Error(`Modpack manifest id does not match selected project: ${json.id} != ${getCurrentProject().id}`);
+  }
   const archive = json.archive && typeof json.archive === "object" ? json.archive : null;
   const manifestDigest = computeSha256FromText(manifestSource.text);
   const baseManifest = {
-    id: asTrimmedText(json.id) || "bettermon",
+    id: asTrimmedText(json.id) || getCurrentProject().id,
     minecraftVersion: asTrimmedText(json.minecraftVersion),
     resetExistingFiles: json.resetExistingFiles === true,
     resetMinecraftDirectory:
@@ -2055,7 +1901,7 @@ function parseModpackManifest(manifestSource) {
     };
   }
 
-  const parsedDistribution = parseDistributionIndex(json, "", {
+  const parsedDistribution = parseDistributionIndex(json, preset, {
     defaultBaseUrl: getDistributionSourceBaseUrl({
       kind: manifestSource.sourceKind,
       value: manifestSource.manifestLocation
@@ -2258,12 +2104,12 @@ function readServerStatusConfig() {
   const serverStatusConfig =
     config && config.serverStatus && typeof config.serverStatus === "object" ? config.serverStatus : {};
 
-  const envHost = asTrimmedText(process.env.BETTERMON_SERVER_HOST || process.env.BETTERMON_SERVER_ADDRESS);
-  const envPort = asTrimmedText(process.env.BETTERMON_SERVER_PORT);
-  const envMolangUrl = asTrimmedText(process.env.BETTERMON_MOLANG_STATUS_URL);
-  const envMolangField = asTrimmedText(process.env.BETTERMON_MOLANG_FIELD);
-  const envMolangOnlineField = asTrimmedText(process.env.BETTERMON_MOLANG_ONLINE_FIELD);
-  const envMolangOnlineValue = asTrimmedText(process.env.BETTERMON_MOLANG_ONLINE_VALUE).toLowerCase();
+  const envHost = asTrimmedText((process.env.BETTERLAUNCHER_SERVER_HOST || process.env.BETTERMON_SERVER_HOST) || (process.env.BETTERLAUNCHER_SERVER_ADDRESS || process.env.BETTERMON_SERVER_ADDRESS));
+  const envPort = asTrimmedText((process.env.BETTERLAUNCHER_SERVER_PORT || process.env.BETTERMON_SERVER_PORT));
+  const envMolangUrl = asTrimmedText((process.env.BETTERLAUNCHER_MOLANG_STATUS_URL || process.env.BETTERMON_MOLANG_STATUS_URL));
+  const envMolangField = asTrimmedText((process.env.BETTERLAUNCHER_MOLANG_FIELD || process.env.BETTERMON_MOLANG_FIELD));
+  const envMolangOnlineField = asTrimmedText((process.env.BETTERLAUNCHER_MOLANG_ONLINE_FIELD || process.env.BETTERMON_MOLANG_ONLINE_FIELD));
+  const envMolangOnlineValue = asTrimmedText((process.env.BETTERLAUNCHER_MOLANG_ONLINE_VALUE || process.env.BETTERMON_MOLANG_ONLINE_VALUE)).toLowerCase();
 
   const host = asTrimmedText(
     envHost ||
@@ -2273,7 +2119,7 @@ function readServerStatusConfig() {
       config?.serverHost ||
       config?.serverAddress ||
       config?.serverIp ||
-      "server.example"
+      ""
   );
   const port = asPortNumber(envPort || serverStatusConfig.port || config?.serverPort, 25565);
   const molangUrl = asTrimmedText(
@@ -2812,7 +2658,7 @@ function selectFirstModpackSource(candidates, configPath) {
 }
 
 function getModpackDistributionSource() {
-  const fromCommonEnv = asTrimmedText(process.env.BETTERMON_MODPACK_DISTRIBUTION_URL);
+  const fromCommonEnv = asTrimmedText((process.env.BETTERLAUNCHER_MODPACK_DISTRIBUTION_URL || process.env.BETTERMON_MODPACK_DISTRIBUTION_URL));
 
   const config = readModpackConfig();
   const configPath = asTrimmedText(config?.__configPath);
@@ -2825,9 +2671,9 @@ function getModpackDistributionSource() {
 }
 
 function getModpackArchiveSource() {
-  const fromArchiveCommonEnv = asTrimmedText(process.env.BETTERMON_MODPACK_ARCHIVE_URL);
-  const fromZipCommonEnv = asTrimmedText(process.env.BETTERMON_MODPACK_ZIP_URL);
-  const fromDistributionCommonEnv = asTrimmedText(process.env.BETTERMON_MODPACK_DISTRIBUTION_URL);
+  const fromArchiveCommonEnv = asTrimmedText((process.env.BETTERLAUNCHER_MODPACK_ARCHIVE_URL || process.env.BETTERMON_MODPACK_ARCHIVE_URL));
+  const fromZipCommonEnv = asTrimmedText((process.env.BETTERLAUNCHER_MODPACK_ZIP_URL || process.env.BETTERMON_MODPACK_ZIP_URL));
+  const fromDistributionCommonEnv = asTrimmedText((process.env.BETTERLAUNCHER_MODPACK_DISTRIBUTION_URL || process.env.BETTERMON_MODPACK_DISTRIBUTION_URL));
 
   const config = readModpackConfig();
   const configPath = asTrimmedText(config?.__configPath);
@@ -2852,11 +2698,11 @@ function getModpackArchiveSource() {
 }
 
 function getModpackArchiveSha256() {
-  const fromArchiveCommonEnv = normalizeSha256(process.env.BETTERMON_MODPACK_ARCHIVE_SHA256);
+  const fromArchiveCommonEnv = normalizeSha256((process.env.BETTERLAUNCHER_MODPACK_ARCHIVE_SHA256 || process.env.BETTERMON_MODPACK_ARCHIVE_SHA256));
   if (fromArchiveCommonEnv) {
     return fromArchiveCommonEnv;
   }
-  const fromZipCommonEnv = normalizeSha256(process.env.BETTERMON_MODPACK_ZIP_SHA256);
+  const fromZipCommonEnv = normalizeSha256((process.env.BETTERLAUNCHER_MODPACK_ZIP_SHA256 || process.env.BETTERMON_MODPACK_ZIP_SHA256));
   if (fromZipCommonEnv) {
     return fromZipCommonEnv;
   }
@@ -3007,12 +2853,29 @@ function normalizeDistributionFileEntry(entry, index, baseUrl = "") {
     throw new Error(`Missing sha256/md5 in distribution file entry at index ${index}.`);
   }
 
-  const resolvedUrl = resolveDistributionEntryUrl(entry.url || entry.download || entry.href, normalizedPath, baseUrl, index);
+  let chunks;
+  if (entry.chunks !== undefined) {
+    if (!Array.isArray(entry.chunks) || entry.chunks.length === 0 || !sha256) {
+      throw new Error(`Invalid chunks for distribution file: ${normalizedPath}`);
+    }
+    chunks = entry.chunks.map((chunk) => {
+      const chunkHash = normalizeSha256(chunk?.sha256);
+      if (!chunkHash || !Number.isSafeInteger(chunk?.size) || chunk.size <= 0 || !asTrimmedText(chunk?.url)) {
+        throw new Error(`Invalid chunk metadata for distribution file: ${normalizedPath}`);
+      }
+      return { url: resolveDistributionEntryUrl(chunk.url, normalizedPath, baseUrl, index), sha256: chunkHash, size: chunk.size };
+    });
+    if (chunks.reduce((sum, chunk) => sum + chunk.size, 0) !== entry.size) {
+      throw new Error(`Chunk sizes do not match file size: ${normalizedPath}`);
+    }
+  }
+  const resolvedUrl = chunks ? "" : resolveDistributionEntryUrl(entry.url || entry.download || entry.href, normalizedPath, baseUrl, index);
   const size = Number(entry.size || 0);
 
   return {
     path: normalizedPath,
     url: resolvedUrl,
+    chunks,
     sha256,
     md5,
     size: Number.isFinite(size) && size > 0 ? size : 0
@@ -3255,7 +3118,7 @@ function formatIntegrityIssueList(items, maxCount = 3) {
 }
 
 async function verifyDistributionModpackIntegrity(modpackRoot, state) {
-  const managedFiles = normalizeStateManagedFiles(state?.managedFiles);
+  const managedFiles = normalizeStateManagedFiles(state?.managedFiles).filter((filePath) => !isUserPreservedModpackPath(filePath));
   const managedHashes = normalizeStateManagedFileHashes(state?.managedFileHashes);
   if (managedFiles.length === 0) {
     return {
@@ -3396,14 +3259,14 @@ async function verifyArchiveModpackIntegrity(modpackRoot, launcherPreset, state)
   };
 }
 
-async function verifyGitHubArchiveModpackIntegrity(state) {
+async function verifyManifestArchiveModpackIntegrity(state) {
   const expectedArchiveSha1 = normalizeSha1(state?.archiveSha1);
   const archiveCachePath = asTrimmedText(state?.archiveCachePath);
   if (!expectedArchiveSha1 || !archiveCachePath) {
     return {
       ok: true,
       checked: 0,
-      sourceType: "github-archive",
+      sourceType: "manifest-archive",
       reason: "Archive cache metadata is not available."
     };
   }
@@ -3412,7 +3275,7 @@ async function verifyGitHubArchiveModpackIntegrity(state) {
     return {
       ok: true,
       checked: 0,
-      sourceType: "github-archive",
+      sourceType: "manifest-archive",
       reason: "Cached archive is not present."
     };
   }
@@ -3422,7 +3285,7 @@ async function verifyGitHubArchiveModpackIntegrity(state) {
     return {
       ok: false,
       checked: 1,
-      sourceType: "github-archive",
+      sourceType: "manifest-archive",
       error: "Cached modpack archive hash does not match the applied state."
     };
   }
@@ -3430,7 +3293,7 @@ async function verifyGitHubArchiveModpackIntegrity(state) {
   return {
     ok: true,
     checked: 1,
-    sourceType: "github-archive"
+    sourceType: "manifest-archive"
   };
 }
 
@@ -3582,8 +3445,8 @@ async function verifyLaunchIntegrity(options) {
   if (sourceType === "archive") {
     return verifyArchiveModpackIntegrity(modpackRoot, launcherPreset, state);
   }
-  if (sourceType === "github-archive") {
-    return verifyGitHubArchiveModpackIntegrity(state);
+  if (sourceType === "manifest-archive" || sourceType === "github-archive") {
+    return verifyManifestArchiveModpackIntegrity(state);
   }
 
   return {
@@ -3905,7 +3768,7 @@ async function removeDistributionEntries(modpackRoot, entries) {
   let removedCount = 0;
   for (const entry of entries) {
     const normalized = normalizeRelativeModpackPath(entry);
-    if (isLauncherManagedInternalModpackPath(normalized)) {
+    if (isLauncherManagedInternalModpackPath(normalized) || isUserPreservedModpackPath(normalized)) {
       continue;
     }
     const absolutePath = resolveModpackTargetPath(modpackRoot, normalized);
@@ -3935,6 +3798,10 @@ async function applyDistributionFiles(modpackRoot, files) {
     const expectedHash = fileEntry.sha256 || fileEntry.md5;
     const expectedAlgorithm = fileEntry.sha256 ? "sha256" : "md5";
     const targetEntryType = await getPathEntryType(targetPath);
+    if (targetEntryType !== "missing" && isUserPreservedModpackPath(fileEntry.path)) {
+      skippedCount += 1;
+      continue;
+    }
     if (expectedHash && targetEntryType === "file") {
       try {
         const currentHash = await computeFileDigest(targetPath, expectedAlgorithm);
@@ -3956,7 +3823,8 @@ async function applyDistributionFiles(modpackRoot, files) {
     }
 
     try {
-      const downloadInfo = await downloadFile(fileEntry.url, tempPath);
+      await fs.promises.mkdir(path.dirname(targetPath), { recursive: true });
+      const downloadInfo = await downloadDistributionFile(fileEntry, tempPath, downloadFile);
       if (fileEntry.size > 0 && Number(downloadInfo?.bytesWritten || 0) !== fileEntry.size) {
         throw new Error(`File size mismatch for ${fileEntry.path}.`);
       }
@@ -3990,7 +3858,7 @@ function buildSafeModpackCacheSegment(value, fallback) {
 }
 
 function getManifestArchiveCachePath(modpackRoot, manifest) {
-  const id = buildSafeModpackCacheSegment(manifest?.id, "bettermon");
+  const id = buildSafeModpackCacheSegment(manifest?.id, getCurrentProject().id);
   const version = buildSafeModpackCacheSegment(manifest?.version, "modpack");
   const sha1 = normalizeSha1(manifest?.archive?.sha1);
   return path.join(modpackRoot, MODPACK_STATE_DIRECTORY, "downloads", `${id}-${version}-${sha1.slice(0, 12)}.zip`);
@@ -4104,9 +3972,9 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
   }
 
   const manifest = parseModpackManifest(manifestSource, launcherPreset);
-  if (manifest.minecraftVersion && manifest.minecraftVersion !== FIXED_MINECRAFT_VERSION) {
+  if (manifest.minecraftVersion && manifest.minecraftVersion !== getProjectMinecraftVersion()) {
     throw new Error(
-      `Modpack Minecraft version does not match launcher version: ${manifest.minecraftVersion} != ${FIXED_MINECRAFT_VERSION}`
+      `Modpack Minecraft version does not match launcher version: ${manifest.minecraftVersion} != ${getProjectMinecraftVersion()}`
     );
   }
 
@@ -4144,7 +4012,7 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
       sourceType: "distribution",
       id: manifest.id,
       version: manifest.version,
-      minecraftVersion: manifest.minecraftVersion || FIXED_MINECRAFT_VERSION,
+      minecraftVersion: manifest.minecraftVersion || getProjectMinecraftVersion(),
       manifestSourceKey: manifest.sourceKey,
       manifestDigest: manifest.manifestDigest,
       distributionSource: manifestSource.manifestLocation,
@@ -4268,14 +4136,14 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
     throw normalizeZipExtractionError(cacheResult.archivePath, error, "extract");
   }
 
-  const signature = `github-archive:${manifest.sourceKey}:${manifest.archive.sha1}`;
+  const signature = `manifest-archive:${manifest.sourceKey}:${manifest.archive.sha1}`;
   await writeModpackState(modpackRoot, {
     signature,
     preset: launcherPreset,
-    sourceType: "github-archive",
+    sourceType: "manifest-archive",
     id: manifest.id,
     version: manifest.version,
-    minecraftVersion: manifest.minecraftVersion || FIXED_MINECRAFT_VERSION,
+    minecraftVersion: manifest.minecraftVersion || getProjectMinecraftVersion(),
     manifestSourceKey: manifest.sourceKey,
     manifestDigest: manifest.manifestDigest,
     archiveSource: manifest.archive.source.value,
@@ -4695,9 +4563,9 @@ async function checkModpackUpdate(options) {
   }
 
   const manifest = parseModpackManifest(manifestSource, launcherPreset);
-  if (manifest.minecraftVersion && manifest.minecraftVersion !== FIXED_MINECRAFT_VERSION) {
+  if (manifest.minecraftVersion && manifest.minecraftVersion !== getProjectMinecraftVersion()) {
     throw new Error(
-      `Modpack Minecraft version does not match launcher version: ${manifest.minecraftVersion} != ${FIXED_MINECRAFT_VERSION}`
+      `Modpack Minecraft version does not match launcher version: ${manifest.minecraftVersion} != ${getProjectMinecraftVersion()}`
     );
   }
 
@@ -4798,8 +4666,8 @@ async function prepareRuntimeFromPayload(payload) {
     return {
       ok: true,
       versionId,
-      minecraftVersion: FIXED_MINECRAFT_VERSION,
-      loader: FIXED_MOD_LOADER,
+      minecraftVersion: getProjectMinecraftVersion(),
+      loader: getProjectModLoader(),
       javaPath: resolvedJavaPath
     };
   } catch (error) {
@@ -4819,7 +4687,7 @@ async function autoSelectJavaFromPayload(payload) {
     return {
       ok: true,
       javaPath: settingsJavaPath || resolvedJavaPath,
-      javaVersion: FIXED_JAVA_MAJOR_VERSION
+      javaVersion: getProjectJavaMajor()
     };
   } catch (error) {
     return { ok: false, error: String(error?.message || error) };
@@ -5123,7 +4991,7 @@ function isUpdaterEnabled() {
   if (app.isPackaged) {
     return true;
   }
-  return process.env.BETTERMON_ENABLE_DEV_UPDATER === "1";
+  return (process.env.BETTERLAUNCHER_ENABLE_DEV_UPDATER || process.env.BETTERMON_ENABLE_DEV_UPDATER) === "1";
 }
 
 function normalizeUpdaterCacheDirBase(value) {
@@ -5131,11 +4999,11 @@ function normalizeUpdaterCacheDirBase(value) {
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, "-")
     .replace(/^-+|-+$/g, "");
-  return normalized || "bettermon-launcher";
+  return normalized || "betterlauncher";
 }
 
 function buildAutoUpdaterConfigYaml({ owner, repo, releaseType }) {
-  const cacheDirBase = normalizeUpdaterCacheDirBase(process.env.BETTERMON_UPDATER_CACHE_NAME || app.getName());
+  const cacheDirBase = normalizeUpdaterCacheDirBase((process.env.BETTERLAUNCHER_UPDATER_CACHE_NAME || process.env.BETTERMON_UPDATER_CACHE_NAME) || app.getName());
   const updaterCacheDirName = `${cacheDirBase}-updater`;
   return [
     "provider: github",
@@ -5517,15 +5385,15 @@ function normalizeMicrosoftOAuthPrompt(value) {
 
 function getMicrosoftOAuthConfig() {
   const clientId =
-    readFirstConfiguredEnvValue(["BETTERMON_MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_ID"]) ||
+    readFirstConfiguredEnvValue(["BETTERLAUNCHER_MICROSOFT_CLIENT_ID", "BETTERMON_MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_ID"]) ||
     MICROSOFT_OAUTH_DEFAULT_CLIENT_ID;
   const tenant =
-    readFirstConfiguredEnvValue(["BETTERMON_MICROSOFT_TENANT", "BETTERMON_MICROSOFT_TENANT_ID"]) ||
+    readFirstConfiguredEnvValue(["BETTERLAUNCHER_MICROSOFT_TENANT", "BETTERLAUNCHER_MICROSOFT_TENANT_ID", "BETTERMON_MICROSOFT_TENANT", "BETTERMON_MICROSOFT_TENANT_ID"]) ||
     MICROSOFT_OAUTH_DEFAULT_TENANT;
   const redirectUri =
-    readFirstConfiguredEnvValue(["BETTERMON_MICROSOFT_REDIRECT_URI"]) || MICROSOFT_OAUTH_DEFAULT_REDIRECT_URI;
+    readFirstConfiguredEnvValue(["BETTERLAUNCHER_MICROSOFT_REDIRECT_URI", "BETTERMON_MICROSOFT_REDIRECT_URI"]) || MICROSOFT_OAUTH_DEFAULT_REDIRECT_URI;
   const prompt = normalizeMicrosoftOAuthPrompt(
-    readFirstConfiguredEnvValue(["BETTERMON_MICROSOFT_PROMPT"]) || MICROSOFT_OAUTH_DEFAULT_PROMPT
+    readFirstConfiguredEnvValue(["BETTERLAUNCHER_MICROSOFT_PROMPT", "BETTERMON_MICROSOFT_PROMPT"]) || MICROSOFT_OAUTH_DEFAULT_PROMPT
   );
   const authorityBase = `https://login.microsoftonline.com/${encodeURIComponent(tenant)}`;
   return {
@@ -5541,19 +5409,19 @@ function getMicrosoftOAuthConfig() {
 
 function assertMicrosoftOAuthConfig(config) {
   if (!asTrimmedText(config?.clientId)) {
-    throw new Error("Microsoft Entra client id is missing. Set BETTERMON_MICROSOFT_CLIENT_ID.");
+    throw new Error("Microsoft Entra client id is missing. Set BETTERLAUNCHER_MICROSOFT_CLIENT_ID.");
   }
 
   let parsedRedirect;
   try {
     parsedRedirect = new URL(asTrimmedText(config?.redirectUri));
   } catch {
-    throw new Error("BETTERMON_MICROSOFT_REDIRECT_URI is invalid.");
+    throw new Error("BETTERLAUNCHER_MICROSOFT_REDIRECT_URI is invalid.");
   }
 
   const host = asTrimmedText(parsedRedirect.hostname).toLowerCase();
   if (parsedRedirect.protocol !== "http:" || (host !== "localhost" && host !== "127.0.0.1")) {
-    throw new Error("BETTERMON_MICROSOFT_REDIRECT_URI must use loopback HTTP (for example: http://localhost).");
+    throw new Error("BETTERLAUNCHER_MICROSOFT_REDIRECT_URI must use loopback HTTP (for example: http://localhost).");
   }
 }
 
@@ -6829,6 +6697,7 @@ function readRegisteredProfiles(minecraftDirectory) {
 }
 
 function getBundledRuntimeRoot(minecraftDirectory) {
+  getModpackStatePath(minecraftDirectory);
   return path.join(minecraftDirectory, MODPACK_STATE_DIRECTORY, "runtime");
 }
 
@@ -6902,8 +6771,8 @@ async function detectJavaMajorVersion(javaExecutable) {
   });
 }
 
-function isFixedJavaMajorVersion(major) {
-  return Number(major) === FIXED_JAVA_MAJOR_VERSION;
+function isProjectJavaMajorVersion(major) {
+  return Number(major) === getProjectJavaMajor();
 }
 
 function resolveExecutableFromPath(commandName) {
@@ -7002,14 +6871,14 @@ async function findJavaHomeInDirectory(rootDirectory) {
 async function installBundledWindowsJavaRuntime(minecraftDirectory) {
   const runtimeRoot = getBundledRuntimeRoot(minecraftDirectory);
   const downloadDirectory = path.join(runtimeRoot, "downloads");
-  const archivePath = path.join(downloadDirectory, `temurin-jre-${FIXED_JAVA_MAJOR_VERSION}-windows-x64.zip`);
+  const archivePath = path.join(downloadDirectory, `temurin-jre-${getProjectJavaMajor()}-windows-x64.zip`);
   const tempArchivePath = `${archivePath}.download`;
   const extractionDirectory = path.join(runtimeRoot, "java_extract");
   const javaHomeTarget = getBundledJavaHome(minecraftDirectory);
 
   sendLog({
     level: "info",
-    message: `Installing Java ${FIXED_JAVA_MAJOR_VERSION} runtime for launcher instance...`
+    message: `Installing Java ${getProjectJavaMajor()} runtime for launcher instance...`
   });
   sendLog({
     level: "progress",
@@ -7017,7 +6886,7 @@ async function installBundledWindowsJavaRuntime(minecraftDirectory) {
   });
 
   try {
-    await downloadFile(WINDOWS_JAVA_RUNTIME_URL, tempArchivePath);
+    await downloadFile(getWindowsJavaRuntimeUrl(), tempArchivePath);
     await fs.promises.mkdir(path.dirname(archivePath), { recursive: true });
     if (fs.existsSync(archivePath)) {
       await fs.promises.rm(archivePath, { force: true });
@@ -7063,8 +6932,8 @@ async function installBundledWindowsJavaRuntime(minecraftDirectory) {
   }
 
   const major = await detectJavaMajorVersion(javaExecutable);
-  if (!isFixedJavaMajorVersion(major)) {
-    throw new Error(`Installed Java runtime version is ${major || "unknown"}, but ${FIXED_JAVA_REQUIREMENT_LABEL} is required.`);
+  if (!isProjectJavaMajorVersion(major)) {
+    throw new Error(`Installed Java runtime version is ${major || "unknown"}, but ${getProjectJavaLabel()} is required.`);
   }
 
   sendLog({
@@ -7078,7 +6947,7 @@ async function ensureJavaRuntimeInDirectory(minecraftDirectory, requestedJavaPat
   const explicitJavaPath = asTrimmedText(requestedJavaPath);
   if (explicitJavaPath) {
     const explicitMajor = await detectJavaMajorVersion(explicitJavaPath);
-    if (isFixedJavaMajorVersion(explicitMajor)) {
+    if (isProjectJavaMajorVersion(explicitMajor)) {
       sendLog({
         level: "info",
         message: `Using configured Java runtime: ${explicitJavaPath}`
@@ -7087,14 +6956,14 @@ async function ensureJavaRuntimeInDirectory(minecraftDirectory, requestedJavaPat
     }
     sendLog({
       level: "info",
-      message: `Configured Java runtime could not be used (version: ${explicitMajor || "unknown"}). ${FIXED_JAVA_REQUIREMENT_LABEL} is required. Trying automatic Java detection...`
+      message: `Configured Java runtime could not be used (version: ${explicitMajor || "unknown"}). ${getProjectJavaLabel()} is required. Trying automatic Java detection...`
     });
   }
 
   const bundledJava = getBundledJavaExecutableCandidates(minecraftDirectory).find((candidate) => fs.existsSync(candidate));
   if (bundledJava) {
     const bundledMajor = await detectJavaMajorVersion(bundledJava);
-    if (isFixedJavaMajorVersion(bundledMajor)) {
+    if (isProjectJavaMajorVersion(bundledMajor)) {
       sendLog({
         level: "info",
         message: `Using bundled Java runtime: ${bundledJava}`
@@ -7103,12 +6972,12 @@ async function ensureJavaRuntimeInDirectory(minecraftDirectory, requestedJavaPat
     }
     sendLog({
       level: "info",
-      message: `Bundled Java runtime could not be used (version: ${bundledMajor || "unknown"}). Reinstalling ${FIXED_JAVA_REQUIREMENT_LABEL} runtime...`
+      message: `Bundled Java runtime could not be used (version: ${bundledMajor || "unknown"}). Reinstalling ${getProjectJavaLabel()} runtime...`
     });
   }
 
   const systemJavaMajor = await detectJavaMajorVersion("java");
-  if (isFixedJavaMajorVersion(systemJavaMajor)) {
+  if (isProjectJavaMajorVersion(systemJavaMajor)) {
     sendLog({
       level: "info",
       message: "Using system Java runtime from PATH."
@@ -7118,7 +6987,7 @@ async function ensureJavaRuntimeInDirectory(minecraftDirectory, requestedJavaPat
   if (systemJavaMajor) {
     sendLog({
       level: "info",
-      message: `System Java runtime from PATH could not be used (version: ${systemJavaMajor}). ${FIXED_JAVA_REQUIREMENT_LABEL} is required.`
+      message: `System Java runtime from PATH could not be used (version: ${systemJavaMajor}). ${getProjectJavaLabel()} is required.`
     });
   }
 
@@ -7126,12 +6995,16 @@ async function ensureJavaRuntimeInDirectory(minecraftDirectory, requestedJavaPat
     return installBundledWindowsJavaRuntime(minecraftDirectory);
   }
 
-  throw new Error(`${FIXED_JAVA_REQUIREMENT_LABEL} runtime is required, and automatic installation is not supported on this OS.`);
+  throw new Error(`${getProjectJavaLabel()} runtime is required, and automatic installation is not supported on this OS.`);
 }
 
-function isFixedFabricVersionId(versionId) {
+function isProjectFabricVersionId(versionId) {
   const value = asTrimmedText(versionId).toLowerCase();
-  return value.includes(FIXED_MOD_LOADER) && value.includes(FIXED_MINECRAFT_VERSION);
+  const prefix = "fabric-loader-";
+  const suffix = `-${getProjectMinecraftVersion()}`;
+  if (!value.startsWith(prefix) || !value.endsWith(suffix)) return false;
+  const loader = getCurrentProject().loaderVersion;
+  return !loader || value === `${prefix}${loader}${suffix}`;
 }
 
 function detectInstalledFabricVersionId(minecraftDirectory) {
@@ -7150,7 +7023,7 @@ function detectInstalledFabricVersionId(minecraftDirectory) {
   const candidates = entries
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
-    .filter((name) => isFixedFabricVersionId(name))
+    .filter((name) => isProjectFabricVersionId(name))
     .sort((a, b) => b.localeCompare(a, undefined, { numeric: true, sensitivity: "base" }));
 
   return candidates[0] || "";
@@ -7168,10 +7041,10 @@ async function ensureFabricVersionInDirectory(minecraftDirectory) {
 
   sendLog({
     level: "info",
-    message: `Installing Fabric ${FIXED_MINECRAFT_VERSION} profile for launcher instance...`
+    message: `Installing Fabric ${getProjectMinecraftVersion()} profile for launcher instance...`
   });
 
-  const versionsApiUrl = `https://meta.fabricmc.net/v2/versions/loader/${FIXED_MINECRAFT_VERSION}`;
+  const versionsApiUrl = `https://meta.fabricmc.net/v2/versions/loader/${getProjectMinecraftVersion()}`;
   sendLog({
     level: "progress",
     message: "Fetching Fabric loader metadata..."
@@ -7189,17 +7062,17 @@ async function ensureFabricVersionInDirectory(minecraftDirectory) {
   }
 
   if (!Array.isArray(loaderVersions) || loaderVersions.length === 0) {
-    throw new Error(`No Fabric loader versions found for ${FIXED_MINECRAFT_VERSION}.`);
+    throw new Error(`No Fabric loader versions found for ${getProjectMinecraftVersion()}.`);
   }
 
   const stableEntry = loaderVersions.find((entry) => Boolean(entry?.loader?.stable));
   const selectedEntry = stableEntry || loaderVersions[0];
-  const loaderVersion = asTrimmedText(selectedEntry?.loader?.version);
+  const loaderVersion = getCurrentProject().loaderVersion || asTrimmedText(selectedEntry?.loader?.version);
   if (!loaderVersion) {
     throw new Error("Fabric loader version response is invalid.");
   }
 
-  const profileUrl = `https://meta.fabricmc.net/v2/versions/loader/${FIXED_MINECRAFT_VERSION}/${loaderVersion}/profile/json`;
+  const profileUrl = `https://meta.fabricmc.net/v2/versions/loader/${getProjectMinecraftVersion()}/${loaderVersion}/profile/json`;
   sendLog({
     level: "progress",
     message: `Downloading Fabric profile (${loaderVersion})...`
@@ -7217,7 +7090,7 @@ async function ensureFabricVersionInDirectory(minecraftDirectory) {
   }
 
   const versionId = asTrimmedText(profileJson?.id);
-  if (!isFixedFabricVersionId(versionId)) {
+  if (!isProjectFabricVersionId(versionId)) {
     throw new Error("Fabric profile id is invalid for launcher target.");
   }
 
@@ -7235,7 +7108,7 @@ async function ensureFabricVersionInDirectory(minecraftDirectory) {
 
 async function resolveLaunchVersionId(minecraftDirectory, requestedVersion) {
   const explicitVersion = asTrimmedText(requestedVersion);
-  if (isFixedFabricVersionId(explicitVersion)) {
+  if (isProjectFabricVersionId(explicitVersion)) {
     return explicitVersion;
   }
 
@@ -7250,7 +7123,7 @@ async function resolveLaunchVersionId(minecraftDirectory, requestedVersion) {
   }
 
   throw new Error(
-    `Failed to prepare Fabric ${FIXED_MINECRAFT_VERSION} profile.`
+    `Failed to prepare Fabric ${getProjectMinecraftVersion()} profile.`
   );
 }
 
@@ -7386,11 +7259,22 @@ function createWindow() {
   });
 }
 
-ipcMain.handle("launcher:get-defaults", () => {
+registerProjectHandler("launcher:get-defaults", () => {
   return {
+    projectId: getCurrentProject().id,
+    projects: readProjects(readLauncherConfig() || {}).map((project) => ({
+      id: project.id, name: project.name, description: project.description || "",
+      minecraftVersion: project.minecraftVersion, modLoader: project.modLoader, javaMajor: project.javaMajor,
+      manifestConfigured: Boolean(asTrimmedText(project.modpack.manifestUrl) || asTrimmedText(process.env.BETTERLAUNCHER_MODPACK_MANIFEST_URL)),
+      minecraftDirectory: getProjectDirectory(app.getPath("userData"), project.id),
+      discordUrl: project.discordUrl || ""
+    })),
+    javaMajor: getProjectJavaMajor(),
+    legacyMinecraftDirectories: [LAUNCHER_USER_DATA_DIRECTORY, ...LEGACY_USER_DATA_DIRECTORY_CANDIDATES].map((name) =>
+      path.join(app.getPath("appData"), name, "minecraft")),
     username: asTrimmedText(microsoftAccount?.name) || "Player",
-    version: FIXED_MINECRAFT_VERSION,
-    modLoader: FIXED_MOD_LOADER,
+    version: getProjectMinecraftVersion(),
+    modLoader: getProjectModLoader(),
     versionType: "release",
     minecraftDirectory: getDefaultMinecraftDir(),
     systemMinecraftDirectory: getSystemMinecraftDir(),
@@ -7409,7 +7293,7 @@ ipcMain.handle("launcher:get-system-profile", () => {
   return detectLauncherPreset();
 });
 
-ipcMain.handle("launcher:get-server-status", async () => {
+registerProjectHandler("launcher:get-server-status", async () => {
   try {
     return await getLauncherServerStatusSnapshot();
   } catch (error) {
@@ -7423,7 +7307,7 @@ ipcMain.handle("launcher:get-server-status", async () => {
   }
 });
 
-ipcMain.handle("launcher:get-news", async (_event, payload = {}) => {
+registerProjectHandler("launcher:get-news", async (_event, payload = {}) => {
   try {
     return await getLauncherNewsSnapshot(payload);
   } catch (error) {
@@ -7571,7 +7455,7 @@ ipcMain.handle("launcher:pick-java", async () => {
   return result.filePaths[0];
 });
 
-ipcMain.handle("launcher:auto-select-java", async (_, payload) => {
+registerProjectHandler("launcher:auto-select-java", async (_, payload) => {
   const result = await autoSelectJavaFromPayload(payload);
   if (!result.ok) {
     sendLog({ level: "error", message: `Java auto selection failed: ${result.error}` });
@@ -7583,7 +7467,7 @@ ipcMain.handle("launcher:auto-select-java", async (_, payload) => {
   return result;
 });
 
-ipcMain.handle("launcher:load-profiles", async (_, payload) => {
+registerProjectHandler("launcher:load-profiles", async (_, payload) => {
   const minecraftDirectory = asTrimmedText(payload?.minecraftDirectory || payload);
   if (!minecraftDirectory) {
     return { ok: false, error: "Minecraft directory is required." };
@@ -7591,7 +7475,7 @@ ipcMain.handle("launcher:load-profiles", async (_, payload) => {
   return readRegisteredProfiles(minecraftDirectory);
 });
 
-ipcMain.handle("launcher:sync-modpack", async (_, payload) => {
+registerProjectHandler("launcher:sync-modpack", async (_, payload) => {
   const result = await runModpackSyncFromPayload(payload, { skipIfSessionSynced: false });
   if (!result.ok) {
     sendLog({ level: "error", message: `Modpack sync failed: ${result.error}` });
@@ -7603,7 +7487,7 @@ ipcMain.handle("launcher:sync-modpack", async (_, payload) => {
   return result;
 });
 
-ipcMain.handle("launcher:check-modpack-update", async (_, payload) => {
+registerProjectHandler("launcher:check-modpack-update", async (_, payload) => {
   const result = await runModpackUpdateCheckFromPayload(payload);
   if (!result.ok) {
     sendLog({ level: "warn", message: `Modpack update check failed: ${result.error}` });
@@ -7611,7 +7495,7 @@ ipcMain.handle("launcher:check-modpack-update", async (_, payload) => {
   return result;
 });
 
-ipcMain.handle("launcher:prepare-runtime", async (_, payload) => {
+registerProjectHandler("launcher:prepare-runtime", async (_, payload) => {
   const result = await prepareRuntimeFromPayload(payload);
   if (!result.ok) {
     sendLog({ level: "error", message: `Runtime preparation failed: ${result.error}` });
@@ -7623,7 +7507,7 @@ ipcMain.handle("launcher:prepare-runtime", async (_, payload) => {
   return result;
 });
 
-ipcMain.handle("launcher:launch", async (_, payload) => {
+registerProjectHandler("launcher:launch", async (_, payload) => {
   if (isLaunching || isLaunchRequestInProgress) {
     return { ok: false, error: "Launcher is already starting Minecraft." };
   }
@@ -7674,8 +7558,8 @@ ipcMain.handle("launcher:launch", async (_, payload) => {
       return { ok: false, error: String(error?.message || error) };
     }
 
-    const isCustomFabricVersion = isFixedFabricVersionId(version);
-    const launchVersionNumber = isCustomFabricVersion ? FIXED_MINECRAFT_VERSION : version;
+    const isCustomFabricVersion = isProjectFabricVersionId(version);
+    const launchVersionNumber = isCustomFabricVersion ? getProjectMinecraftVersion() : version;
     const launchVersionConfig = isCustomFabricVersion
       ? { number: launchVersionNumber, type: versionType, custom: version }
       : { number: launchVersionNumber, type: versionType };
@@ -7804,7 +7688,7 @@ ipcMain.handle("launcher:launch", async (_, payload) => {
     };
     sendLog({
       level: "info",
-      message: `Preparing ${FIXED_MOD_LOADER.toUpperCase()} ${FIXED_MINECRAFT_VERSION} (${version})...`
+      message: `Preparing ${getProjectModLoader().toUpperCase()} ${getProjectMinecraftVersion()} (${version})...`
     });
     sendLog({
       level: "debug",

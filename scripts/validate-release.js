@@ -2,6 +2,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { readProjects, resolveProject } = require("../lib/projects");
 
 function fail(message) {
   throw new Error(`release validation failed: ${message}`);
@@ -19,7 +20,7 @@ function main() {
     fail(`package.json version is not valid semver: ${version || "(empty)"}`);
   }
 
-  const refName = asText(process.env.GITHUB_REF_NAME || process.env.BETTERMON_RELEASE_TAG);
+  const refName = asText(process.env.GITHUB_REF_NAME || (process.env.BETTERLAUNCHER_RELEASE_TAG || process.env.BETTERMON_RELEASE_TAG));
   if (refName.startsWith("v") && refName.slice(1) !== version) {
     fail(`tag ${refName} does not match package.json version ${version}`);
   }
@@ -30,6 +31,11 @@ function main() {
   }
 
   const config = JSON.parse(fs.readFileSync(path.join(projectRoot, "modpack.config.json"), "utf8"));
+  readProjects(config);
+  resolveProject(config);
+  if (packageJson.name !== "betterlauncher" || packageJson.build?.productName !== "BetterLauncher") {
+    fail("package name and product name must use BetterLauncher");
+  }
   if (
     asText(config.github?.owner) !== asText(githubPublish.owner) ||
     asText(config.github?.repo) !== asText(githubPublish.repo)
@@ -37,7 +43,7 @@ function main() {
     fail("modpack.config.json github settings do not match package.json build.publish");
   }
 
-  console.log(`release validation passed for BetterMon Launcher ${version}`);
+  console.log(`release validation passed for BetterLauncher ${version}`);
 }
 
 main();

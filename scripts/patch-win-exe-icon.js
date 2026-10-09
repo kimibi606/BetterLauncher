@@ -78,7 +78,7 @@ function main() {
   }
 
   const projectRoot = path.resolve(__dirname, "..");
-  const exePath = path.join(projectRoot, "dist", "win-unpacked", "BetterMon Launcher.exe");
+  const exePath = path.join(projectRoot, "dist", "win-unpacked", "BetterLauncher.exe");
   const iconPath = path.join(projectRoot, "src", "assets", "app-icon.ico");
   if (!fileExists(exePath)) {
     throw new Error(`Target executable not found: ${exePath}`);

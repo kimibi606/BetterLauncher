@@ -1,7 +1,7 @@
 {
   "name": "request",
   "version": "2.88.3-bettermon.1",
-  "description": "Minimal, SSRF-hardened request compatibility layer for BetterMon Launcher",
+  "description": "Minimal, SSRF-hardened request compatibility layer for BetterLauncher",
   "main": "index.js",
   "license": "MIT",
   "engines": {

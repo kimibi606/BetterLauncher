@@ -1,16 +1,19 @@
 {
-  "name": "bettermon-launcher",
-  "version": "0.3.14",
-  "description": "Custom Minecraft launcher built with Electron, JS and CSS.",
+  "name": "betterlauncher",
+  "version": "0.4.0",
+  "description": "Multi-project Minecraft launcher with independent modpack distribution.",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "check": "node --check main.js && node --check preload.js && node --check src/renderer.js && node --check vendor/request/index.js && node --check scripts/publish-modpack-distribution.js && node scripts/validate-release.js",
+    "check": "node --check main.js && node --check preload.js && node --check src/renderer.js && node --check vendor/request/index.js && node --check lib/projects.js && node --check lib/distribution-download.js && node --check scripts/publish-modpack-distribution.js && node --check scripts/build-modpack-distribution.js && node scripts/validate-release.js",
     "dist": "electron-builder build",
     "dist:win": "electron-builder build --win nsis",
     "dist:dir": "electron-builder build --dir",
     "release:github": "npm run check && npm run dist:dir && node scripts/write-app-update-config.js && electron-builder build --prepackaged dist/win-unpacked --win nsis --publish never",
-    "modpack:publish": "node scripts/publish-modpack-distribution.js"
+    "modpack:publish": "node scripts/publish-modpack-distribution.js",
+    "test": "node --test",
+    "modpack:build": "node scripts/build-modpack-distribution.js",
+    "modpack:deploy": "wrangler pages deploy distribution --project-name ExamplePack --branch main"
   },
   "keywords": [
     "minecraft",
@@ -26,7 +29,8 @@
   },
   "devDependencies": {
     "electron": "^43.1.0",
-    "electron-builder": "^26.15.3"
+    "electron-builder": "^26.15.3",
+    "wrangler": "4.59.0"
   },
   "overrides": {
     "minecraft-launcher-core": {
@@ -35,8 +39,8 @@
     }
   },
   "build": {
-    "appId": "com.bettermon.launcher",
-    "productName": "BetterMon Launcher",
+    "appId": "com.betterlauncher.launcher",
+    "productName": "BetterLauncher",
     "asar": true,
     "files": [
       "main.js",
@@ -44,7 +48,8 @@
       "src/**/*",
       "vendor/request/**/*",
       "package.json",
-      "modpack.config.json"
+      "modpack.config.json",
+      "lib/**/*"
     ],
     "directories": {
       "output": "dist"
@@ -52,7 +57,7 @@
     "win": {
       "icon": "src/assets/app-icon.ico",
       "signExecutable": false,
-      "artifactName": "ExamplePack-Setup-${version}.${ext}",
+      "artifactName": "BetterLauncher-Setup-${version}.${ext}",
       "target": [
         {
           "target": "nsis",
@@ -67,13 +72,14 @@
       "allowToChangeInstallationDirectory": true,
       "installerIcon": "src/assets/app-icon.ico",
       "uninstallerIcon": "src/assets/app-icon.ico",
-      "installerHeaderIcon": "src/assets/app-icon.ico"
+      "installerHeaderIcon": "src/assets/app-icon.ico",
+      "guid": "0e192e02-a904-5be6-bca2-04cae62ae05b"
     },
     "publish": [
       {
         "provider": "github",
         "owner": "kimibi606",
-        "repo": "ExamplePack",
+        "repo": "BetterLauncher",
         "releaseType": "release"
       }
     ]

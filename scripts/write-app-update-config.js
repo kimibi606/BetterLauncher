@@ -24,12 +24,12 @@ function main() {
   const publish = resolvePublishConfig(packageJson);
 
   const owner =
-    asText(process.env.BETTERMON_GH_OWNER) ||
-    asText(process.env.BETTERMON_GITHUB_OWNER) ||
+    asText((process.env.BETTERLAUNCHER_GH_OWNER || process.env.BETTERMON_GH_OWNER)) ||
+    asText((process.env.BETTERLAUNCHER_GITHUB_OWNER || process.env.BETTERMON_GITHUB_OWNER)) ||
     asText(publish.owner);
   const repo =
-    asText(process.env.BETTERMON_GH_REPO) ||
-    asText(process.env.BETTERMON_GITHUB_REPO) ||
+    asText((process.env.BETTERLAUNCHER_GH_REPO || process.env.BETTERMON_GH_REPO)) ||
+    asText((process.env.BETTERLAUNCHER_GITHUB_REPO || process.env.BETTERMON_GITHUB_REPO)) ||
     asText(publish.repo);
   if (!owner || !repo) {
     throw new Error("GitHub owner/repo is empty. Cannot generate app-update.yml.");

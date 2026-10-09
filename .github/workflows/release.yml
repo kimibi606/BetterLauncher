@@ -29,6 +29,9 @@ jobs:
       - name: Validate release
         run: npm run check
 
+      - name: Test launcher
+        run: npm test
+
       - name: Build release
         run: npm run release:github
 
@@ -36,16 +39,16 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BETTERMON_GITHUB_OWNER: kimibi606
-          BETTERMON_GITHUB_REPO: ExamplePack
+          BETTERLAUNCHER_GITHUB_OWNER: kimibi606
+          BETTERLAUNCHER_GITHUB_REPO: BetterLauncher
         run: |
           $ErrorActionPreference = "Stop"
           $tag = "${{ github.ref_name }}"
           $version = node -p "require('./package.json').version"
-          $repository = "$env:BETTERMON_GITHUB_OWNER/$env:BETTERMON_GITHUB_REPO"
+          $repository = "$env:BETTERLAUNCHER_GITHUB_OWNER/$env:BETTERLAUNCHER_GITHUB_REPO"
           $assets = @(
-            "dist/ExamplePack-Setup-$version.exe",
-            "dist/ExamplePack-Setup-$version.exe.blockmap",
+            "dist/BetterLauncher-Setup-$version.exe",
+            "dist/BetterLauncher-Setup-$version.exe.blockmap",
             "dist/latest.yml"
           )
 
