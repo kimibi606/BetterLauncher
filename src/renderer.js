@@ -83,11 +83,22 @@ const bgmToggleButton = document.getElementById("bgmToggleButton");
 const bgmVolumeSlider = document.getElementById("bgmVolumeSlider");
 const bgmVolumeValue = document.getElementById("bgmVolumeValue");
 const startLaunchButton = document.getElementById("startLaunchButton");
-const projectSelect = document.getElementById("projectSelect");
+const projectsScreen = document.getElementById("projectsScreen");
+const projectCards = document.getElementById("projectCards");
+const projectsEmpty = document.getElementById("projectsEmpty");
+const projectsCount = document.getElementById("projectsCount");
+const projectsStatus = document.getElementById("projectsStatus");
+const projectsHeading = document.getElementById("projectsHeading");
+const projectsAccountButton = document.getElementById("projectsAccountButton");
+const projectsSettingsButton = document.getElementById("projectsSettingsButton");
+const changeProjectButton = document.getElementById("changeProjectButton");
+const currentProjectName = document.getElementById("currentProjectName");
 const projectDescription = document.getElementById("projectDescription");
 let projects = [];
 let selectedProjectId = "";
+let recentProjectId = "";
 let isProjectSwitching = false;
+let hasConfirmedProject = false;
 const launchStatus = document.getElementById("launchStatus");
 const settingsCloseButton = document.getElementById("settingsCloseButton");
 const settingsDoneButton = document.getElementById("settingsDoneButton");
@@ -129,6 +140,7 @@ const settingsTabs = Array.from(document.querySelectorAll(".settings-tab"));
 
 const SCREEN_ELEMENTS = {
   login: loginScreen,
+  projects: projectsScreen,
   launch: launchScreen,
   settings: settingsScreen
 };
@@ -170,7 +182,6 @@ let isLaunchRequestPending = false;
 let isLauncherRunning = false;
 let detectedSystemProfile = null;
 let isStartupModpackSyncRunning = false;
-let hasStartupModpackSyncRun = false;
 let isModpackUpdateApplyRunning = false;
 let modpackUpdateState = null;
 let isLauncherUpdateGateRunning = false;
@@ -242,7 +253,7 @@ function shouldPlayLauncherBgm() {
     return false;
   }
 
-  return (currentScreen === "launch" || currentScreen === "settings") && !isLauncherBgmMuted();
+  return ["projects", "launch", "settings"].includes(currentScreen) && !isLauncherBgmMuted();
 }
 
 function updateLauncherBgmControls() {
@@ -405,7 +416,6 @@ function applyNewsPanelExpandedState(expanded, persist = true) {
 }
 
 function switchScreen(targetScreen) {
-  const previousScreen = currentScreen;
   const next = targetScreen in SCREEN_ELEMENTS ? targetScreen : "login";
   currentScreen = next;
   if (document.body) {
@@ -418,7 +428,8 @@ function switchScreen(targetScreen) {
     }
 
     const isActive = screenKey === next;
-    screenElement.hidden = false;
+    screenElement.hidden = !isActive;
+    screenElement.inert = !isActive;
     screenElement.classList.toggle("screen-active", isActive);
     setAriaHidden(screenElement, !isActive);
   }
@@ -1059,7 +1070,7 @@ async function refreshLauncherNews(options = {}) {
 }
 
 function startNewsPolling() {
-  if (!selectedProjectId) return;
+  if (!hasConfirmedProject || !selectedProjectId) return;
   if (!newsList) {
     return;
   }
@@ -1194,7 +1205,7 @@ async function refreshPlayerCount() {
 }
 
 function startPlayerCountPolling() {
-  if (!selectedProjectId) return;
+  if (!hasConfirmedProject || !selectedProjectId) return;
   if (!playerCountValue) {
     return;
   }
@@ -1217,7 +1228,7 @@ function stopPlayerCountPolling() {
 }
 
 function canRunBackgroundModpackUpdateCheck() {
-  return !(
+  return hasConfirmedProject && !(
     isProjectSwitching ||
     isStartupModpackSyncRunning ||
     isModpackUpdateApplyRunning ||
@@ -1279,7 +1290,7 @@ async function refreshModpackUpdateStatusInBackground() {
 }
 
 function startModpackUpdatePolling() {
-  if (!selectedProjectId) return;
+  if (!hasConfirmedProject || !selectedProjectId) return;
   if (modpackUpdatePollTimer !== null) {
     window.clearInterval(modpackUpdatePollTimer);
   }
@@ -1906,7 +1917,7 @@ function getConfiguredMinecraftDirectory() {
   return asText(launcherSettings.minecraftDirectory) || asText(launcherDefaults.minecraftDirectory);
 }
 
-async function ensureJavaPathAutoSelectedOnStartup() {
+async function ensureJavaPathAutoSelectedForProject() {
   if (!projects.find((entry) => entry.id === selectedProjectId)?.manifestConfigured) return false;
   if (!window.launcherApi || typeof window.launcherApi.autoSelectJava !== "function") {
     return false;
@@ -1982,8 +1993,16 @@ function updateLaunchButtonUi() {
     label = "업데이트";
   }
   const project = projects.find((entry) => entry.id === selectedProjectId);
-  startLaunchButton.disabled = busy || (!hasLauncherUpdateReady && (!authState.signedIn || !project?.manifestConfigured));
-  if (projectSelect) projectSelect.disabled = busy || isModpackUpdateCheckRunning || projects.length === 0;
+  startLaunchButton.disabled = busy || !hasConfirmedProject || (!hasLauncherUpdateReady && (!authState.signedIn || !project?.manifestConfigured));
+  const selectionBusy = busy || isModpackUpdateCheckRunning;
+  if (changeProjectButton) changeProjectButton.disabled = selectionBusy;
+  for (const card of projectCards?.querySelectorAll("button[data-project-id]") || []) {
+    const entry = projects.find((candidate) => candidate.id === card.dataset.projectId);
+    card.disabled = selectionBusy || !authState.signedIn || !entry?.manifestConfigured;
+  }
+  if (projectsScreen) projectsScreen.setAttribute("aria-busy", isProjectSwitching ? "true" : "false");
+  if (projectsAccountButton) projectsAccountButton.disabled = isProjectSwitching;
+  if (projectsSettingsButton) projectsSettingsButton.disabled = isProjectSwitching;
   startLaunchButton.textContent = label;
   startLaunchButton.setAttribute("aria-label", label);
   startLaunchButton.setAttribute("aria-busy", busy ? "true" : "false");
@@ -2108,11 +2127,10 @@ async function ensureLatestLauncherBeforeLaunch() {
   }
 }
 
-async function runStartupModpackSync() {
-  if (hasStartupModpackSyncRun || isStartupModpackSyncRunning) {
+async function checkSelectedProjectUpdate() {
+  if (!hasConfirmedProject || isStartupModpackSyncRunning) {
     return;
   }
-  hasStartupModpackSyncRun = true;
   if (!projects.find((entry) => entry.id === selectedProjectId)?.manifestConfigured) {
     setLaunchStatus(selectedProjectId ? "모드팩 배포 주소를 설정하면 설치하고 실행할 수 있습니다." : "등록된 모드팩이 없습니다.");
     return;
@@ -2268,6 +2286,11 @@ async function launchGame() {
     return;
   }
 
+  if (!hasConfirmedProject) {
+    openProjectSelection();
+    return;
+  }
+
   if (isStartupModpackSyncRunning) {
     setLaunchStatus("\uBAA8\uB4DC\uD329 \uC5C5\uB370\uC774\uD2B8 \uC9C4\uD589 \uC911\uC785\uB2C8\uB2E4. \uC7A0\uC2DC \uAE30\uB2E4\uB824 \uC8FC\uC138\uC694.", true);
     return;
@@ -2325,14 +2348,11 @@ async function launchGame() {
         updateLaunchButtonUi();
       }
       if (result?.code === "auth-session-expired") {
-        authState = {
+        applyAuthState({
           ...authState,
+          signedIn: false,
           ...(result?.status && typeof result.status === "object" ? result.status : {})
-        };
-        updateAccountUi();
-        if (!authState.signedIn) {
-          switchScreen("login");
-        }
+        });
       }
       setLaunchStatus(localizeStatusMessage(result?.error || "Minecraft launch failed."), true);
       return;
@@ -2527,10 +2547,15 @@ function selectSettingsTab(tabId) {
 }
 
 function openSettingsScreen(tabId = selectedSettingsTab) {
-  if (!settingsScreen) {
+  if (!settingsScreen || isProjectSwitching) {
     return;
   }
   setSettingsStatus("");
+  const projectTabs = ["settingsTabMinecraft", "settingsTabJava", "settingsTabLauncher"];
+  for (const item of settingsNavItems) {
+    item.disabled = !hasConfirmedProject && projectTabs.includes(item.dataset.settingsTab);
+  }
+  if (!hasConfirmedProject && projectTabs.includes(tabId)) tabId = "settingsTabAccount";
   applySettingsToInputs(launcherSettings);
   selectSettingsTab(tabId);
   switchScreen("settings");
@@ -2538,6 +2563,7 @@ function openSettingsScreen(tabId = selectedSettingsTab) {
 }
 
 function persistSettingsSnapshot() {
+  if (!hasConfirmedProject) return;
   const next = readSettingsFromInputs();
   next.selectedProfile = settingsProfileSelect
     ? asText(settingsProfileSelect.value, asText(launcherSettings.selectedProfile))
@@ -2548,7 +2574,7 @@ function persistSettingsSnapshot() {
 
 function closeSettingsScreen() {
   persistSettingsSnapshot();
-  switchScreen(authState.signedIn ? "launch" : "login");
+  switchScreen(authState.signedIn ? (hasConfirmedProject ? "launch" : "projects") : "login");
 }
 
 function fillProfileSelect(profiles, selectedProfile) {
@@ -2632,6 +2658,7 @@ async function initializeSettings(projectId = "") {
   if (!projectId && !selectedProjectId) {
     let storedProjectId = "";
     try { storedProjectId = localStorage.getItem(SELECTED_PROJECT_STORAGE_KEY) || ""; } catch { /* unavailable storage */ }
+    recentProjectId = storedProjectId;
     if (storedProjectId && storedProjectId !== defaults.projectId && projects.some((entry) => entry.id === storedProjectId)) {
       return initializeSettings(storedProjectId);
     }
@@ -2673,28 +2700,42 @@ async function initializeSettings(projectId = "") {
   applySettingsToInputs(launcherSettings);
   writeStoredSettings(launcherSettings);
   renderProjectPicker();
-  try { localStorage.setItem(SELECTED_PROJECT_STORAGE_KEY, selectedProjectId); } catch { /* unavailable storage */ }
   await refreshProfilesForDirectory(launcherSettings.minecraftDirectory, launcherSettings.selectedProfile);
 }
 
 function renderProjectPicker() {
-  if (projectSelect) {
-    projectSelect.replaceChildren();
-    if (projects.length === 0) {
-      const option = document.createElement("option");
-      option.value = "";
-      option.textContent = "등록된 모드팩 없음";
-      projectSelect.appendChild(option);
-    }
-    for (const project of projects) {
-      const option = document.createElement("option");
-      option.value = project.id;
-      option.textContent = project.name;
-      projectSelect.appendChild(option);
-    }
-    projectSelect.value = selectedProjectId;
+  if (projectCards) {
+    projectCards.replaceChildren();
+    projects.forEach((project, index) => {
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = `project-card project-tone-${index % 3}`;
+      card.dataset.projectId = project.id;
+      card.setAttribute("aria-label", `${project.name} · Minecraft ${project.minecraftVersion} · ${project.manifestConfigured ? "선택" : "배포 준비 중"}`);
+      const addText = (tag, className, text) => {
+        const element = document.createElement(tag);
+        element.className = className;
+        element.textContent = text;
+        card.appendChild(element);
+      };
+      addText("span", "project-card-index", String(index + 1).padStart(2, "0"));
+      addText("span", "project-card-state", project.manifestConfigured ? "플레이 가능" : "배포 준비 중");
+      addText("strong", "project-card-name", project.name);
+      addText("span", "project-card-description", project.description || "새로운 모험을 시작하세요.");
+      addText("span", "project-card-runtime", `Minecraft ${project.minecraftVersion} · ${project.modLoader} · Java ${project.javaMajor}`);
+      addText("span", "project-card-action", project.manifestConfigured ? "선택하고 계속 →" : "배포를 준비하고 있어요");
+      if (project.id === recentProjectId) {
+        card.classList.add("is-recent");
+        addText("span", "project-card-recent", "최근 선택");
+      }
+      projectCards.appendChild(card);
+    });
   }
+  if (projectsCount) projectsCount.textContent = `${projects.length}개`;
+  if (projectsEmpty) projectsEmpty.hidden = projects.length > 0;
+  if (projectsStatus && !isProjectSwitching) projectsStatus.textContent = "";
   const project = projects.find((entry) => entry.id === selectedProjectId);
+  if (currentProjectName) currentProjectName.textContent = project?.name || "모드팩을 선택하세요";
   if (playerCountPanel) playerCountPanel.hidden = !project;
   if (projectDescription) {
     projectDescription.textContent = project
@@ -2708,38 +2749,77 @@ function renderProjectPicker() {
   updateLaunchButtonUi();
 }
 
+function isProjectNavigationBlocked() {
+  return isProjectSwitching || isLaunchRequestPending || isLauncherRunning ||
+    isModpackUpdateApplyRunning || isStartupModpackSyncRunning || isModpackUpdateCheckRunning ||
+    isLauncherUpdateInstallRunning || isLauncherUpdateGateRunning || isLauncherUpdateDownloadInProgress();
+}
+
+function openProjectSelection() {
+  if (!authState.signedIn || isProjectNavigationBlocked()) return;
+  writeStoredSettings(launcherSettings);
+  hasConfirmedProject = false;
+  stopNewsPolling();
+  stopPlayerCountPolling();
+  stopModpackUpdatePolling();
+  renderProjectPicker();
+  switchScreen("projects");
+  projectsHeading?.focus();
+}
+
 async function switchProject(projectId) {
-  if (!projectId || projectId === selectedProjectId || isProjectSwitching) return;
-  if (isLaunchRequestPending || isLauncherRunning || isModpackUpdateApplyRunning || isStartupModpackSyncRunning || isModpackUpdateCheckRunning) {
-    if (projectSelect) projectSelect.value = selectedProjectId;
-    return;
-  }
+  const project = projects.find((entry) => entry.id === projectId);
+  if (!authState.signedIn || !project?.manifestConfigured || isProjectNavigationBlocked()) return;
   writeStoredSettings(launcherSettings);
   const previousProjectId = selectedProjectId;
   isProjectSwitching = true;
+  if (projectsStatus) {
+    projectsStatus.classList.remove("is-error");
+    projectsStatus.textContent = `${project.name} 준비 중...`;
+  }
   updateLaunchButtonUi();
   try {
-    await initializeSettings(projectId);
+    if (projectId !== selectedProjectId) await initializeSettings(projectId);
+    if (!authState.signedIn) return;
+    hasConfirmedProject = true;
+    recentProjectId = selectedProjectId;
+    try { localStorage.setItem(SELECTED_PROJECT_STORAGE_KEY, selectedProjectId); } catch { /* unavailable storage */ }
     modpackUpdateState = null;
     currentNewsItems = [];
     renderNewsItems([], true);
     renderSettingsAboutNewsItems();
     setPlayerCountText("확인 중...", false);
     setPlayerCountTooltip("");
-    setLaunchStatus(`${projects.find((entry) => entry.id === projectId)?.name || projectId} 선택됨`);
-    await refreshModpackUpdateStatus();
-    void refreshLauncherNews({ forceRefresh: true, forceRender: true });
-    void refreshPlayerCount();
+    switchScreen("launch");
+    setLaunchStatus(`${project.name} 실행 준비 중...`);
+    await ensureJavaPathAutoSelectedForProject();
+    if (!authState.signedIn || !hasConfirmedProject) return;
+    await checkSelectedProjectUpdate();
   } catch (error) {
+    hasConfirmedProject = false;
     await initializeSettings(previousProjectId).catch(() => {});
-    setLaunchStatus(asText(error?.message) || "모드팩을 선택할 수 없습니다.", true);
+    if (authState.signedIn) switchScreen("projects");
+    if (projectsStatus) {
+      projectsStatus.classList.add("is-error");
+      projectsStatus.textContent = asText(error?.message) || "모드팩을 선택할 수 없습니다. 다시 시도해 주세요.";
+    }
   } finally {
     isProjectSwitching = false;
+    if (hasConfirmedProject && authState.signedIn) {
+      startNewsPolling();
+      startPlayerCountPolling();
+      startModpackUpdatePolling();
+      startLaunchButton?.focus();
+    }
     updateLaunchButtonUi();
   }
 }
 
 async function saveSettings(closeAfterSave = true) {
+  if (!hasConfirmedProject) {
+    if (closeAfterSave) closeSettingsScreen();
+    return;
+  }
   persistSettingsSnapshot();
   applySettingsToInputs(launcherSettings);
   await refreshProfilesForDirectory(launcherSettings.minecraftDirectory, launcherSettings.selectedProfile);
@@ -2774,10 +2854,15 @@ function updateAuthUi() {
   }
 
   if (!authState.signedIn) {
+    hasConfirmedProject = false;
+    stopNewsPolling();
+    stopPlayerCountPolling();
+    stopModpackUpdatePolling();
     switchScreen("login");
   } else if (currentScreen === "login") {
-    switchScreen("launch");
+    switchScreen("projects");
   }
+  if (projectsAccountButton) projectsAccountButton.textContent = `${authState.profileName || "플레이어"} · 계정 관리`;
 
   if (!authState.signedIn && !isLauncherRunning && !isLaunchRequestPending) {
     setLaunchStatus("");
@@ -3009,11 +3094,15 @@ bindClick(gateMicrosoftLoginButton, async () => {
   await runMicrosoftLogin();
 });
 
-if (projectSelect) {
-  projectSelect.addEventListener("change", () => {
-    void switchProject(projectSelect.value);
+if (projectCards) {
+  projectCards.addEventListener("click", (event) => {
+    const card = event.target instanceof Element ? event.target.closest("button[data-project-id]") : null;
+    if (card && !card.disabled) void switchProject(card.dataset.projectId);
   });
 }
+bindClick(changeProjectButton, openProjectSelection);
+bindClick(projectsAccountButton, () => openSettingsScreen("settingsTabAccount"));
+bindClick(projectsSettingsButton, () => openSettingsScreen("settingsTabUpdate"));
 
 bindClick(discordButton, async (event) => {
   event.preventDefault();
@@ -3410,12 +3499,7 @@ Promise.resolve()
     applyGitHubReleaseUi(githubRelease);
     updateUpdaterUi(updaterState);
     setStartupProgress(STARTUP_SETTINGS_PROGRESS, "\uB7F0\uCC98 \uC124\uC815 \uBD88\uB7EC\uC624\uAE30 \uC644\uB8CC.");
-    await ensureJavaPathAutoSelectedOnStartup();
     await ensureLatestLauncherOnStartup();
-    startNewsPolling();
-    startPlayerCountPolling();
-    startModpackUpdatePolling();
-    await runStartupModpackSync();
   })
   .then(async () => {
     setStartupProgress(STARTUP_FINALIZING_PROGRESS, "\uB7F0\uCC98 \uC2DC\uC791 \uB9C8\uBB34\uB9AC \uC911...");
@@ -3426,6 +3510,7 @@ Promise.resolve()
     }
     setStartupProgress(STARTUP_COMPLETE_PROGRESS, "\uC2DC\uC791 \uC644\uB8CC.");
     await hideStartupOverlay();
+    if (currentScreen === "projects") projectsHeading?.focus();
     void startLauncherBgmPlayback();
   })
   .catch(async (error) => {
@@ -3433,6 +3518,10 @@ Promise.resolve()
       asText(error?.message) || "\uC2DC\uC791 \uC2E4\uD328. \uACC4\uC18D \uC9C4\uD589\uD569\uB2C8\uB2E4."
     );
     setStartupProgress(startupProgressPercent, message, true);
+    if (projectsStatus) {
+      projectsStatus.classList.add("is-error");
+      projectsStatus.textContent = message;
+    }
     await hideStartupOverlay();
     void startLauncherBgmPlayback();
   });

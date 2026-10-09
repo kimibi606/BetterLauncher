@@ -1,6 +1,6 @@
 {
   "name": "betterlauncher",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Multi-project Minecraft launcher with independent modpack distribution.",
   "main": "main.js",
   "scripts": {
@@ -12,6 +12,7 @@
     "release:github": "npm run check && npm run dist:dir && node scripts/write-app-update-config.js && electron-builder build --prepackaged dist/win-unpacked --win nsis --publish never",
     "modpack:publish": "node scripts/publish-modpack-distribution.js",
     "test": "node --test tests/distribution.test.js tests/main-integration.test.js tests/projects.test.js tests/security.test.js",
+    "test:ui": "electron tests/renderer-flow.cjs",
     "modpack:build": "node scripts/build-modpack-distribution.js",
     "modpack:deploy": "node scripts/deploy-modpacks.js"
   },

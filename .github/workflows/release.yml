@@ -39,6 +39,7 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm test
+      - run: npm run test:ui
       - run: npm audit --audit-level=moderate
       - name: Build release
         run: npm run release:github
