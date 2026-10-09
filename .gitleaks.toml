@@ -1,0 +1,8 @@
+[extend]
+useDefault = true
+
+# OAuth public-client identifiers are public metadata, not authentication secrets.
+[[allowlists]]
+description = "Public Microsoft OAuth application identifier"
+regexTarget = "line"
+regexes = ['''const MICROSOFT_OAUTH_DEFAULT_CLIENT_ID = "[0-9a-f-]{36}";''']

@@ -52,10 +52,10 @@
 
 ## 새 모드팩 배포
 
-`npm install` 후 아래 명령을 프로젝트 루트에서 실행합니다. Wrangler는 Pages 직접 업로드를 지원하는 4.59.0으로 고정했습니다.
+`npm install` 후 아래 명령을 프로젝트 루트에서 실행합니다. Wrangler는 명령 주입 보안 패치가 적용된 4.59.2로 고정했으며, 하위 의존성도 패치 버전으로 고정했습니다.
 
 ```powershell
-npx wrangler@4.59.0 login --scopes account:read user:read pages:write
+npx wrangler@4.59.2 login --scopes account:read user:read pages:write
 npm run modpack:build -- --project skyblock --source "C:\Modpacks\Skyblock" --version 1.0.0
 npm run modpack:build -- --project adventure --source "C:\Modpacks\Adventure" --version 1.0.0
 npm run modpack:deploy
@@ -87,3 +87,5 @@ npm run modpack:build -- --project skyblock --source "C:\Modpacks\Skyblock" --ve
 - 새 모드팩 설치 위치는 `%APPDATA%\.betterlauncher\instances\<id>`입니다.
 - 기존 로그인·런처 설정은 이어받을 수 있지만 기존 Minecraft·모드팩 설치 폴더는 자동으로 가져오지 않습니다. 기존 원본 폴더는 그대로 둡니다.
 - 실행 또는 모드팩 업데이트 중에는 프로젝트 변경을 차단합니다. 다른 프로젝트가 사용하는 폴더와 식별자가 다른 manifest도 차단합니다.
+
+[보안 정책과 점검 결과](../SECURITY.md)

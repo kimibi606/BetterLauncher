@@ -6,10 +6,12 @@ const net = require("net");
 const { spawn } = require("child_process");
 const { Readable } = require("stream");
 const { pipeline } = require("stream/promises");
-const { fileURLToPath } = require("url");
+const { fileURLToPath, pathToFileURL } = require("url");
 const { AsyncLocalStorage } = require("async_hooks");
 const { readProjects, resolveProject, getProjectDirectory } = require("./lib/projects");
 const { downloadDistributionFile } = require("./lib/distribution-download");
+const { secureFetch } = require("./lib/secure-fetch");
+const { redactSensitiveText } = require("./lib/log-security");
 const projectContext = new AsyncLocalStorage();
 
 const { app, BrowserWindow, dialog, ipcMain, screen, session, shell, safeStorage } = require("electron");
@@ -898,7 +900,7 @@ function getModpackArchiveCacheKey(preset, modpackRoot) {
 
 function getModpackArchiveCachePath(modpackRoot, preset) {
   const normalizedPreset = normalizeLauncherPreset(preset, "high");
-  return path.join(modpackRoot, MODPACK_STATE_DIRECTORY, "downloads", `modpack_${normalizedPreset}.zip`);
+  return resolveModpackTargetPath(modpackRoot, `${MODPACK_STATE_DIRECTORY}/downloads/modpack_${normalizedPreset}.zip`);
 }
 
 function readModpackArchiveSessionCache(preset, modpackRoot) {
@@ -933,12 +935,14 @@ function isPathInside(parentPath, childPath) {
 }
 
 function normalizeRelativeModpackPath(value) {
-  const raw = asTrimmedText(value).replace(/\\/g, "/");
-  const normalized = path.posix.normalize(raw);
-  if (!normalized || normalized === "." || normalized.startsWith("/") || normalized.startsWith("../")) {
+  const raw = typeof value === "string" ? value.replace(/\\/g, "/") : "";
+  const segments = raw.split("/");
+  if (!raw || segments.some((part) => !part || part === "." || part === ".." ||
+      /[<>:"|?*\x00-\x1f\x7f]/.test(part) || /[. ]$/.test(part) ||
+      /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))) {
     throw new Error(`Invalid modpack path: ${value}`);
   }
-  return normalized;
+  return segments.join("/");
 }
 
 function isLauncherManagedInternalModpackPath(relativePath) {
@@ -976,6 +980,18 @@ function resolveModpackTargetPath(rootDirectory, relativePath) {
   if (!isPathInside(rootDirectory, absolute)) {
     throw new Error(`Path escapes modpack root: ${relativePath}`);
   }
+  let current = path.resolve(rootDirectory);
+  for (const segment of ["", ...normalizedRelative.split("/")]) {
+    if (segment) current = path.join(current, segment);
+    try {
+      if (fs.lstatSync(current).isSymbolicLink()) {
+        throw new Error(`Modpack path contains a symbolic link or junction: ${relativePath}`);
+      }
+    } catch (error) {
+      if (error.code === "ENOENT") break;
+      throw error;
+    }
+  }
   return absolute;
 }
 
@@ -984,10 +1000,10 @@ function buildModpackPathKey(normalizedRelativePath) {
 }
 
 function getModpackStatePath(modpackRoot) {
-  const legacyDirectory = path.join(modpackRoot, LEGACY_MODPACK_STATE_DIRECTORY);
-  const stateDirectory = path.join(modpackRoot, MODPACK_STATE_DIRECTORY);
+  const legacyDirectory = resolveModpackTargetPath(modpackRoot, LEGACY_MODPACK_STATE_DIRECTORY);
+  const stateDirectory = resolveModpackTargetPath(modpackRoot, MODPACK_STATE_DIRECTORY);
   movePathWithFallback(legacyDirectory, stateDirectory);
-  return path.join(modpackRoot, MODPACK_STATE_DIRECTORY, MODPACK_STATE_FILE);
+  return resolveModpackTargetPath(modpackRoot, `${MODPACK_STATE_DIRECTORY}/${MODPACK_STATE_FILE}`);
 }
 
 function getLegacyModpackStatePath(modpackRoot) {
@@ -1065,7 +1081,7 @@ async function getPathEntryType(targetPath) {
   }
 }
 
-async function downloadFileOnce(url, destinationPath) {
+async function downloadFileOnce(url, destinationPath, options = {}) {
   const response = await fetchWithTimeout(url, {
     redirect: "follow",
     cache: "no-store",
@@ -1079,6 +1095,12 @@ async function downloadFileOnce(url, destinationPath) {
   if (!response.body) {
     throw new Error(`Download response has no body: ${url}`);
   }
+  const limit = options.maxBytes;
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isSafeInteger(limit) && Number.isFinite(declaredLength) && declaredLength > limit) {
+    await response.body.cancel();
+    throw new Error("Download exceeds the manifest's declared file size.");
+  }
 
   await fs.promises.mkdir(path.dirname(destinationPath), { recursive: true });
   const stream = fs.createWriteStream(destinationPath);
@@ -1086,6 +1108,9 @@ async function downloadFileOnce(url, destinationPath) {
   let bytesWritten = 0;
   readable.on("data", (chunk) => {
     bytesWritten += Number(chunk?.length || chunk?.byteLength || 0);
+    if (Number.isSafeInteger(limit) && bytesWritten > limit) {
+      readable.destroy(new Error("Download exceeds the manifest's declared file size."));
+    }
   });
   await pipeline(readable, stream);
 
@@ -1106,7 +1131,7 @@ async function downloadFileOnce(url, destinationPath) {
   };
 }
 
-async function downloadFile(url, destinationPath) {
+async function downloadFile(url, destinationPath, options = {}) {
   let lastError = null;
   for (let attempt = 0; attempt < NETWORK_RETRY_ATTEMPTS; attempt += 1) {
     if (fs.existsSync(destinationPath)) {
@@ -1114,7 +1139,7 @@ async function downloadFile(url, destinationPath) {
     }
 
     try {
-      return await downloadFileOnce(url, destinationPath);
+      return await downloadFileOnce(url, destinationPath, options);
     } catch (error) {
       lastError = error;
       if (fs.existsSync(destinationPath)) {
@@ -1795,7 +1820,7 @@ function getWindowsJavaRuntimeUrl() {
 }
 
 function registerProjectHandler(channel, callback) {
-  ipcMain.handle(channel, async (event, payload = {}) => {
+  handleLauncherIpc(channel, async (event, payload = {}) => {
     try {
       const project = resolveProject(readLauncherConfig() || {}, payload?.projectId);
       for (const directory of [payload?.minecraftDirectory, payload?.gameDirectory].filter(Boolean)) {
@@ -1815,6 +1840,29 @@ function registerProjectHandler(channel, callback) {
     } catch (error) {
       return { ok: false, error: String(error?.message || error) };
     }
+  });
+}
+
+function isTrustedLauncherIpc(event) {
+  if (!isMainWindowAlive() || event?.sender !== mainWindow.webContents ||
+      event.senderFrame !== mainWindow.webContents.mainFrame) return false;
+  try {
+    const actual = new URL(event.senderFrame.url);
+    actual.hash = "";
+    return actual.href === pathToFileURL(path.join(__dirname, "src", "index.html")).href;
+  } catch { return false; }
+}
+
+function handleLauncherIpc(channel, callback) {
+  ipcMain.handle(channel, (event, ...args) => {
+    if (!isTrustedLauncherIpc(event)) throw new Error("Untrusted launcher IPC sender.");
+    return callback(event, ...args);
+  });
+}
+
+function onLauncherIpc(channel, callback) {
+  ipcMain.on(channel, (event, ...args) => {
+    if (isTrustedLauncherIpc(event)) callback(event, ...args);
   });
 }
 
@@ -1842,12 +1890,17 @@ function resolveModpackManifestArchiveSource(manifestSource, archiveUrl) {
   }
 
   if (isHttpUrl(archiveReference) || isFileUrl(archiveReference) || path.isAbsolute(archiveReference)) {
+    if (manifestSource?.sourceKind === "http" && !isHttpUrl(archiveReference)) {
+      throw new Error("Remote modpack manifests cannot read local archives.");
+    }
     return normalizeModpackArchiveSource(archiveReference, "");
   }
 
   if (manifestSource?.sourceKind === "http") {
     try {
-      return normalizeModpackArchiveSource(new URL(archiveReference, manifestSource.manifestLocation).toString(), "");
+      const resolved = new URL(archiveReference, manifestSource.manifestLocation).toString();
+      if (!isHttpUrl(resolved)) return null;
+      return normalizeModpackArchiveSource(resolved, "");
     } catch {
       return null;
     }
@@ -1867,6 +1920,10 @@ function parseModpackManifest(manifestSource, preset) {
   }
   if (asTrimmedText(json.id) && json.id !== getCurrentProject().id) {
     throw new Error(`Modpack manifest id does not match selected project: ${json.id} != ${getCurrentProject().id}`);
+  }
+  if (json.resetMinecraftDirectory === true || json.resetMinecraft === true ||
+      ["minecraft", "full"].includes(asTrimmedText(json.resetScope).toLowerCase())) {
+    throw new Error("Modpack manifests cannot request deletion of the entire Minecraft directory.");
   }
   const archive = json.archive && typeof json.archive === "object" ? json.archive : null;
   const manifestDigest = computeSha256FromText(manifestSource.text);
@@ -2170,12 +2227,11 @@ function buildAutoConnectTarget() {
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = SERVER_STATUS_TIMEOUT_MS) {
-  return fetch(url, {
-    redirect: "follow",
+  return secureFetch(url, {
     cache: "no-store",
     ...options,
     signal: createRequestTimeoutSignal(timeoutMs)
-  });
+  }, { allowHttpLoopback: !app.isPackaged });
 }
 
 function hasMeaningfulPlayerCapacity(serverStatus) {
@@ -2835,6 +2891,7 @@ function normalizeDistributionFileEntry(entry, index, baseUrl = "") {
   }
   const normalizedPath = normalizeRelativeModpackPath(relativePath);
   assertModpackPathDoesNotTargetInternalState(normalizedPath, "Distribution file path");
+  if (!isAllowedManagedModpackPath(normalizedPath)) throw new Error(`Unmanaged distribution file path: ${normalizedPath}`);
 
   const preferredAlgorithm = asTrimmedText(entry.algorithm || entry.hashAlgorithm).toLowerCase();
   const hashCandidates = [
@@ -2853,8 +2910,8 @@ function normalizeDistributionFileEntry(entry, index, baseUrl = "") {
     }
   }
 
-  if (!sha256 && !md5) {
-    throw new Error(`Missing sha256/md5 in distribution file entry at index ${index}.`);
+  if (!sha256) {
+    throw new Error(`Missing SHA-256 in distribution file entry at index ${index}.`);
   }
 
   let chunks;
@@ -3005,6 +3062,7 @@ function parseDistributionIndex(distributionJson, preset, options = {}) {
     delete: deleteEntries.map((entry) => {
       const normalizedEntry = normalizeRelativeModpackPath(entry);
       assertModpackPathDoesNotTargetInternalState(normalizedEntry, "Distribution delete path");
+      if (!isAllowedManagedModpackPath(normalizedEntry)) throw new Error(`Unmanaged distribution delete path: ${normalizedEntry}`);
       return normalizedEntry;
     })
   };
@@ -3698,6 +3756,7 @@ async function extractManagedZipArchive(archivePath, destinationPath, options = 
     "  $parts = $normalized.Split('/')",
     "  foreach ($part in $parts) {",
     "    if ([string]::IsNullOrWhiteSpace($part) -or $part -eq '.' -or $part -eq '..') { return $null }",
+    "    if ($part -match '[<>:\"|?*\\x00-\\x1f\\x7f]' -or $part -match '[. ]$' -or $part -match '^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\\.|$)') { throw 'Unsafe Windows path in ZIP archive' }",
     "  }",
     "  return ($parts -join '/')",
     "}",
@@ -3711,6 +3770,12 @@ async function extractManagedZipArchive(archivePath, destinationPath, options = 
     "    $target = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($destinationRoot, ($normalized -replace '/', [System.IO.Path]::DirectorySeparatorChar)))",
     "    if ($target -ne $destinationRoot -and -not $target.StartsWith($destinationRootWithSeparator, [System.StringComparison]::OrdinalIgnoreCase)) {",
     "      throw \"ZIP entry escapes modpack root: $normalized\"",
+    "    }",
+    "    $cursor = $target",
+    "    while ($cursor -and $cursor.StartsWith($destinationRoot, [System.StringComparison]::OrdinalIgnoreCase)) {",
+    "      if ((Test-Path -LiteralPath $cursor) -and ((Get-Item -LiteralPath $cursor -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { throw 'ZIP target contains a symbolic link or junction' }",
+    "      if ($cursor -eq $destinationRoot) { break }",
+    "      $cursor = [System.IO.Path]::GetDirectoryName($cursor)",
     "    }",
     "    $preserveExisting = ($preservedDirectories -contains $topLevel) -or ($preservedFiles -contains $topLevel)",
     "    if ($preserveExistingUserFiles -and $preserveExisting -and (Test-Path -LiteralPath $target)) { continue }",
@@ -3865,7 +3930,7 @@ function getManifestArchiveCachePath(modpackRoot, manifest) {
   const id = buildSafeModpackCacheSegment(manifest?.id, getCurrentProject().id);
   const version = buildSafeModpackCacheSegment(manifest?.version, "modpack");
   const sha1 = normalizeSha1(manifest?.archive?.sha1);
-  return path.join(modpackRoot, MODPACK_STATE_DIRECTORY, "downloads", `${id}-${version}-${sha1.slice(0, 12)}.zip`);
+  return resolveModpackTargetPath(modpackRoot, `${MODPACK_STATE_DIRECTORY}/downloads/${id}-${version}-${sha1.slice(0, 12)}.zip`);
 }
 
 async function ensureManifestArchiveCached(modpackRoot, manifest) {
@@ -4751,7 +4816,7 @@ function unwrapMicrosoftAuthCachePayload(parsed) {
 
 function packMicrosoftAuthCachePayload(token) {
   if (!isMicrosoftAuthCacheEncryptionAvailable()) {
-    return token;
+    throw new Error("OS encryption is unavailable; login tokens will not be saved to disk.");
   }
 
   try {
@@ -4761,7 +4826,7 @@ function packMicrosoftAuthCachePayload(token) {
       payload: encrypted.toString("base64")
     };
   } catch {
-    return token;
+    throw new Error("OS encryption failed; login tokens will not be saved to disk.");
   }
 }
 
@@ -4774,6 +4839,15 @@ function readMicrosoftAuthCachePayload() {
     }
 
     const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    if (parsed?.format !== MICROSOFT_AUTH_CACHE_ENVELOPE_FORMAT) {
+      try {
+        writeJsonFileAtomicSync(filePath, packMicrosoftAuthCachePayload(parsed), { mode: 0o600 });
+      } catch {
+        fs.unlinkSync(filePath);
+        sendLog({ level: "warn", message: "Unencrypted login cache removed because OS encryption is unavailable. Please sign in again." });
+        return null;
+      }
+    }
     return unwrapMicrosoftAuthCachePayload(parsed);
   } catch {
     return null;
@@ -4963,7 +5037,10 @@ function getMicrosoftStatus() {
 }
 
 function sendLog(payload) {
-  sendToRenderer("launcher:log", payload);
+  const secrets = [microsoftAccount?.access_token, microsoftAccount?.refreshToken,
+    microsoftAccount?.microsoftAccessToken, microsoftAccount?.meta?.refresh,
+    process.env.BETTERLAUNCHER_GITHUB_TOKEN, process.env.BETTERMON_GITHUB_TOKEN, process.env.GITHUB_TOKEN];
+  sendToRenderer("launcher:log", { ...payload, message: redactSensitiveText(payload?.message, secrets) });
 }
 
 function sendState(launching) {
@@ -7263,7 +7340,7 @@ function createWindow() {
   });
 }
 
-ipcMain.handle("launcher:get-defaults", (_event, payload = {}) => {
+handleLauncherIpc("launcher:get-defaults", (_event, payload = {}) => {
   try {
     const config = readLauncherConfig() || {};
     const availableProjects = readProjects(config);
@@ -7294,11 +7371,11 @@ ipcMain.handle("launcher:get-defaults", (_event, payload = {}) => {
   }
 });
 
-ipcMain.handle("launcher:get-auth-state", () => {
+handleLauncherIpc("launcher:get-auth-state", () => {
   return getMicrosoftStatus();
 });
 
-ipcMain.handle("launcher:get-system-profile", () => {
+handleLauncherIpc("launcher:get-system-profile", () => {
   return detectLauncherPreset();
 });
 
@@ -7332,7 +7409,7 @@ registerProjectHandler("launcher:get-news", async (_event, payload = {}) => {
   }
 });
 
-ipcMain.handle("launcher:get-github-release", async (_event, payload = {}) => {
+handleLauncherIpc("launcher:get-github-release", async (_event, payload = {}) => {
   try {
     return await getLatestGitHubReleaseSnapshot(payload);
   } catch (error) {
@@ -7356,19 +7433,19 @@ ipcMain.handle("launcher:get-github-release", async (_event, payload = {}) => {
   }
 });
 
-ipcMain.handle("updater:get-state", () => {
+handleLauncherIpc("updater:get-state", () => {
   return { ...updaterState };
 });
 
-ipcMain.handle("updater:ensure-latest", () => {
+handleLauncherIpc("updater:ensure-latest", () => {
   return ensureLatestLauncherVersion({ installIfDownloaded: true });
 });
 
-ipcMain.handle("updater:check", () => {
+handleLauncherIpc("updater:check", () => {
   return checkForAppUpdates({ manual: true });
 });
 
-ipcMain.handle("updater:install", () => {
+handleLauncherIpc("updater:install", () => {
   if (!updaterState.enabled) {
     return { ok: false, error: "Auto updater is disabled in development mode." };
   }
@@ -7381,19 +7458,19 @@ ipcMain.handle("updater:install", () => {
   return { ok: true };
 });
 
-ipcMain.handle("launcher:microsoft-login", async () => {
+handleLauncherIpc("launcher:microsoft-login", async () => {
   return startMicrosoftLogin();
 });
 
-ipcMain.handle("launcher:microsoft-select-account", (_, accountId) => {
+handleLauncherIpc("launcher:microsoft-select-account", (_, accountId) => {
   return selectMicrosoftAuthCacheAccount(accountId);
 });
 
-ipcMain.handle("launcher:microsoft-logout", () => {
+handleLauncherIpc("launcher:microsoft-logout", () => {
   return logoutMicrosoft();
 });
 
-ipcMain.handle("app:open-external", async (_, rawUrl) => {
+handleLauncherIpc("app:open-external", async (_, rawUrl) => {
   const normalizedUrl = normalizeExternalOpenUrl(rawUrl, { allowHttpLoopback: true });
   if (!normalizedUrl.ok) {
     return { ok: false, error: normalizedUrl.error };
@@ -7407,13 +7484,13 @@ ipcMain.handle("app:open-external", async (_, rawUrl) => {
   }
 });
 
-ipcMain.on("window:minimize", () => {
+onLauncherIpc("window:minimize", () => {
   withMainWindow((win) => {
     win.minimize();
   });
 });
 
-ipcMain.on("window:toggle-maximize", () => {
+onLauncherIpc("window:toggle-maximize", () => {
   withMainWindow((win) => {
     if (win.isMaximized()) {
       win.unmaximize();
@@ -7423,20 +7500,20 @@ ipcMain.on("window:toggle-maximize", () => {
   });
 });
 
-ipcMain.on("window:close", () => {
+onLauncherIpc("window:close", () => {
   withMainWindow((win) => {
     win.close();
   });
 });
 
-ipcMain.handle("window:get-state", () => {
+handleLauncherIpc("window:get-state", () => {
   if (!isMainWindowAlive()) {
     return { maximized: false };
   }
   return { maximized: mainWindow.isMaximized() };
 });
 
-ipcMain.handle("launcher:pick-directory", async () => {
+handleLauncherIpc("launcher:pick-directory", async () => {
   const result = await dialog.showOpenDialog({
     properties: ["openDirectory"]
   });
@@ -7448,7 +7525,7 @@ ipcMain.handle("launcher:pick-directory", async () => {
   return result.filePaths[0];
 });
 
-ipcMain.handle("launcher:pick-java", async () => {
+handleLauncherIpc("launcher:pick-java", async () => {
   const result = await dialog.showOpenDialog({
     properties: ["openFile"],
     filters: [

@@ -16,3 +16,9 @@ Desktop.ini
 !.dev.vars.example
 .env*
 !.env.example
+.npmrc
+*.key
+*.p12
+*.pfx
+credentials*.json
+microsoft_auth.json

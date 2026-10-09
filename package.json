@@ -1,11 +1,11 @@
 {
   "name": "betterlauncher",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Multi-project Minecraft launcher with independent modpack distribution.",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "check": "node --check main.js && node --check preload.js && node --check src/renderer.js && node --check vendor/request/index.js && node --check lib/projects.js && node --check lib/distribution-download.js && node --check scripts/publish-modpack-distribution.js && node --check scripts/build-modpack-distribution.js && node scripts/validate-release.js",
+    "check": "node --check main.js && node --check preload.js && node --check src/renderer.js && node --check vendor/request/index.js && node --check lib/secure-fetch.js && node --check lib/log-security.js && node --check vendor/request/network-security.js && node --check lib/projects.js && node --check lib/distribution-download.js && node --check scripts/publish-modpack-distribution.js && node --check scripts/build-modpack-distribution.js && node scripts/validate-release.js",
     "dist": "electron-builder build",
     "dist:win": "electron-builder build --win nsis",
     "dist:dir": "electron-builder build --dir",
@@ -25,23 +25,38 @@
   "dependencies": {
     "electron-updater": "^6.8.9",
     "minecraft-launcher-core": "^3.18.2",
-    "request": "file:vendor/request"
+    "request": "file:vendor/request",
+    "undici": "7.29.1"
   },
   "devDependencies": {
-    "electron": "^43.1.0",
-    "electron-builder": "^26.15.3",
-    "wrangler": "4.59.0"
+    "electron": "^43.7.9",
+    "electron-builder": "^26.17.0",
+    "wrangler": "4.59.2"
   },
   "overrides": {
     "minecraft-launcher-core": {
       "request": "$request",
-      "uuid": "^11.1.1"
+      "uuid": "^11.1.1",
+      "adm-zip": "0.6.1"
+    },
+    "@electron/get": "5.0.0",
+    "miniflare": {
+      "sharp": "0.35.5",
+      "undici": "7.29.1",
+      "ws": "8.21.0"
     }
   },
   "build": {
     "appId": "com.betterlauncher.launcher",
     "productName": "BetterLauncher",
     "asar": true,
+    "electronFuses": {
+      "runAsNode": false,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true
+    },
     "files": [
       "main.js",
       "preload.js",

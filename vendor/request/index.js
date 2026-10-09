@@ -1,11 +1,10 @@
 "use strict";
 
-const dns = require("dns");
 const http = require("http");
 const https = require("https");
-const net = require("net");
 const { PassThrough } = require("stream");
 
+const { safeLookup, validateNetworkUrl, redirectHeaders } = require("./network-security");
 const MAX_REDIRECTS = 5;
 
 function mergeOptions(defaults, input) {
@@ -20,69 +19,8 @@ function mergeOptions(defaults, input) {
   };
 }
 
-function isPrivateAddress(address) {
-  const normalized = String(address || "").toLowerCase().split("%")[0];
-  if (normalized === "::1" || normalized === "::" || normalized.startsWith("fc") || normalized.startsWith("fd")) {
-    return true;
-  }
-  if (/^fe[89ab]/.test(normalized)) {
-    return true;
-  }
-  const mappedIpv4 = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)?.[1];
-  const ipv4 = mappedIpv4 || (net.isIP(normalized) === 4 ? normalized : "");
-  if (!ipv4) {
-    return false;
-  }
-  const octets = ipv4.split(".").map(Number);
-  return (
-    octets[0] === 0 ||
-    octets[0] === 10 ||
-    octets[0] === 127 ||
-    (octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127) ||
-    (octets[0] === 169 && octets[1] === 254) ||
-    (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
-    (octets[0] === 192 && octets[1] === 168) ||
-    octets[0] >= 224
-  );
-}
-
-function safeLookup(hostname, options, callback) {
-  const lookupOptions = typeof options === "number" ? { family: options } : { ...(options || {}) };
-  dns.lookup(hostname, { ...lookupOptions, all: true }, (error, addresses) => {
-    if (error) {
-      callback(error);
-      return;
-    }
-    const safeAddresses = addresses.filter((entry) => !isPrivateAddress(entry.address));
-    if (safeAddresses.length !== addresses.length || safeAddresses.length === 0) {
-      const blockedError = new Error(`Blocked request to private or loopback address: ${hostname}`);
-      blockedError.code = "ERR_BLOCKED_PRIVATE_ADDRESS";
-      callback(blockedError);
-      return;
-    }
-    if (lookupOptions.all) {
-      callback(null, safeAddresses);
-      return;
-    }
-    callback(null, safeAddresses[0].address, safeAddresses[0].family);
-  });
-}
-
 function normalizeTarget(options) {
-  const rawUrl = options.url || options.uri;
-  const target = rawUrl instanceof URL ? new URL(rawUrl.toString()) : new URL(String(rawUrl || ""));
-  if (target.protocol !== "https:" && target.protocol !== "http:") {
-    throw new Error(`Unsupported request protocol: ${target.protocol || "(empty)"}`);
-  }
-  if (target.username || target.password) {
-    throw new Error("Credentials in request URLs are not allowed.");
-  }
-  if (isPrivateAddress(target.hostname)) {
-    const error = new Error(`Blocked request to private or loopback address: ${target.hostname}`);
-    error.code = "ERR_BLOCKED_PRIVATE_ADDRESS";
-    throw error;
-  }
-  return target;
+  return validateNetworkUrl(options.url || options.uri);
 }
 
 function createRequest(defaultOptions, input, callback) {
@@ -120,7 +58,8 @@ function createRequest(defaultOptions, input, callback) {
     output.on("error", (error) => finishCallback(error, responseForCallback));
   }
 
-  const perform = (targetInput, redirectCount) => {
+  const perform = (targetInput, redirectCount, requestOptions = options) => {
+    const options = requestOptions;
     let target;
     try {
       target = normalizeTarget({ url: targetInput });
@@ -161,7 +100,17 @@ function createRequest(defaultOptions, input, callback) {
           output.destroy(new Error(`Too many redirects: ${target.href}`));
           return;
         }
-        perform(new URL(location, target).toString(), redirectCount + 1);
+        try {
+          const next = normalizeTarget({ url: new URL(location, target) });
+          const nextOptions = { ...options, headers: Object.fromEntries(redirectHeaders(headers, target, next)) };
+          if (response.statusCode === 303 || ([301, 302].includes(response.statusCode) && request.method === "POST")) {
+            nextOptions.method = "GET"; delete nextOptions.body; delete nextOptions.json;
+            for (const key of Object.keys(nextOptions.headers)) if (/^content-(length|type)$/i.test(key)) delete nextOptions.headers[key];
+          } else if (body && target.origin !== next.origin) {
+            throw new Error("Cross-origin redirects cannot forward request bodies.");
+          }
+          perform(next.toString(), redirectCount + 1, nextOptions);
+        } catch (error) { output.destroy(error); }
         return;
       }
       output.emit("response", response);

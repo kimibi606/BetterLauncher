@@ -8,26 +8,34 @@ const os = require("os");
 const vm = require("vm");
 const http = require("http");
 const { createRequire } = require("module");
+const { pathToFileURL } = require("url");
 const { buildDistribution } = require("../scripts/build-modpack-distribution");
 
 const mainPath = path.resolve(__dirname, "..", "main.js");
 const nodeRequire = createRequire(mainPath);
 
-function loadMain(root) {
+function loadMain(root, safeStorage) {
   const handlers = new Map();
   const appPaths = { appData: root, userData: path.join(root, ".betterlauncher"), sessionData: path.join(root, "session") };
   const app = { getVersion: () => "0.3.14", getName: () => "BetterLauncher", getPath: (name) => appPaths[name], setPath: (name, value) => { appPaths[name] = value; }, requestSingleInstanceLock: () => false, on() {}, quit() {}, isPackaged: false };
   const context = vm.createContext({
-    require: (name) => name === "electron" ? { app, ipcMain: { handle: (channel, fn) => handlers.set(channel, fn), on() {} } }
+    require: (name) => name === "electron" ? { app, safeStorage, ipcMain: { handle: (channel, fn) => handlers.set(channel, fn), on() {} } }
       : name === "electron-updater" ? { autoUpdater: {} } : nodeRequire(name),
     __dirname: path.dirname(mainPath), process: { ...process, cwd: () => root },
     console, Buffer, URL, AbortSignal, fetch, setTimeout, clearTimeout, setInterval, clearInterval
   });
   vm.runInContext(fs.readFileSync(mainPath, "utf8") + "\nglobalThis.testApi = { projectContext, getCurrentProject, readServerStatusConfig, isProjectFabricVersionId, migrateLegacyUserDataIfNeeded, migrateLegacyStateLayoutIfNeeded, verifyLaunchIntegrity };", context);
-  return { handlers, api: context.testApi, appPaths };
+  const mainFrame = { url: pathToFileURL(path.join(path.dirname(mainPath), "src", "index.html")).href };
+  const webContents = { mainFrame, send() {} };
+  context.testWindow = { webContents, isDestroyed: () => false };
+  vm.runInContext("mainWindow = testWindow;", context);
+  const trustedEvent = { sender: webContents, senderFrame: mainFrame };
+  const authenticatedHandlers = new Map([...handlers].map(([channel, callback]) => [channel,
+    (event, payload) => callback(Object.keys(event || {}).length ? event : trustedEvent, payload)]));
+  return { handlers: authenticatedHandlers, api: context.testApi, appPaths, webContents, context };
 }
 
-async function setup(t) {
+async function setup(t, safeStorage) {
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "betterlauncher-integration-"));
   const output = path.join(root, "distribution");
   const server = http.createServer(async (req, res) => {
@@ -56,7 +64,7 @@ async function setup(t) {
     await fs.promises.writeFile(path.join(source, "mods", "shared-name.jar"), project.name.repeat(5));
     await buildDistribution({ source, output, project: project.id, version: "1", chunkBytes: 6 }, config);
   }
-  return { root, output, config, ...loadMain(root) };
+  return { root, output, config, ...loadMain(root, safeStorage) };
 }
 
 test("two HTTP modpacks install concurrently with separate state, chunks and runtime versions", async (t) => {
@@ -189,4 +197,105 @@ test("an empty catalog returns usable launcher defaults and disables pack operat
   assert.equal(defaults.projects.length, 0);
   assert.equal(defaults.minecraftDirectory, "");
   assert.equal((await handlers.get("launcher:check-modpack-update")({}, {})).ok, false);
+});
+
+test("IPC rejects foreign windows, frames and navigated documents", async (t) => {
+  const { handlers, webContents } = await setup(t);
+  const defaults = handlers.get("launcher:get-defaults");
+  assert.throws(() => defaults({ sender: {}, senderFrame: webContents.mainFrame }), /Untrusted/);
+  assert.throws(() => defaults({ sender: webContents, senderFrame: { url: webContents.mainFrame.url } }), /Untrusted/);
+  webContents.mainFrame.url = "https://evil.example/";
+  assert.throws(() => defaults({ sender: webContents, senderFrame: webContents.mainFrame }), /Untrusted/);
+});
+
+test("malicious manifest paths, weak hashes and destructive resets preserve local files", async (t) => {
+  const { handlers, output } = await setup(t);
+  const defaults = await handlers.get("launcher:get-defaults")({}, { projectId: "alpha" });
+  const payload = { projectId: "alpha", minecraftDirectory: defaults.minecraftDirectory };
+  const manifestPath = path.join(output, "alpha", "latest.json");
+  const original = JSON.parse(await fs.promises.readFile(manifestPath));
+  await fs.promises.mkdir(path.join(defaults.minecraftDirectory, "saves"), { recursive: true });
+  const save = path.join(defaults.minecraftDirectory, "saves", "world.txt");
+  await fs.promises.writeFile(save, "keep-my-world");
+  const variants = [
+    ...["../outside.jar", "mods/CON.jar", "mods/a.jar:stream", "mods/../options.txt", ".betterlauncher./state.json", "saves/world.txt"].map(filePath => {
+      const manifest = structuredClone(original); manifest.files[0].path = filePath; return manifest;
+    }),
+    { ...original, resetMinecraftDirectory: true },
+    { ...original, delete: ["saves/world.txt"] },
+    { ...original, files: [{ path: "mods/weak.jar", md5: "a".repeat(32), url: "https://example.com/weak.jar" }] }
+  ];
+  for (const manifest of variants) {
+    await fs.promises.writeFile(manifestPath, JSON.stringify(manifest));
+    const result = await handlers.get("launcher:sync-modpack")({}, payload);
+    assert.equal(result.ok, false, JSON.stringify(manifest));
+    assert.equal(await fs.promises.readFile(save, "utf8"), "keep-my-world");
+  }
+});
+
+test("modpack writes cannot follow a directory junction outside the instance", async (t) => {
+  const { handlers, root } = await setup(t);
+  const defaults = await handlers.get("launcher:get-defaults")({}, { projectId: "alpha" });
+  const outside = path.join(root, "outside");
+  await fs.promises.mkdir(outside, { recursive: true });
+  await fs.promises.mkdir(defaults.minecraftDirectory, { recursive: true });
+  await fs.promises.symlink(outside, path.join(defaults.minecraftDirectory, "mods"), "junction");
+  await fs.promises.writeFile(path.join(outside, "shared-name.jar"), "outside-file");
+  const result = await handlers.get("launcher:sync-modpack")({}, { projectId: "alpha", minecraftDirectory: defaults.minecraftDirectory });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /symbolic link|junction/);
+  assert.equal(await fs.promises.readFile(path.join(outside, "shared-name.jar"), "utf8"), "outside-file");
+});
+
+test("OS encryption failure never writes a plaintext login token", async (t) => {
+  const { context } = await setup(t, { isEncryptionAvailable: () => true, encryptString: () => { throw new Error("OS encryption failure"); } });
+  context.testToken = { access_token: "sensitive-access-token", refreshToken: "sensitive-refresh-token" };
+  vm.runInContext("writeMicrosoftAuthCachePayload(testToken);", context);
+  const cachePath = vm.runInContext("getMicrosoftAuthCachePath()", context);
+  assert.equal(fs.existsSync(cachePath), false);
+  await fs.promises.mkdir(path.dirname(cachePath), { recursive: true });
+  await fs.promises.writeFile(cachePath, JSON.stringify(context.testToken));
+  assert.equal(vm.runInContext("readMicrosoftAuthCachePayload()", context), null);
+  assert.equal(fs.existsSync(cachePath), false);
+});
+
+test("legacy plaintext login caches become encrypted envelopes and remain readable", async (t) => {
+  const token = { access_token: "sensitive-access-token", refreshToken: "sensitive-refresh-token" };
+  const { context } = await setup(t, { isEncryptionAvailable: () => true,
+    encryptString: () => Buffer.from("opaque-ciphertext"), decryptString: () => JSON.stringify(token) });
+  const cachePath = vm.runInContext("getMicrosoftAuthCachePath()", context);
+  await fs.promises.mkdir(path.dirname(cachePath), { recursive: true });
+  await fs.promises.writeFile(cachePath, JSON.stringify(token));
+  vm.runInContext("readMicrosoftAuthCachePayload()", context);
+  const stored = await fs.promises.readFile(cachePath, "utf8");
+  assert.equal(stored.includes(token.access_token), false);
+  assert.equal(JSON.parse(stored).format, "safe-storage-v1");
+  assert.equal(vm.runInContext("readMicrosoftAuthCachePayload()", context).refreshToken, token.refreshToken);
+});
+
+test("downloads stop when the response exceeds the manifest size", async (t) => {
+  const { context, root, config } = await setup(t);
+  const target = path.join(root, "oversized.download");
+  const download = vm.runInContext("downloadFile", context);
+  await assert.rejects(download(config.projects[0].modpack.manifestUrl, target, { maxBytes: 4 }), /declared file size/);
+  assert.equal(fs.existsSync(target), false);
+});
+
+test("patched ZIP library and Windows extraction accept normal files and reject ADS", async (t) => {
+  if (process.platform !== "win32") return t.skip("Windows extraction");
+  const { context, root } = await setup(t);
+  const Zip = require("adm-zip");
+  const zip = new Zip();
+  zip.addFile("mods/native.jar", Buffer.from("native-content"));
+  zip.addFile("version.json", Buffer.from('{"id":"test"}'));
+  assert.equal(JSON.parse(zip.readAsText("version.json")).id, "test");
+  const archive = path.join(root, "native.zip"), destination = path.join(root, "extracted");
+  zip.writeZip(archive);
+  const extract = vm.runInContext("extractManagedZipArchive", context);
+  await extract(archive, destination);
+  assert.equal(await fs.promises.readFile(path.join(destination, "mods", "native.jar"), "utf8"), "native-content");
+  const malicious = new Zip();
+  malicious.addFile("mods/native.jar:stream", Buffer.from("payload"));
+  malicious.writeZip(archive);
+  await assert.rejects(extract(archive, destination), /Unsafe Windows path/);
 });
