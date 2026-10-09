@@ -100,6 +100,8 @@ test("project context isolates server/news configuration and exact Fabric versio
     assert.equal(api.isProjectFabricVersionId("fabric-loader-0.16.0-1.21.1"), true);
     assert.equal(api.isProjectFabricVersionId("fabric-loader-0.16.0-1.21.10"), false);
     assert.equal(api.isProjectFabricVersionId("fabric-loader-0.16.0-1.20.1"), false);
+    assert.equal(api.isProjectFabricVersionId("fabric-loader-../../../outside-1.21.1"), false);
+    assert.equal(api.isProjectFabricVersionId("fabric-loader-0.16.0:stream-1.21.1"), false);
   });
   assert.equal((await handlers.get("launcher:get-defaults")({}, { projectId: "missing" })).ok, false);
 });
@@ -254,7 +256,7 @@ test("OS encryption failure never writes a plaintext login token", async (t) => 
   const cachePath = vm.runInContext("getMicrosoftAuthCachePath()", context);
   assert.equal(fs.existsSync(cachePath), false);
   await fs.promises.mkdir(path.dirname(cachePath), { recursive: true });
-  await fs.promises.writeFile(cachePath, JSON.stringify(context.testToken));
+  await fs.promises.writeFile(cachePath, JSON.stringify(context.testToken), { flag: "wx" });
   assert.equal(vm.runInContext("readMicrosoftAuthCachePayload()", context), null);
   assert.equal(fs.existsSync(cachePath), false);
 });
@@ -291,6 +293,7 @@ test("patched ZIP library and Windows extraction accept normal files and reject 
   assert.equal(JSON.parse(zip.readAsText("version.json")).id, "test");
   const archive = path.join(root, "native.zip"), destination = path.join(root, "extracted");
   zip.writeZip(archive);
+  await vm.runInContext("validateZipArchiveForExtraction", context)(archive);
   const extract = vm.runInContext("extractManagedZipArchive", context);
   await extract(archive, destination);
   assert.equal(await fs.promises.readFile(path.join(destination, "mods", "native.jar"), "utf8"), "native-content");

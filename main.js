@@ -301,9 +301,8 @@ function copyDirectoryRecursiveSync(sourcePath, targetPath) {
       continue;
     }
     if (entry.isFile()) {
-      if (!fs.existsSync(targetEntryPath)) {
-        fs.copyFileSync(sourceEntryPath, targetEntryPath);
-      }
+      try { fs.copyFileSync(sourceEntryPath, targetEntryPath, fs.constants.COPYFILE_EXCL); }
+      catch (error) { if (error.code !== "EEXIST") throw error; }
     }
   }
 }
@@ -384,7 +383,10 @@ function migrateLegacyUserDataIfNeeded() {
         const source = path.join(legacyPath, entry.name);
         const target = path.join(targetUserDataPath, entry.name);
         if (entry.isDirectory()) copyDirectoryRecursiveSync(source, target);
-        else if (entry.isFile() && !fs.existsSync(target)) fs.copyFileSync(source, target);
+        else if (entry.isFile()) {
+          try { fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL); }
+          catch (error) { if (error.code !== "EEXIST") throw error; }
+        }
       }
       fs.mkdirSync(path.dirname(markerPath), { recursive: true });
       fs.writeFileSync(markerPath, JSON.stringify({ from: legacyDirectoryName, migratedAt: new Date().toISOString() }));
@@ -1197,31 +1199,32 @@ async function readFileHeadHex(filePath, byteLength = 4) {
 
 async function validateZipArchiveForExtraction(archivePath) {
   const resolvedPath = path.resolve(archivePath);
-  let stats;
+  let handle;
   try {
-    stats = await fs.promises.stat(resolvedPath);
+    handle = await fs.promises.open(resolvedPath, "r");
   } catch (error) {
     throw new Error(`ZIP file not found: ${resolvedPath}`);
   }
-
-  if (!stats.isFile()) {
-    throw new Error(`ZIP path is not a file: ${resolvedPath}`);
-  }
-  if (stats.size < ZIP_EOCD_MIN_SIZE) {
-    throw new Error(`ZIP file is too small (${stats.size} bytes): ${resolvedPath}`);
-  }
-
-  const magic = await readFileHeadHex(resolvedPath, 4);
-  if (!ZIP_MAGIC_SIGNATURES.has(magic)) {
-    throw new Error(`Invalid ZIP header (${magic || "empty"}): ${resolvedPath}`);
-  }
-
-  const scanSize = Math.min(
-    stats.size,
-    ZIP_EOCD_MIN_SIZE + ZIP_EOCD_MAX_COMMENT_LENGTH + ZIP_EOCD_SCAN_PADDING_BYTES
-  );
-  const handle = await fs.promises.open(resolvedPath, "r");
   try {
+    const stats = await handle.stat();
+    if (!stats.isFile()) {
+      throw new Error(`ZIP path is not a file: ${resolvedPath}`);
+    }
+    if (stats.size < ZIP_EOCD_MIN_SIZE) {
+      throw new Error(`ZIP file is too small (${stats.size} bytes): ${resolvedPath}`);
+    }
+
+    const header = Buffer.alloc(4);
+    await handle.read(header, 0, header.length, 0);
+    const magic = header.toString("hex");
+    if (!ZIP_MAGIC_SIGNATURES.has(magic)) {
+      throw new Error(`Invalid ZIP header (${magic || "empty"}): ${resolvedPath}`);
+    }
+
+    const scanSize = Math.min(
+      stats.size,
+      ZIP_EOCD_MIN_SIZE + ZIP_EOCD_MAX_COMMENT_LENGTH + ZIP_EOCD_SCAN_PADDING_BYTES
+    );
     const windowBuffer = Buffer.alloc(scanSize);
     const { bytesRead } = await handle.read(windowBuffer, 0, scanSize, stats.size - scanSize);
     const scanned = windowBuffer.slice(0, bytesRead);
@@ -7084,8 +7087,10 @@ function isProjectFabricVersionId(versionId) {
   const prefix = "fabric-loader-";
   const suffix = `-${getProjectMinecraftVersion()}`;
   if (!value.startsWith(prefix) || !value.endsWith(suffix)) return false;
+  const version = value.slice(prefix.length, -suffix.length);
+  if (!/^\d+\.\d+\.\d+(?:[-+][a-z0-9.-]+)?$/.test(version)) return false;
   const loader = getCurrentProject().loaderVersion;
-  return !loader || value === `${prefix}${loader}${suffix}`;
+  return !loader || value === `${prefix}${loader.toLowerCase()}${suffix}`;
 }
 
 function detectInstalledFabricVersionId(minecraftDirectory) {
@@ -7149,7 +7154,7 @@ async function ensureFabricVersionInDirectory(minecraftDirectory) {
   const stableEntry = loaderVersions.find((entry) => Boolean(entry?.loader?.stable));
   const selectedEntry = stableEntry || loaderVersions[0];
   const loaderVersion = getCurrentProject().loaderVersion || asTrimmedText(selectedEntry?.loader?.version);
-  if (!loaderVersion) {
+  if (!/^\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.-]+)?$/.test(loaderVersion)) {
     throw new Error("Fabric loader version response is invalid.");
   }
 
@@ -7175,8 +7180,8 @@ async function ensureFabricVersionInDirectory(minecraftDirectory) {
     throw new Error("Fabric profile id is invalid for launcher target.");
   }
 
-  const versionDirectory = path.join(minecraftDirectory, "versions", versionId);
-  const versionJsonPath = path.join(versionDirectory, `${versionId}.json`);
+  const versionDirectory = resolveModpackTargetPath(minecraftDirectory, `versions/${versionId}`);
+  const versionJsonPath = resolveModpackTargetPath(minecraftDirectory, `versions/${versionId}/${versionId}.json`);
   await fs.promises.mkdir(versionDirectory, { recursive: true });
   await fs.promises.writeFile(versionJsonPath, JSON.stringify(profileJson, null, 2), "utf8");
 

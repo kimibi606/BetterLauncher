@@ -11,7 +11,7 @@
     "dist:dir": "electron-builder build --dir",
     "release:github": "npm run check && npm run dist:dir && node scripts/write-app-update-config.js && electron-builder build --prepackaged dist/win-unpacked --win nsis --publish never",
     "modpack:publish": "node scripts/publish-modpack-distribution.js",
-    "test": "node --test",
+    "test": "node --test tests/distribution.test.js tests/main-integration.test.js tests/projects.test.js tests/security.test.js",
     "modpack:build": "node scripts/build-modpack-distribution.js",
     "modpack:deploy": "wrangler pages deploy distribution --project-name ExamplePack --branch main"
   },
