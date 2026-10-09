@@ -30,7 +30,7 @@
   "devDependencies": {
     "electron": "^43.1.0",
     "electron-builder": "^26.15.3",
-    "wrangler": "4.59.0"
+    "wrangler": "4.149.0"
   },
   "overrides": {
     "minecraft-launcher-core": {
