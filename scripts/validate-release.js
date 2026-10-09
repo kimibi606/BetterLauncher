@@ -31,8 +31,7 @@ function main() {
   }
 
   const config = JSON.parse(fs.readFileSync(path.join(projectRoot, "modpack.config.json"), "utf8"));
-  readProjects(config);
-  resolveProject(config);
+  if (readProjects(config).length > 0) resolveProject(config);
   if (packageJson.name !== "betterlauncher" || packageJson.build?.productName !== "BetterLauncher") {
     fail("package name and product name must use BetterLauncher");
   }

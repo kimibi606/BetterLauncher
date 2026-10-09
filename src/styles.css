@@ -969,6 +969,10 @@ body[data-screen="launch"] .start-launch-area {
   display: none;
 }
 
+#playerCountPanel[hidden] {
+  display: none;
+}
+
 .start-launch-area {
   position: fixed;
   left: 18px;

@@ -1,37 +1,6 @@
 {
-  "defaultProject": "bettermon",
-  "projects": [
-    {
-      "id": "bettermon",
-      "name": "BetterMon",
-      "description": "ExamplePack",
-      "minecraftVersion": "1.21.1",
-      "modLoader": "fabric",
-      "javaMajor": 21,
-      "modpack": {
-        "manifestUrl": "https://example.invalid/private"
-      },
-      "serverStatus": {
-        "host": "server.example",
-        "port": 25565
-      },
-      "news": {
-        "items": [
-          {
-            "type": "패치노트",
-            "date": "2026-08-18",
-            "text": [
-              "버그 픽스 & 시스템 수정"
-            ]
-          }
-        ],
-        "refreshMs": 15000,
-        "maxItems": 8
-      },
-      "discordUrl": "https://example.invalid/private",
-      "loaderVersion": "0.19.5"
-    }
-  ],
+  "defaultProject": "",
+  "projects": [],
   "github": {
     "owner": "kimibi606",
     "repo": "BetterLauncher",

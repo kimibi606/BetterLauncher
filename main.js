@@ -376,7 +376,14 @@ function migrateLegacyUserDataIfNeeded() {
 
     try {
       fs.mkdirSync(path.dirname(targetUserDataPath), { recursive: true });
-      copyDirectoryRecursiveSync(legacyPath, targetUserDataPath);
+      fs.mkdirSync(targetUserDataPath, { recursive: true });
+      for (const entry of fs.readdirSync(legacyPath, { withFileTypes: true })) {
+        if (["minecraft", "instances"].includes(entry.name.toLowerCase())) continue;
+        const source = path.join(legacyPath, entry.name);
+        const target = path.join(targetUserDataPath, entry.name);
+        if (entry.isDirectory()) copyDirectoryRecursiveSync(source, target);
+        else if (entry.isFile() && !fs.existsSync(target)) fs.copyFileSync(source, target);
+      }
       fs.mkdirSync(path.dirname(markerPath), { recursive: true });
       fs.writeFileSync(markerPath, JSON.stringify({ from: legacyDirectoryName, migratedAt: new Date().toISOString() }));
       sendLog({
@@ -481,9 +488,6 @@ function migrateLegacyStateLayoutIfNeeded() {
   migrateLegacySessionDataIfNeeded();
   migrateLegacyMicrosoftAuthCacheIfNeeded();
   migrateLegacyUpdaterConfigIfNeeded();
-  const legacyMinecraftPath = path.join(app.getPath("userData"), "minecraft");
-  const bettermonPath = getProjectDirectory(app.getPath("userData"), "bettermon");
-  movePathWithFallback(legacyMinecraftPath, bettermonPath);
 }
 
 configureLauncherUserDataPath();
@@ -7259,30 +7263,35 @@ function createWindow() {
   });
 }
 
-registerProjectHandler("launcher:get-defaults", () => {
-  return {
-    projectId: getCurrentProject().id,
-    projects: readProjects(readLauncherConfig() || {}).map((project) => ({
-      id: project.id, name: project.name, description: project.description || "",
-      minecraftVersion: project.minecraftVersion, modLoader: project.modLoader, javaMajor: project.javaMajor,
-      manifestConfigured: Boolean(asTrimmedText(project.modpack.manifestUrl) || asTrimmedText(process.env.BETTERLAUNCHER_MODPACK_MANIFEST_URL)),
-      minecraftDirectory: getProjectDirectory(app.getPath("userData"), project.id),
-      discordUrl: project.discordUrl || ""
-    })),
-    javaMajor: getProjectJavaMajor(),
-    legacyMinecraftDirectories: [LAUNCHER_USER_DATA_DIRECTORY, ...LEGACY_USER_DATA_DIRECTORY_CANDIDATES].map((name) =>
-      path.join(app.getPath("appData"), name, "minecraft")),
-    username: asTrimmedText(microsoftAccount?.name) || "Player",
-    version: getProjectMinecraftVersion(),
-    modLoader: getProjectModLoader(),
-    versionType: "release",
-    minecraftDirectory: getDefaultMinecraftDir(),
-    systemMinecraftDirectory: getSystemMinecraftDir(),
-    javaPath: "",
-    jvmArgs: DEFAULT_JVM_ARGS,
-    ramMin: 6144,
-    ramMax: 6144
-  };
+ipcMain.handle("launcher:get-defaults", (_event, payload = {}) => {
+  try {
+    const config = readLauncherConfig() || {};
+    const availableProjects = readProjects(config);
+    const project = availableProjects.length ? resolveProject(config, payload?.projectId) : null;
+    return {
+      projectId: project?.id || "",
+      projects: availableProjects.map((project) => ({
+        id: project.id, name: project.name, description: project.description || "",
+        minecraftVersion: project.minecraftVersion, modLoader: project.modLoader, javaMajor: project.javaMajor,
+        manifestConfigured: Boolean(asTrimmedText(project.modpack.manifestUrl) || asTrimmedText(process.env.BETTERLAUNCHER_MODPACK_MANIFEST_URL)),
+        minecraftDirectory: getProjectDirectory(app.getPath("userData"), project.id),
+        discordUrl: project.discordUrl || ""
+      })),
+      javaMajor: project?.javaMajor || 21,
+      username: asTrimmedText(microsoftAccount?.name) || "Player",
+      version: project?.minecraftVersion || "",
+      modLoader: project?.modLoader || "",
+      versionType: "release",
+      minecraftDirectory: project ? getProjectDirectory(app.getPath("userData"), project.id) : "",
+      systemMinecraftDirectory: getSystemMinecraftDir(),
+      javaPath: "",
+      jvmArgs: DEFAULT_JVM_ARGS,
+      ramMin: 6144,
+      ramMax: 6144
+    };
+  } catch (error) {
+    return { ok: false, error: String(error?.message || error) };
+  }
 });
 
 ipcMain.handle("launcher:get-auth-state", () => {

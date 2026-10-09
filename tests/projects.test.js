@@ -23,15 +23,15 @@ test("project directories reject traversal, Windows device names and duplicate i
     assert.throws(() => getProjectDirectory(path.resolve("userdata"), id), /Invalid/);
   }
   assert.throws(() => readProjects({ projects: [{ id: "same" }, { id: "same" }] }), /Duplicate/);
-  assert.throws(() => readProjects({ projects: [] }), /at least one/);
+  assert.equal(readProjects({ projects: [] }).length, 0);
   assert.throws(() => readProjects({ projects: [{ id: "test", modLoader: "forge" }] }), /Unsupported mod loader/);
 });
 
-test("legacy configuration keeps BetterMon identity without a GitHub default source", () => {
-  const projects = readProjects({ modpack: { manifestUrl: "https://example.test/latest.json" } });
-  assert.equal(projects[0].id, "bettermon");
-  assert.equal(projects[0].modpack.manifestUrl, "https://example.test/latest.json");
-  assert.equal(projects[0].modpack.githubRepository, undefined);
+test("empty catalogs do not import a legacy BetterMon project", () => {
+  assert.deepEqual(readProjects({}), []);
+  assert.deepEqual(readProjects({ projects: [] }), []);
+  assert.deepEqual(readProjects({ modpack: { manifestUrl: "https://example.test/latest.json" } }), []);
+  assert.throws(() => resolveProject({ projects: [] }), /No modpack projects/);
 });
 
 test("Java defaults follow the Minecraft runtime boundary", () => {

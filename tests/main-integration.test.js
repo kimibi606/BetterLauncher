@@ -163,7 +163,7 @@ test("distribution migration and updates preserve player preferences", async (t)
   assert.equal(await fs.promises.readFile(path.join(defaults.minecraftDirectory, "options.txt"), "utf8"), "player-controls");
 });
 
-test("legacy auth/session/BetterMon installation migrates even when Electron created the new data directory", async (t) => {
+test("legacy auth/session migration excludes existing modpack installations", async (t) => {
   const { root, api, appPaths } = await setup(t);
   const oldRoot = path.join(root, ".bettermonlauncher");
   await fs.promises.mkdir(path.join(oldRoot, "minecraft", ".bettermon"), { recursive: true });
@@ -174,7 +174,19 @@ test("legacy auth/session/BetterMon installation migrates even when Electron cre
   api.migrateLegacyUserDataIfNeeded();
   api.migrateLegacyStateLayoutIfNeeded();
   assert.equal(await fs.promises.readFile(path.join(appPaths.userData, "state", "auth", "microsoft_auth.json"), "utf8"), "cached-auth");
-  assert.equal(await fs.promises.readFile(path.join(appPaths.userData, "instances", "bettermon", "options.txt"), "utf8"), "player-preferences");
+  assert.equal(fs.existsSync(path.join(appPaths.userData, "instances", "bettermon")), false);
+  assert.equal(fs.existsSync(path.join(appPaths.userData, "minecraft")), false);
   assert.equal(fs.existsSync(path.join(appPaths.sessionData, "Local Storage")), true);
   assert.equal(fs.existsSync(path.join(oldRoot, "minecraft", "options.txt")), true);
+});
+
+test("an empty catalog returns usable launcher defaults and disables pack operations", async (t) => {
+  const { root } = await setup(t);
+  await fs.promises.writeFile(path.join(root, "modpack.config.json"), JSON.stringify({ projects: [] }));
+  const { handlers } = loadMain(root);
+  const defaults = await handlers.get("launcher:get-defaults")({}, {});
+  assert.equal(defaults.projectId, "");
+  assert.equal(defaults.projects.length, 0);
+  assert.equal(defaults.minecraftDirectory, "");
+  assert.equal((await handlers.get("launcher:check-modpack-update")({}, {})).ok, false);
 });

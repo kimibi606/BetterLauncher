@@ -1059,6 +1059,7 @@ async function refreshLauncherNews(options = {}) {
 }
 
 function startNewsPolling() {
+  if (!selectedProjectId) return;
   if (!newsList) {
     return;
   }
@@ -1193,6 +1194,7 @@ async function refreshPlayerCount() {
 }
 
 function startPlayerCountPolling() {
+  if (!selectedProjectId) return;
   if (!playerCountValue) {
     return;
   }
@@ -1277,6 +1279,7 @@ async function refreshModpackUpdateStatusInBackground() {
 }
 
 function startModpackUpdatePolling() {
+  if (!selectedProjectId) return;
   if (modpackUpdatePollTimer !== null) {
     window.clearInterval(modpackUpdatePollTimer);
   }
@@ -2111,7 +2114,7 @@ async function runStartupModpackSync() {
   }
   hasStartupModpackSyncRun = true;
   if (!projects.find((entry) => entry.id === selectedProjectId)?.manifestConfigured) {
-    setLaunchStatus("모드팩 배포 주소를 설정하면 설치하고 실행할 수 있습니다.");
+    setLaunchStatus(selectedProjectId ? "모드팩 배포 주소를 설정하면 설치하고 실행할 수 있습니다." : "등록된 모드팩이 없습니다.");
     return;
   }
 
@@ -2622,7 +2625,9 @@ async function initializeSettings(projectId = "") {
   } catch {
     defaults = null;
   }
-  if (!defaults?.projectId) throw new Error(defaults?.error || "모드팩 프로젝트 설정을 불러올 수 없습니다.");
+  if (!defaults || defaults.ok === false || !Array.isArray(defaults.projects)) {
+    throw new Error(defaults?.error || "모드팩 프로젝트 설정을 불러올 수 없습니다.");
+  }
   projects = Array.isArray(defaults.projects) ? defaults.projects : [];
   if (!projectId && !selectedProjectId) {
     let storedProjectId = "";
@@ -2658,11 +2663,6 @@ async function initializeSettings(projectId = "") {
   }
 
   launcherSettings = readStoredSettings();
-  if (selectedProjectId === "bettermon" && (defaults.legacyMinecraftDirectories || []).some((directory) =>
-    isSameDirectoryPath(launcherSettings.minecraftDirectory, directory))) {
-    launcherSettings.minecraftDirectory = launcherDefaults.minecraftDirectory;
-    launcherSettings.dataDirectory = launcherDefaults.minecraftDirectory;
-  }
   const systemMinecraftDirectory = asText(defaults?.systemMinecraftDirectory);
   if (isSameDirectoryPath(launcherSettings.minecraftDirectory, systemMinecraftDirectory)) {
     launcherSettings.minecraftDirectory = asText(launcherDefaults.minecraftDirectory);
@@ -2680,6 +2680,12 @@ async function initializeSettings(projectId = "") {
 function renderProjectPicker() {
   if (projectSelect) {
     projectSelect.replaceChildren();
+    if (projects.length === 0) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "등록된 모드팩 없음";
+      projectSelect.appendChild(option);
+    }
     for (const project of projects) {
       const option = document.createElement("option");
       option.value = project.id;
@@ -2689,6 +2695,7 @@ function renderProjectPicker() {
     projectSelect.value = selectedProjectId;
   }
   const project = projects.find((entry) => entry.id === selectedProjectId);
+  if (playerCountPanel) playerCountPanel.hidden = !project;
   if (projectDescription) {
     projectDescription.textContent = project
       ? `${project.minecraftVersion} · ${project.modLoader} · Java ${project.javaMajor}${project.description ? " — " + project.description : ""}${project.manifestConfigured ? "" : " · 배포 준비 중"}`

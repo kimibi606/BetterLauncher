@@ -10,4 +10,4 @@ Electron 기반 Minecraft 런처입니다. 여러 모드팩 프로젝트를 선�
 - 검증: `npm run check`, `npm test`
 - Windows 패키징: `npm run dist:win`
 
-[모드팩 프로젝트 등록과 무료 배포 안내](docs/modpack-distribution.md)를 참고하세요. BetterMon은 `https://example.invalid/private`을 사용합니다. 후속 배포는 `npm run modpack:deploy`로 진행합니다.
+[모드팩 프로젝트 등록과 무료 배포 안내](docs/modpack-distribution.md)를 참고하세요. 현재 등록된 모드팩은 없습니다. 기존 ExamplePack은 가져오지 않습니다. 새 모드팩을 등록한 뒤 `npm run modpack:deploy`로 배포합니다.
