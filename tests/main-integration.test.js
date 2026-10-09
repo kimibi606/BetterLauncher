@@ -190,6 +190,27 @@ test("legacy auth/session migration excludes existing modpack installations", as
   assert.equal(fs.existsSync(path.join(oldRoot, "minecraft", "options.txt")), true);
 });
 
+test("a migration marker created between check and write is never overwritten", async (t) => {
+  const { root, api, appPaths } = await setup(t);
+  const oldRoot = path.join(root, ".bettermonlauncher");
+  const marker = path.join(appPaths.userData, "state", "legacy-data-migrated.json");
+  await fs.promises.mkdir(oldRoot, { recursive: true });
+  await fs.promises.writeFile(path.join(oldRoot, "preferences.json"), "old-preferences");
+  const existsSync = fs.existsSync;
+  let injected = false;
+  fs.existsSync = (file) => {
+    if (file === marker && !injected) {
+      injected = true;
+      fs.mkdirSync(path.dirname(marker), { recursive: true });
+      fs.writeFileSync(marker, "created-by-another-instance", { flag: "wx" });
+      return false;
+    }
+    return existsSync(file);
+  };
+  try { api.migrateLegacyUserDataIfNeeded(); } finally { fs.existsSync = existsSync; }
+  assert.equal(await fs.promises.readFile(marker, "utf8"), "created-by-another-instance");
+});
+
 test("an empty catalog returns usable launcher defaults and disables pack operations", async (t) => {
   const { root } = await setup(t);
   await fs.promises.writeFile(path.join(root, "modpack.config.json"), JSON.stringify({ projects: [] }));

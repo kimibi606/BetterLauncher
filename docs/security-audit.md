@@ -21,6 +21,8 @@ BetterLauncher 0.4.2에 적용했습니다. 코드·Git 이력·의존성·GitHu
 
 앞으로 main과 PR에서 의존성 감사·회귀 테스트·비밀값 검사·CodeQL 검사를 수행합니다. 사용 가능한 액션은 GitHub 소유 액션으로 제한하고, 비공개 취약점 보고를 활성화했습니다.
 
+CodeQL의 SSRF·Fabric 메타데이터 저장·마커 생성 경고 3건은 DNS 검사·경로 검증·배타적 파일 생성과 회귀 테스트를 검토한 뒤 `mitigated`로 분류하고 근거를 GitHub에 남겼습니다. 검사 규칙을 비활성화하지 않았으며, 앞으로 바뀐 코드에서 새 경고를 확인할 수 있습니다.
+
 남은 항목은 Windows 코드 서명과 계정 소유자가 관리하는 GitHub·Cloudflare 다중 인증입니다. 개인용 인증 정보를 새로 발급하거나 폐기하지 않았으며, 공개 저장소는 자동 업데이트 배포에 필요한 상태로 유지했습니다.
 
 근거: [Electron 보안 지침](https://www.electronjs.org/docs/latest/tutorial/security), [GitHub Actions 보안 지침](https://docs.github.com/en/actions/reference/security/secure-use), [Wrangler 명령 주입 취약점](https://github.com/cloudflare/workers-sdk/security/advisories/GHSA-36p8-mvp6-cv38).

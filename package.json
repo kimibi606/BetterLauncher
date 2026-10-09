@@ -13,7 +13,7 @@
     "modpack:publish": "node scripts/publish-modpack-distribution.js",
     "test": "node --test tests/distribution.test.js tests/main-integration.test.js tests/projects.test.js tests/security.test.js",
     "modpack:build": "node scripts/build-modpack-distribution.js",
-    "modpack:deploy": "wrangler pages deploy distribution --project-name ExamplePack --branch main"
+    "modpack:deploy": "node scripts/deploy-modpacks.js"
   },
   "keywords": [
     "minecraft",
