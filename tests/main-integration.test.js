@@ -24,7 +24,7 @@ function loadMain(root, safeStorage) {
     __dirname: path.dirname(mainPath), process: { ...process, cwd: () => root },
     console, Buffer, URL, AbortSignal, fetch, setTimeout, clearTimeout, setInterval, clearInterval
   });
-  vm.runInContext(fs.readFileSync(mainPath, "utf8") + "\nglobalThis.testApi = { projectContext, getCurrentProject, readServerStatusConfig, buildAutoConnectTarget, buildProjectConnectionOptions, getModpackConfigCandidatePaths, isProjectFabricVersionId, migrateLegacyUserDataIfNeeded, migrateLegacyStateLayoutIfNeeded, verifyLaunchIntegrity };", context);
+  vm.runInContext(fs.readFileSync(mainPath, "utf8") + "\nglobalThis.testApi = { projectContext, getCurrentProject, readLauncherConfig, readGitHubReleaseConfig, isUpdaterEnabled, queryMinecraftServerStatus, readServerStatusConfig, buildAutoConnectTarget, buildProjectConnectionOptions, getModpackConfigCandidatePaths, isProjectFabricVersionId, migrateLegacyUserDataIfNeeded, migrateLegacyStateLayoutIfNeeded, verifyLaunchIntegrity };", context);
   const mainFrame = { url: pathToFileURL(path.join(path.dirname(mainPath), "src", "index.html")).href };
   const webContents = { mainFrame, send() {} };
   context.testWindow = { webContents, isDestroyed: () => false };
@@ -129,6 +129,26 @@ test("administrator catalogs isolate server targets from global environment and 
   assert.deepEqual(targets, ["alpha.example:25565", "beta.example:25566"]);
   vm.runInContext("require('electron').app.isPackaged = true", context);
   assert.deepEqual(Array.from(api.getModpackConfigCandidatePaths()), [path.join(path.dirname(mainPath), "modpack.config.json")]);
+});
+
+test("private operating config stays local and can disable packaged updates", async (t) => {
+  const { api, config, context, root } = await setup(t);
+  const privatePath = path.join(root, ".private", "modpack.config.json");
+  await fs.promises.mkdir(path.dirname(privatePath));
+  config.github = { owner: "example", repo: "launcher", enabled: false };
+  await fs.promises.writeFile(privatePath, JSON.stringify(config));
+  assert.equal(api.readLauncherConfig().__configPath, privatePath);
+  assert.equal(api.readGitHubReleaseConfig().configured, false);
+  vm.runInContext("require('electron').app.isPackaged = true; readLauncherConfig = () => ({ github: { enabled: false } });", context);
+  assert.equal(api.isUpdaterEnabled(), false);
+});
+
+test("server status never sends targets to third-party services", async (t) => {
+  const { api, context } = await setup(t);
+  vm.runInContext("queryMinecraftServerStatusDirect = async (host, port) => ({ address: host + ':' + port, online: false, playerNames: [] }); fetchWithTimeout = () => { throw new Error('external status query forbidden'); };", context);
+  const result = await api.queryMinecraftServerStatus("private.example", 25565);
+  assert.equal(result.address, "private.example:25565");
+  assert.equal(result.online, false);
 });
 
 test("mismatched manifest identity preserves installed files", async (t) => {

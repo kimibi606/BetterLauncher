@@ -1329,6 +1329,7 @@ function getModpackConfigCandidatePaths() {
     // Released catalogs are maintained by the administrator in the app bundle.
     candidates.push(path.join(__dirname, MODPACK_CONFIG_FILE));
   } else {
+    candidates.push(path.join(process.cwd(), ".private", MODPACK_CONFIG_FILE));
     candidates.push(path.join(process.cwd(), MODPACK_CONFIG_FILE));
     candidates.push(path.join(__dirname, MODPACK_CONFIG_FILE));
   }
@@ -1683,7 +1684,7 @@ function readGitHubReleaseConfig() {
     repo,
     apiBaseUrl: (apiBaseUrl || "https://api.github.com").replace(/\/+$/g, ""),
     timeoutMs,
-    configured: Boolean(owner && repo)
+    configured: githubConfig.enabled !== false && Boolean(owner && repo)
   };
 }
 
@@ -2229,12 +2230,6 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = SERVER_STATUS_TIM
   }, { allowHttpLoopback: !app.isPackaged });
 }
 
-function hasMeaningfulPlayerCapacity(serverStatus) {
-  const playersOnline = asNullableNonNegativeInteger(serverStatus?.playersOnline);
-  const playersMax = asNullableNonNegativeInteger(serverStatus?.playersMax);
-  return playersOnline !== null && playersMax !== null && playersMax > 0;
-}
-
 function writeMinecraftVarInt(value) {
   const bytes = [];
   let current = Number(value) >>> 0;
@@ -2412,155 +2407,9 @@ async function queryMinecraftServerStatusDirect(host, port) {
   });
 }
 
-async function queryMinecraftServerStatusFromMcStatus(host, port) {
-  const target = `${host}:${port}`;
-  const url = `https://api.mcstatus.io/v2/status/java/${encodeURIComponent(target)}`;
-  try {
-    const response = await fetchWithTimeout(url);
-    if (!response.ok) {
-      throw new Error(`Failed to query server status (${response.status}).`);
-    }
-
-    const parsed = await response.json();
-    return {
-      address: target,
-      online: typeof parsed?.online === "boolean" ? parsed.online : null,
-      playersOnline: asNullableNonNegativeInteger(parsed?.players?.online),
-      playersMax: asNullableNonNegativeInteger(parsed?.players?.max),
-      playerNames: extractPlayerNamesFromPlayersPayload(parsed?.players),
-      error: "",
-      source: "mcstatus.io"
-    };
-  } catch (error) {
-    return {
-      address: target,
-      online: null,
-      playersOnline: null,
-      playersMax: null,
-      playerNames: [],
-      error: String(error?.message || error),
-      source: "mcstatus.io"
-    };
-  }
-}
-
-async function queryMinecraftServerStatusFromMcsrvStat(host, port) {
-  const target = `${host}:${port}`;
-  const url = `https://api.mcsrvstat.us/3/${encodeURIComponent(target)}`;
-  try {
-    const response = await fetchWithTimeout(url);
-    if (!response.ok) {
-      throw new Error(`Failed to query fallback server status (${response.status}).`);
-    }
-
-    const parsed = await response.json();
-    return {
-      address: target,
-      online: typeof parsed?.online === "boolean" ? parsed.online : null,
-      playersOnline: asNullableNonNegativeInteger(parsed?.players?.online),
-      playersMax: asNullableNonNegativeInteger(parsed?.players?.max),
-      playerNames: extractPlayerNamesFromPlayersPayload(parsed?.players),
-      error: "",
-      source: "mcsrvstat.us"
-    };
-  } catch (error) {
-    return {
-      address: target,
-      online: null,
-      playersOnline: null,
-      playersMax: null,
-      playerNames: [],
-      error: String(error?.message || error),
-      source: "mcsrvstat.us"
-    };
-  }
-}
-
 async function queryMinecraftServerStatus(host, port) {
-  const directResult = await queryMinecraftServerStatusDirect(host, port);
-  if (directResult.online === true && hasMeaningfulPlayerCapacity(directResult)) {
-    const needsFallbackNames = !Array.isArray(directResult.playerNames) || directResult.playerNames.length === 0;
-    if (!needsFallbackNames) {
-      return directResult;
-    }
-
-    const fallbackResult = await queryMinecraftServerStatusFromMcsrvStat(host, port);
-    return {
-      ...directResult,
-      playerNames:
-        Array.isArray(fallbackResult.playerNames) && fallbackResult.playerNames.length > 0
-          ? fallbackResult.playerNames
-          : directResult.playerNames,
-      source: fallbackResult.online === true ? `${directResult.source}+${fallbackResult.source}` : directResult.source
-    };
-  }
-
-  const primaryResult = await queryMinecraftServerStatusFromMcStatus(host, port);
-  const shouldUseFallback =
-    primaryResult.online !== true ||
-    !hasMeaningfulPlayerCapacity(primaryResult) ||
-    !Array.isArray(primaryResult.playerNames) ||
-    primaryResult.playerNames.length === 0;
-  if (!shouldUseFallback) {
-    return primaryResult;
-  }
-
-  const fallbackResult = await queryMinecraftServerStatusFromMcsrvStat(host, port);
-
-  if (fallbackResult.online === true) {
-    return {
-      ...fallbackResult,
-      playersOnline:
-        fallbackResult.playersOnline !== null ? fallbackResult.playersOnline : primaryResult.playersOnline,
-      playersMax: fallbackResult.playersMax !== null ? fallbackResult.playersMax : primaryResult.playersMax,
-      playerNames:
-        Array.isArray(fallbackResult.playerNames) && fallbackResult.playerNames.length > 0
-          ? fallbackResult.playerNames
-          : Array.isArray(primaryResult.playerNames)
-            ? primaryResult.playerNames
-            : [],
-      error: ""
-    };
-  }
-
-  if (primaryResult.online === true) {
-    return primaryResult;
-  }
-
-  if (primaryResult.online === false && fallbackResult.online === null) {
-    return primaryResult;
-  }
-  if (fallbackResult.online === false && primaryResult.online === null) {
-    return fallbackResult;
-  }
-
-  const mergedError = [primaryResult.error, fallbackResult.error].filter(Boolean).join(" | ");
-  return {
-    address: directResult.address || primaryResult.address,
-    online: directResult.online ?? primaryResult.online ?? fallbackResult.online ?? null,
-    playersOnline:
-      directResult.playersOnline !== null
-        ? directResult.playersOnline
-        : primaryResult.playersOnline !== null
-          ? primaryResult.playersOnline
-          : fallbackResult.playersOnline,
-    playersMax:
-      directResult.playersMax !== null
-        ? directResult.playersMax
-        : primaryResult.playersMax !== null
-          ? primaryResult.playersMax
-          : fallbackResult.playersMax,
-    playerNames:
-      Array.isArray(directResult.playerNames) && directResult.playerNames.length > 0
-        ? directResult.playerNames
-        : Array.isArray(primaryResult.playerNames) && primaryResult.playerNames.length > 0
-        ? primaryResult.playerNames
-        : Array.isArray(fallbackResult.playerNames)
-          ? fallbackResult.playerNames
-          : [],
-    error: [directResult.error, mergedError].filter(Boolean).join(" | "),
-    source: directResult.source || primaryResult.source || fallbackResult.source || ""
-  };
+  // Private server targets must never be sent to a third-party status service.
+  return queryMinecraftServerStatusDirect(host, port);
 }
 
 async function queryMolangStatus(config) {
@@ -5064,6 +4913,7 @@ function patchUpdaterState(patch) {
 }
 
 function isUpdaterEnabled() {
+  if (readLauncherConfig()?.github?.enabled === false) return false;
   if (app.isPackaged) {
     return true;
   }
@@ -5307,7 +5157,7 @@ function setupAutoUpdater() {
   updaterState.currentVersion = app.getVersion();
 
   if (!updaterState.enabled) {
-    updaterState.message = "Auto updater is disabled in development mode.";
+    updaterState.message = "Auto updater is disabled for this launcher.";
     sendUpdaterState();
     return;
   }

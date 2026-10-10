@@ -9,7 +9,7 @@
       "modLoader": "fabric",
       "javaMajor": 21,
       "server": { "host": "skyblock.example", "port": 25565 },
-      "modpack": { "manifestUrl": "https://server.example/skyblock/latest.json" },
+      "modpack": { "manifestUrl": "https://YOUR_PROJECT.pages.dev/skyblock/latest.json" },
       "news": { "items": [] }
     },
     {
@@ -20,7 +20,7 @@
       "modLoader": "fabric",
       "javaMajor": 17,
       "server": { "host": "adventure.example", "port": 25566 },
-      "modpack": { "manifestUrl": "https://server.example/adventure/latest.json" },
+      "modpack": { "manifestUrl": "https://YOUR_PROJECT.pages.dev/adventure/latest.json" },
       "news": { "items": [] }
     }
   ],

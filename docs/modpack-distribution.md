@@ -1,10 +1,10 @@
 # BetterLauncher 모드팩 운영
 
-런처 업데이트는 [kimibi606/BetterLauncher](https://github.com/kimibi606/BetterLauncher)의 GitHub Releases를 사용합니다. 모드팩 배포 기반은 [Cloudflare Pages](https://server.example/)에 준비되어 있습니다. 현재 [ExamplePack](ExamplePack.md)가 등록되어 있습니다. 기존 ExamplePack은 등록하거나 가져오지 않습니다.
+운영 모드팩과 서버 정보는 Git에서 제외한 `.private/modpack.config.json`에 관리합니다. 저장소에 포함한 설정은 빈 목록이며 실제 운영값을 커밋하지 않습니다. 런처 자동 업데이트는 현재 비활성화되어 있습니다.
 
 ## 새 모드팩 등록
 
-관리자가 개발 과정에서 모드팩 이름·접속 서버·원본 파일을 준비한 뒤, `modpack.config.json`의 `projects` 배열에 프로젝트를 추가합니다. 사용자 화면은 등록된 목록을 선택하는 용도이며 모드팩 추가·삭제·서버 주소 편집 기능은 제공하지 않습니다. [관리자 설정 예시](../modpack.config.example.json)를 참고하세요. 다음은 두 프로젝트를 운영할 때의 예시이며, 원본 파일을 업로드하기 전에는 예시 주소에 manifest가 존재하지 않습니다. `.example` 서버 주소는 실제 서버 주소로 바꿔야 합니다.
+관리자가 개발 과정에서 모드팩 이름·접속 서버·원본 파일을 준비한 뒤, `.private/modpack.config.json`의 `projects` 배열에 프로젝트를 추가합니다. 사용자 화면은 등록된 목록을 선택하는 용도이며 모드팩 추가·삭제·서버 주소 편집 기능은 제공하지 않습니다. [관리자 설정 예시](../modpack.config.example.json)를 참고하세요. 다음은 두 프로젝트를 운영할 때의 예시이며, 원본 파일을 업로드하기 전에는 예시 주소에 manifest가 존재하지 않습니다. `.example` 서버 주소는 실제 서버 주소로 바꿔야 합니다.
 
 ```json
 {
@@ -18,7 +18,7 @@
       "javaMajor": 21,
       "server": { "host": "skyblock.example", "port": 25565 },
       "modpack": {
-        "manifestUrl": "https://server.example/skyblock/latest.json"
+        "manifestUrl": "https://YOUR_PROJECT.pages.dev/skyblock/latest.json"
       },
       "serverStatus": {},
       "news": { "items": [] }
@@ -31,7 +31,7 @@
       "javaMajor": 17,
       "server": { "host": "adventure.example", "port": 25566 },
       "modpack": {
-        "manifestUrl": "https://server.example/adventure/latest.json"
+        "manifestUrl": "https://YOUR_PROJECT.pages.dev/adventure/latest.json"
       },
       "serverStatus": {},
       "news": { "items": [] }
@@ -52,7 +52,7 @@
 - `loaderVersion`을 지정하면 특정 Fabric 버전을 사용합니다. 서버가 없는 프로젝트는 자동 서버 접속을 생략합니다.
 - 공지는 `news.items` 또는 `news.url`로 지정합니다.
 - 프로젝트가 없어도 런처와 로그인·설정을 사용할 수 있습니다. 게임 실행은 등록된 모드팩을 선택한 뒤 가능합니다.
-- 개발 실행은 프로젝트 루트의 `modpack.config.json`을 읽고, 설치된 런처는 앱에 포함된 관리자 설정만 읽습니다. 실행 파일 옆에 만든 설정으로 배포본의 목록을 바꿀 수 없습니다. 프로젝트 목록 또는 서버 주소를 수정했다면 변경된 설정을 포함한 새 런처 버전을 배포합니다. 모드팩 파일 자체의 업데이트는 기존처럼 Cloudflare에서 별도로 배포합니다.
+- 개발 실행은 `.private/modpack.config.json`을 먼저 읽습니다. 설치된 런처는 앱에 포함된 관리자 설정만 읽습니다. `npm run dist:private`로 운영 설정을 포함한 설치 파일을 로컬에서 만들고 지인에게 직접 전달하세요. `.private` 폴더와 그 안의 설치 파일은 Git·GitHub 릴리즈·Actions에 업로드하지 않습니다.
 
 Minecraft 1.20 이상은 Quick Play 인수를 사용하며, 이전 버전은 `--server`·`--port`를 사용합니다. [Minecraft 공식 1.20 변경 사항](https://feedback.minecraft.net/hc/en-us/articles/16499677456781-Minecraft-Java-Edition-1-20-Trails-Tales)에 따라 게임 버전별로 접속 인수를 생성합니다. 서버 설정이 없는 모드팩은 서버에 자동 접속하지 않고 게임을 실행합니다.
 
@@ -64,10 +64,11 @@ Minecraft 1.20 이상은 Quick Play 인수를 사용하며, 이전 버전은 `--
 npx wrangler@4.59.2 login --scopes account:read user:read pages:write
 npm run modpack:build -- --project skyblock --source "C:\Modpacks\Skyblock" --version 1.0.0
 npm run modpack:build -- --project adventure --source "C:\Modpacks\Adventure" --version 1.0.0
+$env:CLOUDFLARE_PAGES_PROJECT = "YOUR_PROJECT"
 npm run modpack:deploy
 ```
 
-Cloudflare 프로젝트 `ExamplePack`는 이미 만들어져 있으므로 다시 만들 필요가 없습니다. 등록한 프로젝트의 manifest 주소는 `https://server.example/<id>/latest.json`입니다. 모든 프로젝트를 포함한 `distribution` 폴더 전체를 업로드합니다.
+Pages 프로젝트는 관리자가 직접 만들고 `CLOUDFLARE_PAGES_PROJECT` 환경변수로 지정합니다. 계정이 여러 개면 `CLOUDFLARE_ACCOUNT_ID`도 지정합니다. 모든 프로젝트를 포함한 `distribution` 폴더 전체를 업로드합니다. 정적 호스팅은 공개 배포이므로 서버 주소·초대 링크·계정 정보를 업로드하지 마세요.
 
 [Cloudflare 무료 플랜 제한](https://developers.cloudflare.com/pages/platform/limits/)에 맞춰 파일당 25MiB, 전체 20,000개 파일을 검사합니다. 큰 파일은 20MiB 조각으로 나누고, 런처가 조각과 조립된 파일의 SHA-256을 검증합니다. Pages 정적 파일만 사용하며 R2·Workers 유료 구독은 필요하지 않습니다. [직접 업로드 문서](https://developers.cloudflare.com/pages/get-started/direct-upload/)를 참고하세요.
 
@@ -87,7 +88,7 @@ npm run modpack:build -- --project skyblock --source "C:\Modpacks\Skyblock" --ve
 
 ## 런처 릴리즈
 
-`package.json`과 `package-lock.json`의 버전을 올리고 소스를 push한 뒤 `v<버전>` 태그를 push하면 GitHub Actions가 검사·테스트·Windows 빌드·릴리즈 파일 업로드를 수행합니다.
+현재 저장소는 비공개이며 GitHub Actions와 공개 자동 업데이트를 중지했습니다. 지인용 설치 파일은 `npm run dist:private`로 생성합니다. 저장소의 빈 설정을 사용하는 일반 빌드에는 운영 모드팩이 포함되지 않습니다.
 
 - 프로그램·패키지·설치 파일 이름은 BetterLauncher입니다. Windows 설치 GUID는 기존 값을 유지합니다.
 - 새 모드팩 설치 위치는 `%APPDATA%\.betterlauncher\instances\<id>`입니다.

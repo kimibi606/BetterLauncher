@@ -173,22 +173,21 @@ app.whenReady().then(async () => {
   assert.equal(await js(win, "launcherSettings.gameWidth === 1600 && !('bgmVolume' in launcherSettings) && !('bgmMuted' in launcherSettings) && !('autoConnect' in launcherSettings)"), true);
   win.destroy();
 
-  // The administrator's real ExamplePack entry has its own calendar version and target.
+  // A synthetic calendar-version pack keeps UI tests independent of operating settings.
   const { readProjects, formatServerAddress } = require("../lib/projects");
-  catalog = readProjects(JSON.parse(fs.readFileSync(path.join(root, "modpack.config.json"), "utf8")))
-    .filter((project) => project.id === "ExamplePack")
+  catalog = readProjects({ projects: [{ id: "calendar", name: "Calendar", minecraftVersion: "26.3", modLoader: "fabric", javaMajor: 25, server: { host: "calendar.example", port: 25565 }, modpack: { manifestUrl: "https://cdn.example/calendar/latest.json" } }] })
     .map((project) => ({ ...project, serverAddress: formatServerAddress(project.server), manifestConfigured: Boolean(project.modpack.manifestUrl) }));
   calls.length = 0;
   win = await openWindow();
   assert.equal(await js(win, "projectCards.children.length"), 1);
-  assert.equal(await js(win, "projectCards.firstElementChild.querySelector('.project-card-name').textContent"), "ExamplePack");
-  await screenshot(win, "ExamplePack-selection");
+  assert.equal(await js(win, "projectCards.firstElementChild.querySelector('.project-card-name').textContent"), "Calendar");
+  await screenshot(win, "calendar-selection");
   await js(win, "projectCards.firstElementChild.click()");
   await waitFor(win, "hasConfirmedProject && !isProjectSwitching");
-  assert.equal(await js(win, "selectedProjectId"), "ExamplePack");
-  assert.equal(await js(win, "currentProjectServer.textContent"), "접속 서버 · server.example:25565");
+  assert.equal(await js(win, "selectedProjectId"), "calendar");
+  assert.equal(await js(win, "currentProjectServer.textContent"), "접속 서버 · calendar.example:25565");
   assert.match(await js(win, "projectDescription.textContent"), /26\.3.*Java 25/);
-  await screenshot(win, "ExamplePack");
+  await screenshot(win, "calendar");
   win.destroy();
 
   // Empty catalogs keep account and launcher update management accessible.

@@ -174,7 +174,9 @@ async function main() {
     console.log("npm run modpack:build -- --project <id> --source <directory> --version <version> [--output distribution] [--base-url https://name.pages.dev/] [--dry-run]\nBuilds static HTTP(S) distribution files. Upload the whole output directory using Cloudflare Pages Direct Upload.");
     return;
   }
-  const config = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "modpack.config.json"), "utf8"));
+  const root = path.join(__dirname, "..");
+  const privateConfig = path.join(root, ".private", "modpack.config.json");
+  const config = JSON.parse(fs.readFileSync(fs.existsSync(privateConfig) ? privateConfig : path.join(root, "modpack.config.json"), "utf8"));
   const result = await buildDistribution(args, config);
   if (args.dryRun) console.log(JSON.stringify(result.manifest, null, 2));
   else console.log(`Built ${result.manifest.id} ${result.manifest.version}: ${result.manifest.files.length} files\nManifest: ${result.manifestPath}\nUpload directory: ${result.output}`);

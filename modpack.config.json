@@ -1,22 +1,10 @@
 {
-  "defaultProject": "ExamplePack",
-  "projects": [
-    {
-      "id": "ExamplePack",
-      "name": "ExamplePack",
-      "description": "server.example",
-      "minecraftVersion": "26.3",
-      "modLoader": "fabric",
-      "loaderVersion": "0.19.5",
-      "javaMajor": 25,
-      "server": { "host": "server.example", "port": 25565 },
-      "modpack": { "manifestUrl": "https://example.invalid/private" },
-      "news": { "items": ["ExamplePack · Minecraft 26.3 · Fabric"] }
-    }
-  ],
+  "defaultProject": "",
+  "projects": [],
   "github": {
     "owner": "kimibi606",
     "repo": "BetterLauncher",
+    "enabled": false,
     "timeoutMs": 7000
   }
 }

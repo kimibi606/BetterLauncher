@@ -1,6 +1,6 @@
 {
   "name": "betterlauncher",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "Multi-project Minecraft launcher with independent modpack distribution.",
   "main": "main.js",
   "scripts": {
@@ -14,7 +14,8 @@
     "test": "node --test tests/distribution.test.js tests/main-integration.test.js tests/projects.test.js tests/security.test.js",
     "test:ui": "electron tests/renderer-flow.cjs",
     "modpack:build": "node scripts/build-modpack-distribution.js",
-    "modpack:deploy": "node scripts/deploy-modpacks.js"
+    "modpack:deploy": "node scripts/deploy-modpacks.js",
+    "dist:private": "node scripts/build-private-launcher.js"
   },
   "keywords": [
     "minecraft",

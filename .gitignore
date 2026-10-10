@@ -3,6 +3,7 @@ dist/
 distribution/
 modpacks/
 .deployment-source/
+.private/
 .wrangler/
 *.log
 reference/
