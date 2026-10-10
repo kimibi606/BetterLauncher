@@ -1,6 +1,7 @@
 node_modules/
 dist/
 distribution/
+modpacks/
 .deployment-source/
 .wrangler/
 *.log

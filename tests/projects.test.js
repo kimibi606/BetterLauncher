@@ -35,9 +35,9 @@ test("empty catalogs do not import a legacy BetterMon project", () => {
 });
 
 test("Java defaults follow the Minecraft runtime boundary", () => {
-  const versions = ["1.16.5", "1.20.1", "1.20.4", "1.20.5", "1.21.1"];
+  const versions = ["1.16.5", "1.20.1", "1.20.4", "1.20.5", "1.21.1", "26.1", "26.3"];
   const projects = readProjects({ projects: versions.map((minecraftVersion, index) => ({ id: `pack-${index}`, minecraftVersion })) });
-  assert.deepEqual(projects.map((project) => project.javaMajor), [8, 17, 17, 21, 21]);
+  assert.deepEqual(projects.map((project) => project.javaMajor), [8, 17, 17, 21, 21, 25, 25]);
 });
 
 test("project servers select their own address and the correct Minecraft connection arguments", () => {

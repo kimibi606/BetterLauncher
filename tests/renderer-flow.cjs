@@ -173,6 +173,24 @@ app.whenReady().then(async () => {
   assert.equal(await js(win, "launcherSettings.gameWidth === 1600 && !('bgmVolume' in launcherSettings) && !('bgmMuted' in launcherSettings) && !('autoConnect' in launcherSettings)"), true);
   win.destroy();
 
+  // The administrator's real ExamplePack entry has its own calendar version and target.
+  const { readProjects, formatServerAddress } = require("../lib/projects");
+  catalog = readProjects(JSON.parse(fs.readFileSync(path.join(root, "modpack.config.json"), "utf8")))
+    .filter((project) => project.id === "ExamplePack")
+    .map((project) => ({ ...project, serverAddress: formatServerAddress(project.server), manifestConfigured: Boolean(project.modpack.manifestUrl) }));
+  calls.length = 0;
+  win = await openWindow();
+  assert.equal(await js(win, "projectCards.children.length"), 1);
+  assert.equal(await js(win, "projectCards.firstElementChild.querySelector('.project-card-name').textContent"), "ExamplePack");
+  await screenshot(win, "ExamplePack-selection");
+  await js(win, "projectCards.firstElementChild.click()");
+  await waitFor(win, "hasConfirmedProject && !isProjectSwitching");
+  assert.equal(await js(win, "selectedProjectId"), "ExamplePack");
+  assert.equal(await js(win, "currentProjectServer.textContent"), "접속 서버 · server.example:25565");
+  assert.match(await js(win, "projectDescription.textContent"), /26\.3.*Java 25/);
+  await screenshot(win, "ExamplePack");
+  win.destroy();
+
   // Empty catalogs keep account and launcher update management accessible.
   catalog = [];
   calls.length = 0;

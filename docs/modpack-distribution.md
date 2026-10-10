@@ -1,6 +1,6 @@
 # BetterLauncher 모드팩 운영
 
-런처 업데이트는 [kimibi606/BetterLauncher](https://github.com/kimibi606/BetterLauncher)의 GitHub Releases를 사용합니다. 모드팩 배포 기반은 [Cloudflare Pages](https://server.example/)에 준비되어 있습니다. 기존 ExamplePack은 등록하거나 가져오지 않습니다. 현재 프로젝트 목록은 비어 있습니다.
+런처 업데이트는 [kimibi606/BetterLauncher](https://github.com/kimibi606/BetterLauncher)의 GitHub Releases를 사용합니다. 모드팩 배포 기반은 [Cloudflare Pages](https://server.example/)에 준비되어 있습니다. 현재 [ExamplePack](ExamplePack.md)가 등록되어 있습니다. 기존 ExamplePack은 등록하거나 가져오지 않습니다.
 
 ## 새 모드팩 등록
 

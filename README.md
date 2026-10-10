@@ -10,7 +10,7 @@ Electron 기반 Minecraft 런처입니다. 여러 모드팩 프로젝트를 선�
 - 검증: `npm run check`, `npm test`
 - Windows 패키징: `npm run dist:win`
 
-[모드팩 프로젝트 등록과 무료 배포 안내](docs/modpack-distribution.md)를 참고하세요. 현재 등록된 모드팩은 없습니다. 기존 ExamplePack은 가져오지 않습니다. 새 모드팩을 등록한 뒤 `npm run modpack:deploy`로 배포합니다.
+[모드팩 프로젝트 등록과 무료 배포 안내](docs/modpack-distribution.md)를 참고하세요. 현재 [ExamplePack](docs/ExamplePack.md)가 등록되어 있으며 Minecraft 26.3·Fabric으로 `server.example:25565`에 접속합니다. 기존 ExamplePack은 가져오지 않습니다.
 
 관리자가 개발 과정에서 `modpack.config.json`의 프로젝트 목록과 각 프로젝트의 `server.host`·`server.port`를 등록합니다. 사용자는 로그인 후 원하는 모드팩을 선택하고 게임을 시작하면 해당 서버로 접속합니다. 배포본은 앱에 포함된 목록만 사용합니다. [관리자 설정 예시](modpack.config.example.json)
 
