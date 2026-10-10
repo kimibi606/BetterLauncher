@@ -1,0 +1,28 @@
+{
+  "defaultProject": "skyblock",
+  "projects": [
+    {
+      "id": "skyblock",
+      "name": "Skyblock",
+      "description": "하늘섬에서 시작하는 모험",
+      "minecraftVersion": "1.21.1",
+      "modLoader": "fabric",
+      "javaMajor": 21,
+      "server": { "host": "skyblock.example", "port": 25565 },
+      "modpack": { "manifestUrl": "https://server.example/skyblock/latest.json" },
+      "news": { "items": [] }
+    },
+    {
+      "id": "adventure",
+      "name": "Adventure",
+      "description": "탐험과 제작을 즐기는 모드팩",
+      "minecraftVersion": "1.20.1",
+      "modLoader": "fabric",
+      "javaMajor": 17,
+      "server": { "host": "adventure.example", "port": 25566 },
+      "modpack": { "manifestUrl": "https://server.example/adventure/latest.json" },
+      "news": { "items": [] }
+    }
+  ],
+  "github": { "owner": "kimibi606", "repo": "BetterLauncher", "timeoutMs": 7000 }
+}

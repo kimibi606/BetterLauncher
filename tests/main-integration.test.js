@@ -24,7 +24,7 @@ function loadMain(root, safeStorage) {
     __dirname: path.dirname(mainPath), process: { ...process, cwd: () => root },
     console, Buffer, URL, AbortSignal, fetch, setTimeout, clearTimeout, setInterval, clearInterval
   });
-  vm.runInContext(fs.readFileSync(mainPath, "utf8") + "\nglobalThis.testApi = { projectContext, getCurrentProject, readServerStatusConfig, isProjectFabricVersionId, migrateLegacyUserDataIfNeeded, migrateLegacyStateLayoutIfNeeded, verifyLaunchIntegrity };", context);
+  vm.runInContext(fs.readFileSync(mainPath, "utf8") + "\nglobalThis.testApi = { projectContext, getCurrentProject, readServerStatusConfig, buildAutoConnectTarget, buildProjectConnectionOptions, getModpackConfigCandidatePaths, isProjectFabricVersionId, migrateLegacyUserDataIfNeeded, migrateLegacyStateLayoutIfNeeded, verifyLaunchIntegrity };", context);
   const mainFrame = { url: pathToFileURL(path.join(path.dirname(mainPath), "src", "index.html")).href };
   const webContents = { mainFrame, send() {} };
   context.testWindow = { webContents, isDestroyed: () => false };
@@ -104,6 +104,31 @@ test("project context isolates server/news configuration and exact Fabric versio
     assert.equal(api.isProjectFabricVersionId("fabric-loader-0.16.0:stream-1.21.1"), false);
   });
   assert.equal((await handlers.get("launcher:get-defaults")({}, { projectId: "missing" })).ok, false);
+});
+
+test("administrator catalogs isolate server targets from global environment and user payloads", async (t) => {
+  const { handlers, api, config, context, root } = await setup(t);
+  config.projects[0].server = { host: "alpha.example", port: 25565 };
+  config.projects[1].server = { host: "beta.example", port: 25566 };
+  await fs.promises.writeFile(path.join(root, "modpack.config.json"), JSON.stringify(config));
+  context.process.env = { ...context.process.env, BETTERLAUNCHER_SERVER_HOST: "wrong.example", BETTERMON_SERVER_PORT: "9999" };
+  const defaults = await Promise.all(config.projects.map((project) => handlers.get("launcher:get-defaults")({}, {
+    projectId: project.id, serverHost: "user.example", serverPort: 1234
+  })));
+  assert.deepEqual(defaults.map((entry) => entry.projects.find((project) => project.id === entry.projectId).serverAddress), ["alpha.example:25565", "beta.example:25566"]);
+  const targets = await Promise.all(config.projects.map((project) => api.projectContext.run(project, async () => {
+    await Promise.resolve();
+    const target = api.buildAutoConnectTarget();
+    const status = api.readServerStatusConfig();
+    const connection = api.buildProjectConnectionOptions(api.getCurrentProject());
+    assert.equal(status.host, target.host);
+    assert.equal(status.port, target.port);
+    assert.equal(connection.quickPlay.identifier, target.identifier);
+    return target.identifier;
+  })));
+  assert.deepEqual(targets, ["alpha.example:25565", "beta.example:25566"]);
+  vm.runInContext("require('electron').app.isPackaged = true", context);
+  assert.deepEqual(Array.from(api.getModpackConfigCandidatePaths()), [path.join(path.dirname(mainPath), "modpack.config.json")]);
 });
 
 test("mismatched manifest identity preserves installed files", async (t) => {

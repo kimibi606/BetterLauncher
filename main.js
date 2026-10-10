@@ -8,7 +8,7 @@ const { Readable } = require("stream");
 const { pipeline } = require("stream/promises");
 const { fileURLToPath, pathToFileURL } = require("url");
 const { AsyncLocalStorage } = require("async_hooks");
-const { readProjects, resolveProject, getProjectDirectory } = require("./lib/projects");
+const { readProjects, resolveProject, getProjectDirectory, getProjectServer, formatServerAddress, buildProjectConnectionOptions } = require("./lib/projects");
 const { downloadDistributionFile } = require("./lib/distribution-download");
 const { secureFetch } = require("./lib/secure-fetch");
 const { redactSensitiveText } = require("./lib/log-security");
@@ -1326,11 +1326,7 @@ async function getLocalFileFingerprint(filePath) {
 function getModpackConfigCandidatePaths() {
   const candidates = [];
   if (app.isPackaged) {
-    candidates.push(path.join(path.dirname(process.execPath), MODPACK_CONFIG_FILE));
-    candidates.push(path.join(app.getAppPath(), MODPACK_CONFIG_FILE));
-    if (process.resourcesPath) {
-      candidates.push(path.join(process.resourcesPath, MODPACK_CONFIG_FILE));
-    }
+    // Released catalogs are maintained by the administrator in the app bundle.
     candidates.push(path.join(__dirname, MODPACK_CONFIG_FILE));
   } else {
     candidates.push(path.join(process.cwd(), MODPACK_CONFIG_FILE));
@@ -2176,24 +2172,12 @@ function readServerStatusConfig() {
   const serverStatusConfig =
     config && config.serverStatus && typeof config.serverStatus === "object" ? config.serverStatus : {};
 
-  const envHost = asTrimmedText((process.env.BETTERLAUNCHER_SERVER_HOST || process.env.BETTERMON_SERVER_HOST) || (process.env.BETTERLAUNCHER_SERVER_ADDRESS || process.env.BETTERMON_SERVER_ADDRESS));
-  const envPort = asTrimmedText((process.env.BETTERLAUNCHER_SERVER_PORT || process.env.BETTERMON_SERVER_PORT));
   const envMolangUrl = asTrimmedText((process.env.BETTERLAUNCHER_MOLANG_STATUS_URL || process.env.BETTERMON_MOLANG_STATUS_URL));
   const envMolangField = asTrimmedText((process.env.BETTERLAUNCHER_MOLANG_FIELD || process.env.BETTERMON_MOLANG_FIELD));
   const envMolangOnlineField = asTrimmedText((process.env.BETTERLAUNCHER_MOLANG_ONLINE_FIELD || process.env.BETTERMON_MOLANG_ONLINE_FIELD));
   const envMolangOnlineValue = asTrimmedText((process.env.BETTERLAUNCHER_MOLANG_ONLINE_VALUE || process.env.BETTERMON_MOLANG_ONLINE_VALUE)).toLowerCase();
 
-  const host = asTrimmedText(
-    envHost ||
-      serverStatusConfig.host ||
-      serverStatusConfig.address ||
-      serverStatusConfig.ip ||
-      config?.serverHost ||
-      config?.serverAddress ||
-      config?.serverIp ||
-      ""
-  );
-  const port = asPortNumber(envPort || serverStatusConfig.port || config?.serverPort, 25565);
+  const { host, port } = getProjectServer(getCurrentProject());
   const molangUrl = asTrimmedText(
     envMolangUrl || serverStatusConfig.molangUrl || serverStatusConfig.molangStatusUrl || config?.molangStatusUrl
   );
@@ -2233,7 +2217,7 @@ function buildAutoConnectTarget() {
     ok: true,
     host,
     port,
-    identifier: `${host}:${port}`
+    identifier: formatServerAddress({ host, port })
   };
 }
 
@@ -7365,6 +7349,7 @@ handleLauncherIpc("launcher:get-defaults", (_event, payload = {}) => {
         minecraftVersion: project.minecraftVersion, modLoader: project.modLoader, javaMajor: project.javaMajor,
         manifestConfigured: Boolean(asTrimmedText(project.modpack.manifestUrl) || asTrimmedText(process.env.BETTERLAUNCHER_MODPACK_MANIFEST_URL)),
         minecraftDirectory: getProjectDirectory(app.getPath("userData"), project.id),
+        serverAddress: formatServerAddress(project.server),
         discordUrl: project.discordUrl || ""
       })),
       javaMajor: project?.javaMajor || 21,
@@ -7624,7 +7609,6 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
     const gameWidth = asIntegerInRange(payload?.gameWidth, 1280, 320, 7680);
     const gameHeight = asIntegerInRange(payload?.gameHeight, 720, 240, 4320);
     const fullscreen = Boolean(payload?.fullscreen);
-    const autoConnectEnabled = payload?.autoConnect !== false;
     const versionType = "release";
     const ramMin = asIntegerInRange(payload?.ramMin, 6144, 512, 262144);
     const ramMax = asIntegerInRange(payload?.ramMax, 6144, 512, 262144);
@@ -7895,13 +7879,13 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
     });
 
     try {
-      const autoConnectTarget = autoConnectEnabled ? buildAutoConnectTarget() : { ok: false, reason: "disabled" };
+      const autoConnectTarget = buildAutoConnectTarget();
       if (autoConnectTarget.ok) {
         sendLog({
           level: "info",
           message: `Auto-connect target: ${autoConnectTarget.identifier}`
         });
-      } else if (autoConnectEnabled) {
+      } else {
         sendLog({
           level: "warn",
           message: `Auto-connect disabled: ${autoConnectTarget.reason || "invalid server target"}`
@@ -7913,14 +7897,7 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
         root: minecraftDirectory,
         timeout: NETWORK_API_TIMEOUT_MS,
         version: launchVersionConfig,
-        ...(autoConnectTarget.ok
-          ? {
-              quickPlay: {
-                type: "multiplayer",
-                identifier: autoConnectTarget.identifier
-              }
-            }
-          : {}),
+        ...buildProjectConnectionOptions(getCurrentProject()),
         ...(customJvmArgs.length > 0 ? { customArgs: customJvmArgs } : {}),
         memory: {
           min: `${ramMin}M`,

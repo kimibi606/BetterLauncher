@@ -28,17 +28,12 @@ const NEWS_PANEL_EXPANDED_STORAGE_KEY = "bettermon.launcher.news.expanded.v1";
 const LOGIN_WAITING_ENTER_DELAY_MS = 220;
 const LOGIN_GATE_ENTER_DELAY_MS = 180;
 const MODPACK_PROGRESS_PATTERN = /\[Modpack\s+(\d+)\s*\/\s*(\d+)\]\s*(.*)/i;
-const LAUNCHER_BGM_DEFAULT_SOURCE = "./assets/audio/launcher_bgm.ogg";
-const LAUNCHER_BGM_GHOST_SOURCE = "./assets/audio/ghost_bgm.ogg";
-const LAUNCHER_BGM_GHOST_PROBABILITY = 0.01;
-const DEFAULT_LAUNCHER_BGM_VOLUME = 35;
 const DEFAULT_JVM_ARGS = "-XX:+UseZGC";
 
 const DEFAULT_SETTINGS = {
   gameWidth: 1280,
   gameHeight: 720,
   fullscreen: false,
-  autoConnect: true,
   launchDetached: false,
   minecraftDirectory: "",
   selectedProfile: "",
@@ -47,8 +42,6 @@ const DEFAULT_SETTINGS = {
   ramMin: JAVA_RAM_MIN_MB,
   ramMax: JAVA_RAM_MIN_MB,
   dataDirectory: "",
-  bgmVolume: DEFAULT_LAUNCHER_BGM_VOLUME,
-  bgmMuted: false
 };
 
 const loginScreen = document.getElementById("loginScreen");
@@ -79,9 +72,6 @@ const playerCountValue = document.getElementById("playerCountValue");
 const playerCountTooltip = document.getElementById("playerCountTooltip");
 const discordButton = document.getElementById("discordButton");
 const settingsButton = document.getElementById("settingsButton");
-const bgmToggleButton = document.getElementById("bgmToggleButton");
-const bgmVolumeSlider = document.getElementById("bgmVolumeSlider");
-const bgmVolumeValue = document.getElementById("bgmVolumeValue");
 const startLaunchButton = document.getElementById("startLaunchButton");
 const projectsScreen = document.getElementById("projectsScreen");
 const projectCards = document.getElementById("projectCards");
@@ -93,6 +83,8 @@ const projectsAccountButton = document.getElementById("projectsAccountButton");
 const projectsSettingsButton = document.getElementById("projectsSettingsButton");
 const changeProjectButton = document.getElementById("changeProjectButton");
 const currentProjectName = document.getElementById("currentProjectName");
+const currentProjectServer = document.getElementById("currentProjectServer");
+const externalMedia = document.getElementById("externalMedia");
 const projectDescription = document.getElementById("projectDescription");
 let projects = [];
 let selectedProjectId = "";
@@ -108,7 +100,6 @@ const settingsAccountList = document.getElementById("settingsAccountList");
 const settingsGameWidthInput = document.getElementById("settingsGameWidth");
 const settingsGameHeightInput = document.getElementById("settingsGameHeight");
 const settingsFullscreenInput = document.getElementById("settingsFullscreen");
-const settingsAutoConnectInput = document.getElementById("settingsAutoConnect");
 const settingsLaunchDetachedInput = document.getElementById("settingsLaunchDetached");
 const settingsMinecraftDirectoryInput = document.getElementById("settingsMinecraftDirectory");
 const settingsPickMinecraftDirectoryButton = document.getElementById("settingsPickMinecraftDirectory");
@@ -158,7 +149,6 @@ const SETTINGS_TEXT_INPUTS = {
 
 const SETTINGS_BOOLEAN_INPUTS = {
   fullscreen: settingsFullscreenInput,
-  autoConnect: settingsAutoConnectInput,
   launchDetached: settingsLaunchDetachedInput
 };
 
@@ -204,154 +194,10 @@ let isModpackUpdateCheckRunning = false;
 let updaterSnapshot = null;
 let githubReleaseSnapshot = null;
 let isGitHubReleaseRequestPending = false;
-let launcherBgmAudio = null;
-let launcherBgmRetryOnInteraction = false;
-let isLauncherBgmPlayPending = false;
-let hasLauncherBgmFallbackApplied = false;
-let launcherBgmSource =
-  Math.random() < LAUNCHER_BGM_GHOST_PROBABILITY ? LAUNCHER_BGM_GHOST_SOURCE : LAUNCHER_BGM_DEFAULT_SOURCE;
-
 function delay(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
-}
-
-function fallbackLauncherBgmSource() {
-  if (hasLauncherBgmFallbackApplied || launcherBgmSource === LAUNCHER_BGM_DEFAULT_SOURCE) {
-    return false;
-  }
-
-  hasLauncherBgmFallbackApplied = true;
-  launcherBgmSource = LAUNCHER_BGM_DEFAULT_SOURCE;
-  if (launcherBgmAudio) {
-    launcherBgmAudio.pause();
-    launcherBgmAudio.src = launcherBgmSource;
-    launcherBgmAudio.load();
-  }
-  return true;
-}
-
-function getNormalizedLauncherBgmVolume(value = launcherSettings?.bgmVolume) {
-  return asNumber(value, DEFAULT_LAUNCHER_BGM_VOLUME, 0, 100);
-}
-
-function isLauncherBgmMuted() {
-  return Boolean(launcherSettings?.bgmMuted) || getNormalizedLauncherBgmVolume() <= 0;
-}
-
-function shouldPlayLauncherBgm() {
-  if (document.hidden) {
-    return false;
-  }
-
-  if (isStartupOverlayVisible()) {
-    return false;
-  }
-
-  if (isLaunchRequestPending || isLauncherRunning) {
-    return false;
-  }
-
-  return ["projects", "launch", "settings"].includes(currentScreen) && !isLauncherBgmMuted();
-}
-
-function updateLauncherBgmControls() {
-  const volume = getNormalizedLauncherBgmVolume();
-  const muted = isLauncherBgmMuted();
-  const displayVolume = muted ? 0 : volume;
-
-  if (bgmVolumeSlider) {
-    bgmVolumeSlider.value = String(displayVolume);
-    bgmVolumeSlider.setAttribute("aria-valuenow", String(displayVolume));
-    bgmVolumeSlider.setAttribute("aria-valuetext", muted ? "음소거" : `${displayVolume}%`);
-    bgmVolumeSlider.style.setProperty("--bgm-volume-ratio", `${displayVolume}%`);
-  }
-
-  if (bgmVolumeValue) {
-    bgmVolumeValue.textContent = muted ? "OFF" : `${displayVolume}%`;
-  }
-
-  if (bgmToggleButton) {
-    bgmToggleButton.setAttribute("aria-pressed", muted ? "true" : "false");
-    bgmToggleButton.setAttribute("aria-label", muted ? "배경음 켜기" : "배경음 끄기");
-    bgmToggleButton.removeAttribute("title");
-    bgmToggleButton.classList.toggle("is-muted", muted);
-  }
-}
-
-function ensureLauncherBgmAudio() {
-  if (launcherBgmAudio) {
-    return launcherBgmAudio;
-  }
-
-  const audio = new Audio(launcherBgmSource);
-  audio.loop = true;
-  audio.preload = "auto";
-  audio.volume = getNormalizedLauncherBgmVolume() / 100;
-  audio.muted = Boolean(launcherSettings?.bgmMuted);
-  audio.addEventListener("error", () => {
-    if (fallbackLauncherBgmSource()) {
-      window.setTimeout(() => {
-        void startLauncherBgmPlayback();
-      }, 0);
-      return;
-    }
-    console.warn(`Launcher BGM failed to load: ${launcherBgmSource}`);
-  });
-
-  launcherBgmAudio = audio;
-  return audio;
-}
-
-async function startLauncherBgmPlayback() {
-  const audio = ensureLauncherBgmAudio();
-  audio.volume = getNormalizedLauncherBgmVolume() / 100;
-  audio.muted = Boolean(launcherSettings?.bgmMuted);
-
-  if (!shouldPlayLauncherBgm()) {
-    audio.pause();
-    return;
-  }
-
-  if (!audio.paused || isLauncherBgmPlayPending) {
-    return;
-  }
-
-  isLauncherBgmPlayPending = true;
-  try {
-    await audio.play();
-    launcherBgmRetryOnInteraction = false;
-  } catch (error) {
-    launcherBgmRetryOnInteraction = true;
-    console.warn(`Launcher BGM playback was blocked: ${String(error?.message || error)}`);
-  } finally {
-    isLauncherBgmPlayPending = false;
-  }
-}
-
-function retryLauncherBgmPlaybackOnInteraction() {
-  if (!launcherBgmRetryOnInteraction) {
-    return;
-  }
-  void startLauncherBgmPlayback();
-}
-
-function syncLauncherBgmPlayback() {
-  updateLauncherBgmControls();
-
-  const audio = ensureLauncherBgmAudio();
-  audio.volume = getNormalizedLauncherBgmVolume() / 100;
-  audio.muted = Boolean(launcherSettings?.bgmMuted);
-
-  if (!shouldPlayLauncherBgm()) {
-    if (!audio.paused) {
-      audio.pause();
-    }
-    return;
-  }
-
-  void startLauncherBgmPlayback();
 }
 
 function isElementVisible(key) {
@@ -435,7 +281,6 @@ function switchScreen(targetScreen) {
   }
 
   updateLoginWaitingState();
-  syncLauncherBgmPlayback();
 }
 
 function isLoginFlowActive() {
@@ -1590,7 +1435,6 @@ function normalizeSettings(raw, defaults = DEFAULT_SETTINGS) {
     gameWidth: asNumber(source.gameWidth, defaults.gameWidth, 320, 7680),
     gameHeight: asNumber(source.gameHeight, defaults.gameHeight, 240, 4320),
     fullscreen: asBoolean(source.fullscreen, defaults.fullscreen),
-    autoConnect: true,
     launchDetached: asBoolean(source.launchDetached, defaults.launchDetached),
     minecraftDirectory: asText(source.minecraftDirectory, defaults.minecraftDirectory),
     selectedProfile: "",
@@ -1599,8 +1443,6 @@ function normalizeSettings(raw, defaults = DEFAULT_SETTINGS) {
     ramMin: unifiedRamMb,
     ramMax: unifiedRamMb,
     dataDirectory: asText(source.dataDirectory, defaults.dataDirectory),
-    bgmVolume: getNormalizedLauncherBgmVolume(source.bgmVolume ?? defaults.bgmVolume),
-    bgmMuted: asBoolean(source.bgmMuted, defaults.bgmMuted)
   };
 
   return normalized;
@@ -2045,7 +1887,6 @@ function buildLaunchPayload() {
     gameWidth: Number(launcherSettings.gameWidth) || DEFAULT_SETTINGS.gameWidth,
     gameHeight: Number(launcherSettings.gameHeight) || DEFAULT_SETTINGS.gameHeight,
     fullscreen: Boolean(launcherSettings.fullscreen),
-    autoConnect: Boolean(launcherSettings.autoConnect),
     minecraftDirectory,
     gameDirectory: "",
     javaPath,
@@ -2198,7 +2039,6 @@ function applyLauncherState(nextState) {
   }
 
   updateLaunchButtonUi();
-  syncLauncherBgmPlayback();
 }
 
 async function runPendingModpackUpdate() {
@@ -2386,15 +2226,8 @@ function applySettingsToInputs(settings) {
     }
   }
 
-  if (settingsAutoConnectInput) {
-    settingsAutoConnectInput.checked = true;
-    settingsAutoConnectInput.disabled = true;
-  }
-
   syncJavaMemoryControls();
   updateJavaPathStatus();
-  updateLauncherBgmControls();
-  syncLauncherBgmPlayback();
 }
 
 function readSettingsFromInputs() {
@@ -2412,10 +2245,7 @@ function readSettingsFromInputs() {
     {
       ...textValues,
       ...booleanValues,
-      autoConnect: true,
       selectedProfile: settingsProfileSelect?.value,
-      bgmVolume: launcherSettings.bgmVolume,
-      bgmMuted: launcherSettings.bgmMuted
     },
     launcherDefaults
   );
@@ -2723,6 +2553,7 @@ function renderProjectPicker() {
       addText("strong", "project-card-name", project.name);
       addText("span", "project-card-description", project.description || "새로운 모험을 시작하세요.");
       addText("span", "project-card-runtime", `Minecraft ${project.minecraftVersion} · ${project.modLoader} · Java ${project.javaMajor}`);
+      addText("span", "project-card-server", project.serverAddress ? `접속 서버 · ${project.serverAddress}` : "서버 없이 플레이");
       addText("span", "project-card-action", project.manifestConfigured ? "선택하고 계속 →" : "배포를 준비하고 있어요");
       if (project.id === recentProjectId) {
         card.classList.add("is-recent");
@@ -2736,6 +2567,8 @@ function renderProjectPicker() {
   if (projectsStatus && !isProjectSwitching) projectsStatus.textContent = "";
   const project = projects.find((entry) => entry.id === selectedProjectId);
   if (currentProjectName) currentProjectName.textContent = project?.name || "모드팩을 선택하세요";
+  if (currentProjectServer) currentProjectServer.textContent = project?.serverAddress ? `접속 서버 · ${project.serverAddress}` : "서버 없이 플레이";
+  if (externalMedia) externalMedia.hidden = !project?.discordUrl;
   if (playerCountPanel) playerCountPanel.hidden = !project;
   if (projectDescription) {
     projectDescription.textContent = project
@@ -3335,45 +3168,6 @@ if (settingsProfileSelect) {
   });
 }
 
-bindClick(bgmToggleButton, () => {
-  const currentlyMuted = isLauncherBgmMuted();
-  const currentVolume = getNormalizedLauncherBgmVolume(launcherSettings.bgmVolume);
-  launcherSettings.bgmMuted = !currentlyMuted;
-  launcherSettings.bgmVolume = currentlyMuted
-    ? (currentVolume > 0 ? currentVolume : DEFAULT_LAUNCHER_BGM_VOLUME)
-    : currentVolume;
-  writeStoredSettings(launcherSettings);
-  syncLauncherBgmPlayback();
-});
-
-if (bgmVolumeSlider) {
-  bgmVolumeSlider.addEventListener("input", () => {
-    const nextVolume = getNormalizedLauncherBgmVolume(bgmVolumeSlider.value);
-    launcherSettings.bgmVolume = nextVolume;
-    launcherSettings.bgmMuted = nextVolume <= 0;
-    writeStoredSettings(launcherSettings);
-    syncLauncherBgmPlayback();
-  });
-
-  bgmVolumeSlider.addEventListener("dblclick", () => {
-    launcherSettings.bgmVolume = DEFAULT_LAUNCHER_BGM_VOLUME;
-    launcherSettings.bgmMuted = false;
-    writeStoredSettings(launcherSettings);
-    syncLauncherBgmPlayback();
-  });
-
-  bgmVolumeSlider.addEventListener("keydown", (event) => {
-    if (event.key !== "Home" && event.key !== "End") {
-      return;
-    }
-    event.preventDefault();
-    launcherSettings.bgmVolume = event.key === "Home" ? 0 : 100;
-    launcherSettings.bgmMuted = launcherSettings.bgmVolume <= 0;
-    writeStoredSettings(launcherSettings);
-    syncLauncherBgmPlayback();
-  });
-}
-
 bindClick(settingsUpdateActionButton, async () => {
   if (!window.launcherApi || typeof window.launcherApi.getUpdaterState !== "function") {
     return;
@@ -3426,9 +3220,6 @@ bindClick(settingsUpdateActionButton, async () => {
   }
   setSettingsStatus("런처가 최신 버전입니다.");
 });
-document.addEventListener("pointerdown", retryLauncherBgmPlaybackOnInteraction, { passive: true });
-document.addEventListener("keydown", retryLauncherBgmPlaybackOnInteraction);
-document.addEventListener("visibilitychange", syncLauncherBgmPlayback);
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && currentScreen === "launch" && isNewsPanelExpanded) {
     applyNewsPanelExpandedState(false);
@@ -3511,7 +3302,6 @@ Promise.resolve()
     setStartupProgress(STARTUP_COMPLETE_PROGRESS, "\uC2DC\uC791 \uC644\uB8CC.");
     await hideStartupOverlay();
     if (currentScreen === "projects") projectsHeading?.focus();
-    void startLauncherBgmPlayback();
   })
   .catch(async (error) => {
     const message = localizeStatusMessage(
@@ -3523,5 +3313,4 @@ Promise.resolve()
       projectsStatus.textContent = message;
     }
     await hideStartupOverlay();
-    void startLauncherBgmPlayback();
   });

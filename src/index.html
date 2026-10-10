@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://starlightskins.lunareclipse.studio https://mc-heads.net https://minotar.net; media-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none';"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://starlightskins.lunareclipse.studio https://mc-heads.net https://minotar.net; media-src 'none'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none';"
     />
     <title>BetterLauncher</title>
     <link rel="stylesheet" href="./styles.css" />
@@ -90,14 +90,14 @@
         <div class="projects-intro">
           <p class="projects-eyebrow">YOUR NEXT ADVENTURE</p>
           <h1 id="projectsHeading" tabindex="-1">어떤 모드팩으로 플레이할까요?</h1>
-          <p>모드팩을 선택한 뒤 게임을 시작하세요. 각 모드팩의 설치와 설정은 따로 보관됩니다.</p>
+          <p>관리자가 등록한 모드팩을 선택하세요. 게임을 시작하면 해당 모드팩의 서버로 접속합니다.</p>
         </div>
         <div class="projects-list-heading"><h2>모드팩</h2><span id="projectsCount">불러오는 중</span></div>
         <div id="projectCards" class="project-cards" aria-label="플레이할 모드팩"></div>
         <div id="projectsEmpty" class="projects-empty" hidden>
           <span class="projects-empty-symbol" aria-hidden="true">◇</span>
           <h2>아직 등록된 모드팩이 없습니다</h2>
-          <p>등록된 모드팩은 이곳에 표시됩니다.</p>
+          <p>관리자가 등록한 모드팩은 이곳에 표시됩니다.</p>
         </div>
         <p id="projectsStatus" class="projects-status" role="status" aria-live="polite">모드팩을 불러오는 중...</p>
         <footer class="projects-footer"><span>선택 → 준비 → 게임 시작</span><span>BetterLauncher</span></footer>
@@ -148,32 +148,7 @@
             </button>
           </div>
         </div>
-        <div class="mediaDivider" aria-hidden="true"></div>
         <div id="externalMedia">
-          <div class="mediaContainer bgm-control" id="bgmControl">
-            <div id="bgmPopover" class="bgm-popover" aria-label="배경음 볼륨 제어">
-              <input
-                id="bgmVolumeSlider"
-                class="bgm-volume-slider"
-                type="range"
-                min="0"
-                max="100"
-                step="1"
-                value="35"
-                aria-label="배경음 볼륨"
-              />
-              <span id="bgmVolumeValue" class="bgm-volume-value" aria-hidden="true">35%</span>
-            </div>
-            <button
-              id="bgmToggleButton"
-              class="mediaButton bgm-media-button"
-              type="button"
-              aria-label="배경음 끄기"
-              aria-pressed="false"
-            >
-              <span class="icon-mask icon-audio-mask" aria-hidden="true"></span>
-            </button>
-          </div>
           <div class="mediaContainer">
             <a id="discordButton" class="mediaURL" href="#" aria-label="디스코드" title="디스코드">
               <span class="icon-mask icon-discord-mask" aria-hidden="true"></span>
@@ -193,6 +168,7 @@
         <div class="current-project-heading"><span>선택한 모드팩</span><button id="changeProjectButton" type="button">모드팩 변경</button></div>
         <h2 id="currentProjectName"></h2>
         <p id="projectDescription" class="project-description" aria-live="polite"></p>
+        <p id="currentProjectServer" class="current-project-server" aria-live="polite"></p>
       </section>
 
       <section class="start-launch-area" aria-label="게임 실행">
@@ -309,7 +285,6 @@
                 </span>
               </label>
 
-              <input id="settingsAutoConnect" type="checkbox" checked disabled hidden />
 
               <label class="settings-minecraft-row settings-minecraft-toggle-row" for="settingsLaunchDetached">
                 <span class="settings-minecraft-toggle-text-group">
