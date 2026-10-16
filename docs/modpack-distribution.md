@@ -83,6 +83,7 @@ npm run modpack:build -- --project skyblock --source "C:\Modpacks\Skyblock" --ve
 현재 저장소는 비공개이며 GitHub Actions와 공개 자동 업데이트를 중지했습니다. 지인용 설치 파일은 `npm run dist:private`로 생성합니다. 저장소의 빈 설정을 사용하는 일반 빌드에는 운영 모드팩이 포함되지 않습니다.
 
 - 프로그램·패키지·설치 파일 이름은 BetterLauncher입니다. Windows 설치 GUID는 기존 값을 유지합니다.
+- 설치를 누르면 사용자별·전체 사용자 설치의 32비트·64비트 등록 정보에서 기존 BetterMonLauncher를 확인하고, 해당 앱의 제거 프로그램으로 교체합니다. 설치 마법사를 취소하면 기존 앱은 유지합니다. 제거 명령에는 데이터 보존 옵션을 전달하며, 제거 실패·잘못된 설치 경로·심볼릭 링크 경로는 새 설치를 중단합니다. 일반 BetterLauncher 재설치는 기존 업데이트 절차를 사용합니다.
 - 새 모드팩 설치 위치는 `%APPDATA%\.betterlauncher\instances\<id>`입니다.
 - 기존 로그인·런처 설정은 이어받을 수 있지만 기존 Minecraft·모드팩 설치 폴더는 자동으로 가져오지 않습니다. 기존 원본 폴더는 그대로 둡니다.
 - 기존 설치 폴더를 계속 사용하도록 모드팩 `id`를 유지합니다. 관리자가 기본 모드팩을 바꿀 때도 다른 모드팩이 사용하는 폴더나 식별자가 다른 manifest는 차단합니다.

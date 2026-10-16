@@ -1,6 +1,6 @@
 {
   "name": "betterlauncher",
-  "version": "0.4.12",
+  "version": "0.4.13",
   "description": "Single-modpack Minecraft launcher with independent modpack distribution.",
   "main": "main.js",
   "scripts": {
@@ -13,6 +13,7 @@
     "modpack:publish": "node scripts/publish-modpack-distribution.js",
     "test": "node --test tests/distribution.test.js tests/main-integration.test.js tests/projects.test.js tests/security.test.js tests/account-skin.test.js",
     "test:ui": "electron tests/renderer-flow.cjs",
+    "test:installer": "node scripts/test-installer-migration.js",
     "modpack:build": "node scripts/build-modpack-distribution.js",
     "modpack:deploy": "node scripts/deploy-modpacks.js",
     "dist:private": "node scripts/build-private-launcher.js",
@@ -89,6 +90,8 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
+      "include": "build/installer.nsh",
+      "deleteAppDataOnUninstall": false,
       "installerIcon": "src/assets/app-icon.ico",
       "uninstallerIcon": "src/assets/app-icon.ico",
       "installerHeaderIcon": "src/assets/app-icon.ico",

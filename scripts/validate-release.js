@@ -38,6 +38,14 @@ function main() {
   if (packageJson.name !== "betterlauncher" || packageJson.build?.productName !== "BetterLauncher") {
     fail("package name and product name must use BetterLauncher");
   }
+  if (packageJson.build?.nsis?.guid !== "0e192e02-a904-5be6-bca2-04cae62ae05b") {
+    fail("keep the original launcher installation GUID so Windows upgrades remain compatible");
+  }
+  if (packageJson.build?.nsis?.include !== "build/installer.nsh" ||
+      !fs.existsSync(path.join(projectRoot, "build", "installer.nsh")) ||
+      packageJson.build?.nsis?.deleteAppDataOnUninstall !== false) {
+    fail("Windows installers must include legacy migration and preserve application data");
+  }
   if (
     asText(config.github?.owner) !== asText(githubPublish.owner) ||
     asText(config.github?.repo) !== asText(githubPublish.repo)
