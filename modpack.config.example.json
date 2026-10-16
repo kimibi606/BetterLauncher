@@ -8,21 +8,22 @@
       "minecraftVersion": "1.21.1",
       "modLoader": "fabric",
       "javaMajor": 21,
-      "server": { "host": "skyblock.example", "port": 25565 },
-      "modpack": { "manifestUrl": "https://YOUR_PROJECT.pages.dev/skyblock/latest.json" },
-      "news": { "items": [] }
-    },
-    {
-      "id": "adventure",
-      "name": "Adventure",
-      "description": "탐험과 제작을 즐기는 모드팩",
-      "minecraftVersion": "1.20.1",
-      "modLoader": "fabric",
-      "javaMajor": 17,
-      "server": { "host": "adventure.example", "port": 25566 },
-      "modpack": { "manifestUrl": "https://YOUR_PROJECT.pages.dev/adventure/latest.json" },
-      "news": { "items": [] }
+      "server": {
+        "host": "skyblock.example",
+        "port": 25565
+      },
+      "modpack": {
+        "manifestUrl": "https://YOUR_PROJECT.pages.dev/skyblock/latest.json"
+      },
+      "news": {
+        "items": []
+      }
     }
   ],
-  "github": { "owner": "kimibi606", "repo": "BetterLauncher", "timeoutMs": 7000 }
+  "github": {
+    "owner": "kimibi606",
+    "repo": "BetterLauncher",
+    "timeoutMs": 7000,
+    "enabled": false
+  }
 }

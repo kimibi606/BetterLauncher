@@ -1,21 +1,22 @@
 {
   "name": "betterlauncher",
-  "version": "0.4.6",
-  "description": "Multi-project Minecraft launcher with independent modpack distribution.",
+  "version": "0.4.12",
+  "description": "Single-modpack Minecraft launcher with independent modpack distribution.",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "check": "node --check main.js && node --check preload.js && node --check src/renderer.js && node --check vendor/request/index.js && node --check lib/secure-fetch.js && node --check lib/log-security.js && node --check vendor/request/network-security.js && node --check lib/projects.js && node --check lib/distribution-download.js && node --check scripts/publish-modpack-distribution.js && node --check scripts/build-modpack-distribution.js && node scripts/validate-release.js",
+    "check": "node --check main.js && node --check preload.js && node --check src/renderer.js && node --check src/skin-model.js && node --check src/skin-model-fallback.js && node --check lib/account-skin.js && node --check vendor/request/index.js && node --check lib/secure-fetch.js && node --check lib/log-security.js && node --check vendor/request/network-security.js && node --check lib/projects.js && node --check lib/distribution-download.js && node --check scripts/publish-modpack-distribution.js && node --check scripts/build-modpack-distribution.js && node scripts/validate-release.js && node scripts/sync-skin-renderer.js --check",
     "dist": "electron-builder build",
     "dist:win": "electron-builder build --win nsis",
     "dist:dir": "electron-builder build --dir",
     "release:github": "npm run check && npm run dist:dir && node scripts/write-app-update-config.js && electron-builder build --prepackaged dist/win-unpacked --win nsis --publish never",
     "modpack:publish": "node scripts/publish-modpack-distribution.js",
-    "test": "node --test tests/distribution.test.js tests/main-integration.test.js tests/projects.test.js tests/security.test.js",
+    "test": "node --test tests/distribution.test.js tests/main-integration.test.js tests/projects.test.js tests/security.test.js tests/account-skin.test.js",
     "test:ui": "electron tests/renderer-flow.cjs",
     "modpack:build": "node scripts/build-modpack-distribution.js",
     "modpack:deploy": "node scripts/deploy-modpacks.js",
-    "dist:private": "node scripts/build-private-launcher.js"
+    "dist:private": "node scripts/build-private-launcher.js",
+    "vendor:skin": "node scripts/sync-skin-renderer.js"
   },
   "keywords": [
     "minecraft",
@@ -33,6 +34,7 @@
   "devDependencies": {
     "electron": "^43.7.9",
     "electron-builder": "^26.17.0",
+    "skinview3d": "3.4.2",
     "wrangler": "4.59.2"
   },
   "overrides": {

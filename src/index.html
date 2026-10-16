@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://starlightskins.lunareclipse.studio https://mc-heads.net https://minotar.net; media-src 'none'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none';"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'none'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none';"
     />
     <title>BetterLauncher</title>
     <link rel="stylesheet" href="./styles.css" />
@@ -75,35 +75,6 @@
       </div>
     </section>
 
-    <section id="projectsScreen" class="app-screen projects-screen" aria-hidden="true">
-      <div class="projects-shell">
-        <header class="projects-header">
-          <div class="projects-brand">
-            <img src="./assets/app-icon.png" alt="" />
-            <span>BetterLauncher</span>
-          </div>
-          <div class="projects-header-actions">
-            <button id="projectsAccountButton" type="button" class="projects-toolbar-button">계정 관리</button>
-            <button id="projectsSettingsButton" type="button" class="projects-toolbar-button">설정 / 업데이트</button>
-          </div>
-        </header>
-        <div class="projects-intro">
-          <p class="projects-eyebrow">YOUR NEXT ADVENTURE</p>
-          <h1 id="projectsHeading" tabindex="-1">어떤 모드팩으로 플레이할까요?</h1>
-          <p>관리자가 등록한 모드팩을 선택하세요. 게임을 시작하면 해당 모드팩의 서버로 접속합니다.</p>
-        </div>
-        <div class="projects-list-heading"><h2>모드팩</h2><span id="projectsCount">불러오는 중</span></div>
-        <div id="projectCards" class="project-cards" aria-label="플레이할 모드팩"></div>
-        <div id="projectsEmpty" class="projects-empty" hidden>
-          <span class="projects-empty-symbol" aria-hidden="true">◇</span>
-          <h2>아직 등록된 모드팩이 없습니다</h2>
-          <p>관리자가 등록한 모드팩은 이곳에 표시됩니다.</p>
-        </div>
-        <p id="projectsStatus" class="projects-status" role="status" aria-live="polite">모드팩을 불러오는 중...</p>
-        <footer class="projects-footer"><span>선택 → 준비 → 게임 시작</span><span>BetterLauncher</span></footer>
-      </div>
-    </section>
-
     <section id="launchScreen" class="app-screen launch-screen" aria-hidden="true">
       <section
         id="accountModelPanel"
@@ -113,11 +84,13 @@
         tabindex="0"
         hidden
       >
-        <img id="accountModelImage" class="account-model-image" src="./assets/app-icon.png" alt="계정 모델" />
+        <div class="account-model-box">
+          <img id="accountModelImage" class="account-model-image" src="./assets/default-skin.svg" alt="계정 스킨" />
+          <span id="accountModelTooltip" class="account-model-tooltip">관리</span>
+        </div>
         <div class="account-model-meta">
           <p id="accountModelName" class="account-model-name">플레이어</p>
         </div>
-        <span id="accountModelTooltip" class="account-model-tooltip">관리</span>
       </section>
 
       <section id="newsPanel" class="news-panel" aria-label="뉴스 및 업데이트 노트">
@@ -162,13 +135,6 @@
         <span class="player-count-label">접속 인원</span>
         <span id="playerCountValue" class="player-count-value">확인 중...</span>
         <span id="playerCountTooltip" class="player-count-tooltip" aria-hidden="true"></span>
-      </section>
-
-      <section class="project-picker" aria-label="선택한 모드팩">
-        <div class="current-project-heading"><span>선택한 모드팩</span><button id="changeProjectButton" type="button">모드팩 변경</button></div>
-        <h2 id="currentProjectName"></h2>
-        <p id="projectDescription" class="project-description" aria-live="polite"></p>
-        <p id="currentProjectServer" class="current-project-server" aria-live="polite"></p>
       </section>
 
       <section class="start-launch-area" aria-label="게임 실행">
@@ -346,7 +312,7 @@
                   <button id="settingsPickJavaPath" type="button" class="secondary">파일 선택</button>
                 </div>
                 <p class="settings-java-note">
-                  게임 실행 전에 Java 실행 파일의 유효성을 검사합니다. 선택한 모드팩에 맞는 64비트 Java가 필요합니다.
+                  게임 실행 전에 Java 실행 파일의 유효성을 검사합니다. 이 모드팩에 맞는 64비트 Java가 필요합니다.
                   <br />
                   Java 실행 파일의 경로는 보통 <code>bin/javaw.exe</code>로 끝나야 합니다.
                 </p>
@@ -471,6 +437,10 @@
       </div>
     </section>
 
+    <script src="../lib/log-security.js"></script>
+    <script src="./vendor/skinview3d.bundle.js"></script>
+    <script src="./skin-model-fallback.js"></script>
+    <script src="./skin-model.js"></script>
     <script src="./renderer.js"></script>
   </body>
 </html>

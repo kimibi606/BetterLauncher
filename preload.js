@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("launcherApi", {
   getDefaults: (payload) => ipcRenderer.invoke("launcher:get-defaults", payload),
   getAuthState: () => ipcRenderer.invoke("launcher:get-auth-state"),
+  getAccountSkin: (uuid) => ipcRenderer.invoke("launcher:get-account-skin", { uuid }),
   getSystemProfile: () => ipcRenderer.invoke("launcher:get-system-profile"),
   getServerStatus: (payload) => ipcRenderer.invoke("launcher:get-server-status", payload),
   getNews: (payload) => ipcRenderer.invoke("launcher:get-news", payload),

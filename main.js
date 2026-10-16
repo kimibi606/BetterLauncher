@@ -11,7 +11,9 @@ const { AsyncLocalStorage } = require("async_hooks");
 const { readProjects, resolveProject, getProjectDirectory, getProjectServer, formatServerAddress, buildProjectConnectionOptions } = require("./lib/projects");
 const { downloadDistributionFile } = require("./lib/distribution-download");
 const { secureFetch } = require("./lib/secure-fetch");
-const { redactSensitiveText } = require("./lib/log-security");
+const { redactPrivateDiagnostics, sanitizeDiagnosticPayload } = require("./lib/log-security");
+const { normalizeSkinUuid, createAccountSkinService } = require("./lib/account-skin");
+const accountSkinService = createAccountSkinService();
 const projectContext = new AsyncLocalStorage();
 
 const { app, BrowserWindow, dialog, ipcMain, screen, session, shell, safeStorage } = require("electron");
@@ -169,7 +171,7 @@ function withMainWindow(callback) {
 
 function sendToRenderer(channel, payload) {
   withMainWindow((win) => {
-    win.webContents.send(channel, payload);
+    win.webContents.send(channel, sanitizeDiagnosticPayload(payload, sanitizeLauncherDiagnosticText));
   });
 }
 
@@ -1864,7 +1866,14 @@ function isTrustedLauncherIpc(event) {
 function handleLauncherIpc(channel, callback) {
   ipcMain.handle(channel, (event, ...args) => {
     if (!isTrustedLauncherIpc(event)) throw new Error("Untrusted launcher IPC sender.");
-    return callback(event, ...args);
+    const sanitize = value => sanitizeDiagnosticPayload(value, sanitizeLauncherDiagnosticText);
+    const failure = error => ({ ok: false, error: sanitizeLauncherDiagnosticText(error?.message || error) });
+    try {
+      const result = callback(event, ...args);
+      return result && typeof result.then === "function" ? result.then(sanitize, failure) : sanitize(result);
+    } catch (error) {
+      return failure(error);
+    }
   });
 }
 
@@ -2500,11 +2509,14 @@ async function getLauncherServerStatusSnapshot() {
     configured: hasAnyConfig,
     hasServerTarget,
     updatedAt: new Date().toISOString(),
-    config: {
-      host: config.host,
-      port: config.port
-    },
-    server: serverStatus
+    // The renderer only needs counts and valid player names, never connection
+    // targets, DNS/socket errors, player UUIDs or arbitrary server payloads.
+    server: {
+      online: serverStatus.online,
+      playersOnline: serverStatus.playersOnline,
+      playersMax: serverStatus.playersMax,
+      playerNames: (serverStatus.playerNames || []).filter(name => /^[A-Za-z0-9_]{1,16}$/.test(name)).slice(0, 40)
+    }
   };
 }
 
@@ -4880,11 +4892,33 @@ function getMicrosoftStatus() {
   };
 }
 
-function sendLog(payload) {
+function sanitizeLauncherDiagnosticText(value) {
   const secrets = [microsoftAccount?.access_token, microsoftAccount?.refreshToken,
     microsoftAccount?.microsoftAccessToken, microsoftAccount?.meta?.refresh,
+    microsoftAccount?.uuid, microsoftAccount?.name,
     process.env.BETTERLAUNCHER_GITHUB_TOKEN, process.env.BETTERMON_GITHUB_TOKEN, process.env.GITHUB_TOKEN];
-  sendToRenderer("launcher:log", { ...payload, message: redactSensitiveText(payload?.message, secrets) });
+  const collect = object => {
+    for (const [key, entry] of Object.entries(object || {})) {
+      if (typeof entry === "string" && /host|address|ip$|url|path|source|token|secret|password/i.test(key)) secrets.push(entry);
+      else if (entry && typeof entry === "object") collect(entry);
+    }
+  };
+  // Use the cached config: reading it here could recurse while reporting an
+  // invalid configuration. Generic address/path filtering also covers failures
+  // before a valid configuration has been loaded.
+  collect(cachedModpackConfigValue);
+  collect(projectContext.getStore());
+  for (const [key, entry] of Object.entries(process.env)) {
+    if (/^(?:BETTERLAUNCHER_|BETTERMON_).*(?:HOST|URL|PATH|SOURCE|TOKEN|SECRET|PASSWORD)/.test(key)) secrets.push(entry);
+  }
+  return redactPrivateDiagnostics(value, secrets);
+}
+
+function sendLog(payload) {
+  // Raw game output can contain chat, user properties and launch credentials.
+  // These streams are unused by the UI; only launcher status events are sent.
+  if (!["info", "warn", "error", "progress"].includes(payload?.level)) return;
+  sendToRenderer("launcher:log", { level: payload.level, message: payload.message });
 }
 
 function sendState(launching) {
@@ -5449,7 +5483,8 @@ function createMicrosoftLoginWindowOptions() {
       sandbox: true,
       webSecurity: true,
       allowRunningInsecureContent: false,
-      webviewTag: false
+      webviewTag: false,
+      devTools: !app.isPackaged
     }
   };
 
@@ -7084,7 +7119,8 @@ function createWindow() {
       sandbox: true,
       webSecurity: true,
       allowRunningInsecureContent: false,
-      webviewTag: false
+      webviewTag: false,
+      devTools: !app.isPackaged
     }
   });
   mainWindow.setAutoHideMenuBar(true);
@@ -7199,7 +7235,6 @@ handleLauncherIpc("launcher:get-defaults", (_event, payload = {}) => {
         minecraftVersion: project.minecraftVersion, modLoader: project.modLoader, javaMajor: project.javaMajor,
         manifestConfigured: Boolean(asTrimmedText(project.modpack.manifestUrl) || asTrimmedText(process.env.BETTERLAUNCHER_MODPACK_MANIFEST_URL)),
         minecraftDirectory: getProjectDirectory(app.getPath("userData"), project.id),
-        serverAddress: formatServerAddress(project.server),
         discordUrl: project.discordUrl || ""
       })),
       javaMajor: project?.javaMajor || 21,
@@ -7221,6 +7256,18 @@ handleLauncherIpc("launcher:get-defaults", (_event, payload = {}) => {
 
 handleLauncherIpc("launcher:get-auth-state", () => {
   return getMicrosoftStatus();
+});
+
+handleLauncherIpc("launcher:get-account-skin", async (_event, payload) => {
+  const uuid = normalizeSkinUuid(payload?.uuid);
+  const knownAccount = uuid && (uuid === normalizeSkinUuid(microsoftAccount?.uuid) ||
+    getMicrosoftAccountSummaries().some((account) => normalizeSkinUuid(account.uuid) === uuid));
+  if (!knownAccount) return { ok: false, error: "Skin account is not signed in or saved." };
+  try {
+    return await accountSkinService.get(uuid);
+  } catch {
+    return { ok: false, error: "스킨을 불러오지 못했습니다. 잠시 후 다시 시도합니다." };
+  }
 });
 
 handleLauncherIpc("launcher:get-system-profile", () => {
@@ -7733,7 +7780,7 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
       if (autoConnectTarget.ok) {
         sendLog({
           level: "info",
-          message: `Auto-connect target: ${autoConnectTarget.identifier}`
+          message: "Auto-connect is enabled."
         });
       } else {
         sendLog({

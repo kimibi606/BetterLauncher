@@ -115,7 +115,7 @@ test("administrator catalogs isolate server targets from global environment and 
   const defaults = await Promise.all(config.projects.map((project) => handlers.get("launcher:get-defaults")({}, {
     projectId: project.id, serverHost: "user.example", serverPort: 1234
   })));
-  assert.deepEqual(defaults.map((entry) => entry.projects.find((project) => project.id === entry.projectId).serverAddress), ["alpha.example:25565", "beta.example:25566"]);
+  assert.ok(defaults.every(entry => entry.projects.every(project => !("serverAddress" in project) && !("server" in project) && !("serverStatus" in project) && !("modpack" in project))));
   const targets = await Promise.all(config.projects.map((project) => api.projectContext.run(project, async () => {
     await Promise.resolve();
     const target = api.buildAutoConnectTarget();
@@ -143,12 +143,59 @@ test("private operating config stays local and can disable packaged updates", as
   assert.equal(api.isUpdaterEnabled(), false);
 });
 
+test("skin IPC only retrieves signed-in or saved accounts without exposing credentials", async (t) => {
+  const { handlers, context } = await setup(t);
+  const skin = handlers.get("launcher:get-account-skin");
+  assert.equal((await skin({}, { uuid: "a".repeat(32) })).ok, false);
+  vm.runInContext("microsoftAccount = { uuid: '0123456789abcdef0123456789abcdef', access_token: 'private-token' }; accountSkinService.get = async uuid => ({ ok: true, uuid, model: 'slim', textureDataUrl: 'fixture' });", context);
+  const result = await skin({}, { uuid: "01234567-89ab-cdef-0123-456789abcdef" });
+  assert.equal(result.ok, true);
+  assert.equal(result.model, "slim");
+  assert.equal(JSON.stringify(result).includes("private-token"), false);
+  assert.equal((await skin({}, { uuid: "https://evil.example/" })).ok, false);
+});
+
 test("server status never sends targets to third-party services", async (t) => {
   const { api, context } = await setup(t);
   vm.runInContext("queryMinecraftServerStatusDirect = async (host, port) => ({ address: host + ':' + port, online: false, playerNames: [] }); fetchWithTimeout = () => { throw new Error('external status query forbidden'); };", context);
   const result = await api.queryMinecraftServerStatus("private.example", 25565);
   assert.equal(result.address, "private.example:25565");
   assert.equal(result.online, false);
+});
+
+test("server status IPC excludes targets and raw errors in success and failure replies", async (t) => {
+  const { handlers, context } = await setup(t);
+  vm.runInContext("queryMinecraftServerStatus = async () => ({ address: 'alpha.test:25565', online: null, playersOnline: null, playersMax: null, playerNames: ['Friend_1', '203.0.113.42', 'alpha.test', '0123456789abcdef0123456789abcdef'], error: 'connect ECONNREFUSED 203.0.113.42:25565 alpha.test' });", context);
+  const status = await handlers.get("launcher:get-server-status")({}, { projectId: "alpha" });
+  assert.equal(status.ok, true);
+  assert.deepEqual(Array.from(status.server.playerNames), ["Friend_1"]);
+  assert.equal("config" in status, false);
+  assert.equal("address" in status.server, false);
+  assert.equal("error" in status.server, false);
+  assert.doesNotMatch(JSON.stringify(status), /alpha\.test|203\.0\.113\.42|25565/);
+  vm.runInContext("queryMinecraftServerStatus = async () => { throw new Error('connect alpha.test:25565 203.0.113.42:25565'); };", context);
+  const failure = await handlers.get("launcher:get-server-status")({}, { projectId: "alpha" });
+  assert.equal(failure.ok, false);
+  assert.doesNotMatch(failure.error, /alpha\.test|203\.0\.113\.42|25565/);
+});
+
+test("IPC and pushed diagnostics hide addresses, credentials and local paths while dropping raw game logs", async (t) => {
+  const { handlers, context, webContents } = await setup(t);
+  const messages = [];
+  webContents.send = (channel, payload) => messages.push({ channel, payload });
+  // Single-label LAN hosts need configuration-aware filtering as well as the
+  // generic URL, IPv4/IPv6 and domain filters.
+  vm.runInContext("cachedModpackConfigValue = { server: { host: 'lan' } }; microsoftAccount = { access_token: 'runtime-sensitive' };", context);
+  const sensitive = 'connect LAN:25565 203.0.113.42 [2001:db8::42]:25565 https://cdn.example/secret?sig=signed-secret C:\\Users\\Friend Name\\instance runtime-sensitive accessToken=game-secret';
+  context.diagnosticFixture = sensitive;
+  vm.runInContext("sendLog({ level: 'debug', message: diagnosticFixture }); sendLog({ level: 'game', message: 'private chat' }); sendLog({ level: 'error', message: diagnosticFixture, raw: diagnosticFixture }); patchUpdaterState({ lastError: diagnosticFixture });", context);
+  assert.equal(messages.filter(entry => entry.channel === "launcher:log").length, 1);
+  assert.equal("raw" in messages[0].payload, false);
+  const updater = await handlers.get("updater:get-state")({});
+  for (const output of [JSON.stringify(messages), JSON.stringify(updater)]) {
+    assert.doesNotMatch(output, /203\.0\.113\.42|2001:db8|cdn\.example|signed-secret|Friend Name|runtime-sensitive|game-secret|LAN/i);
+    assert.match(output, /REDACTED|PRIVATE/);
+  }
 });
 
 test("mismatched manifest identity preserves installed files", async (t) => {

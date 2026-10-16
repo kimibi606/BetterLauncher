@@ -23,7 +23,6 @@ const JAVA_RAM_MIN_MB = 6144;
 const JAVA_RAM_STEP_MB = 512;
 const JAVA_PATH_AUTO_SELECT_PLACEHOLDERS = new Set(["java", "java.exe", "javaw", "javaw.exe"]);
 const LEGACY_SETTINGS_STORAGE_KEY = "bettermon.launcher.settings.v1";
-const SELECTED_PROJECT_STORAGE_KEY = "betterlauncher.selected-project.v1";
 const NEWS_PANEL_EXPANDED_STORAGE_KEY = "bettermon.launcher.news.expanded.v1";
 const LOGIN_WAITING_ENTER_DELAY_MS = 220;
 const LOGIN_GATE_ENTER_DELAY_MS = 180;
@@ -73,24 +72,13 @@ const playerCountTooltip = document.getElementById("playerCountTooltip");
 const discordButton = document.getElementById("discordButton");
 const settingsButton = document.getElementById("settingsButton");
 const startLaunchButton = document.getElementById("startLaunchButton");
-const projectsScreen = document.getElementById("projectsScreen");
-const projectCards = document.getElementById("projectCards");
-const projectsEmpty = document.getElementById("projectsEmpty");
-const projectsCount = document.getElementById("projectsCount");
-const projectsStatus = document.getElementById("projectsStatus");
-const projectsHeading = document.getElementById("projectsHeading");
-const projectsAccountButton = document.getElementById("projectsAccountButton");
-const projectsSettingsButton = document.getElementById("projectsSettingsButton");
-const changeProjectButton = document.getElementById("changeProjectButton");
-const currentProjectName = document.getElementById("currentProjectName");
-const currentProjectServer = document.getElementById("currentProjectServer");
 const externalMedia = document.getElementById("externalMedia");
-const projectDescription = document.getElementById("projectDescription");
-let projects = [];
-let selectedProjectId = "";
-let recentProjectId = "";
-let isProjectSwitching = false;
-let hasConfirmedProject = false;
+let activeModpack = null;
+let activeProjectId = "";
+let isLauncherInitialized = false;
+let authSessionRevision = 0;
+let isModpackPreparing = false;
+let hasActiveModpack = false;
 const launchStatus = document.getElementById("launchStatus");
 const settingsCloseButton = document.getElementById("settingsCloseButton");
 const settingsDoneButton = document.getElementById("settingsDoneButton");
@@ -131,7 +119,6 @@ const settingsTabs = Array.from(document.querySelectorAll(".settings-tab"));
 
 const SCREEN_ELEMENTS = {
   login: loginScreen,
-  projects: projectsScreen,
   launch: launchScreen,
   settings: settingsScreen
 };
@@ -180,7 +167,6 @@ let startupProgressPercent = 0;
 let startupOverlayDismissed = false;
 let launchLogCaptureUntil = 0;
 let launchStartTimeoutId = null;
-let lastAccountModelKey = "";
 let newsRefreshMs = NEWS_REFRESH_DEFAULT_MS;
 let newsPollTimer = null;
 let isNewsRequestPending = false;
@@ -357,128 +343,91 @@ function normalizeMinecraftUuid(value) {
   return normalized;
 }
 
-function buildMinecraftBodyModelUrlCandidates(uuid, profileName = "") {
-  const safeUuid = normalizeMinecraftUuid(uuid);
-  const safeName = encodeURIComponent(asText(profileName));
-  const urls = [];
+const DEFAULT_SKIN_IMAGE = "./assets/default-skin.svg";
+const SKIN_CACHE_MS = 5 * 60 * 1000;
+const renderedSkinCache = new Map();
+const renderedSkinRequests = new Map();
+const skinImageStates = new WeakMap();
 
-  if (safeUuid) {
-    urls.push(`https://mc-heads.net/body/${safeUuid}/right`);
-    urls.push(`https://starlightskins.lunareclipse.studio/render/default/${safeUuid}/full?renderScale=3`);
-    urls.push(`https://minotar.net/body/${safeUuid}/256.png`);
-  }
+async function getRenderedAccountSkin(uuid) {
+  const saved = renderedSkinCache.get(uuid);
+  if (saved && saved.expiresAt > Date.now()) return saved.image;
+  if (renderedSkinRequests.has(uuid)) return renderedSkinRequests.get(uuid);
+  const request = (async () => {
+    let timer;
+    try {
+      const result = await Promise.race([
+        window.launcherApi.getAccountSkin(uuid),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Skin request timed out.")), 12000); })
+      ]);
+      if (!result?.ok || normalizeMinecraftUuid(result.uuid) !== uuid) throw new Error("Skin is unavailable.");
+      const image = result.textureDataUrl ? await window.minecraftSkinModel.render(result.textureDataUrl, result.model) : DEFAULT_SKIN_IMAGE;
+      renderedSkinCache.delete(uuid);
+      renderedSkinCache.set(uuid, { image, expiresAt: Date.now() + SKIN_CACHE_MS });
+      if (renderedSkinCache.size > 32) renderedSkinCache.delete(renderedSkinCache.keys().next().value);
+      return image;
+    } finally {
+      clearTimeout(timer);
+    }
+  })().finally(() => renderedSkinRequests.delete(uuid));
+  renderedSkinRequests.set(uuid, request);
+  return request;
+}
 
-  if (safeName) {
-    urls.push(`https://mc-heads.net/body/${safeName}/right`);
-    urls.push(`https://minotar.net/body/${safeName}/256.png`);
-  }
-
-  return urls;
+function resetMinecraftModelImage(imageElement) {
+  if (!imageElement) return;
+  const state = skinImageStates.get(imageElement);
+  if (state?.retryTimer) clearTimeout(state.retryTimer);
+  skinImageStates.delete(imageElement);
+  imageElement.onerror = null;
+  imageElement.src = DEFAULT_SKIN_IMAGE;
+  imageElement.dataset.skinState = "default";
 }
 
 function updateAccountModelUi() {
-  if (!accountModelPanel) {
-    return;
-  }
-
+  if (!accountModelPanel) return;
+  accountModelPanel.hidden = !authState.signedIn;
   if (!authState.signedIn) {
-    accountModelPanel.hidden = true;
-    lastAccountModelKey = "";
-    if (accountModelImage) {
-      accountModelImage.onerror = null;
-      accountModelImage.onload = null;
-      accountModelImage.src = "./assets/app-icon.png";
-      accountModelImage.alt = "\uB85C\uADF8\uC778 \uACC4\uC815 \uBAA8\uB378";
-    }
-    if (accountModelName) {
-      accountModelName.textContent = "\uB85C\uADF8\uC778 \uC548 \uB428";
-    }
+    resetMinecraftModelImage(accountModelImage);
+    if (accountModelName) accountModelName.textContent = "로그인 안 됨";
     return;
   }
-
-  const uuid = normalizeMinecraftUuid(authState.uuid);
-  const displayName = asText(authState.profileName, "\uD50C\uB808\uC774\uC5B4");
-  const modelKey = uuid || `name:${displayName.toLowerCase()}`;
-  accountModelPanel.hidden = false;
-
-  if (accountModelName) {
-    accountModelName.textContent = displayName;
-  }
-
-  if (!accountModelImage) {
-    return;
-  }
-
-  if (modelKey === lastAccountModelKey) {
-    return;
-  }
-
-  lastAccountModelKey = modelKey;
-  accountModelImage.alt = `${displayName} \uBAA8\uB378`;
-
-  const candidates = buildMinecraftBodyModelUrlCandidates(uuid, displayName);
-  if (candidates.length === 0) {
-    accountModelImage.onerror = null;
-    accountModelImage.onload = null;
-    accountModelImage.src = "./assets/app-icon.png";
-    return;
-  }
-
-  let candidateIndex = 0;
-  const tryNextCandidate = () => {
-    if (candidateIndex >= candidates.length) {
-      accountModelImage.onerror = null;
-      accountModelImage.src = "./assets/app-icon.png";
-      return;
-    }
-    accountModelImage.src = candidates[candidateIndex];
-    candidateIndex += 1;
-  };
-
-  accountModelImage.onerror = () => {
-    tryNextCandidate();
-  };
-  accountModelImage.onload = () => {
-    accountModelImage.onerror = null;
-  };
-  tryNextCandidate();
+  const displayName = asText(authState.profileName, "플레이어");
+  if (accountModelName) accountModelName.textContent = displayName;
+  void loadMinecraftModelImage(accountModelImage, authState.uuid, displayName);
 }
 
-function loadMinecraftModelImage(imageElement, uuidValue, profileNameValue) {
-  if (!imageElement) {
-    return;
-  }
-
+async function loadMinecraftModelImage(imageElement, uuidValue, profileNameValue) {
+  if (!imageElement) return;
   const uuid = normalizeMinecraftUuid(uuidValue);
   const displayName = asText(profileNameValue, "플레이어");
-  imageElement.alt = `${displayName} 모델`;
-
-  const candidates = buildMinecraftBodyModelUrlCandidates(uuid, displayName);
-  if (candidates.length === 0) {
-    imageElement.onerror = null;
-    imageElement.onload = null;
-    imageElement.src = "./assets/app-icon.png";
-    return;
+  imageElement.alt = displayName + " 스킨";
+  const previous = skinImageStates.get(imageElement);
+  if (previous?.uuid === uuid && (previous.loading || previous.loadedAt > Date.now() - SKIN_CACHE_MS)) return;
+  resetMinecraftModelImage(imageElement);
+  if (!uuid) return;
+  const state = { uuid, loading: true, loadedAt: 0, retryTimer: null };
+  skinImageStates.set(imageElement, state);
+  imageElement.dataset.skinState = "loading";
+  imageElement.title = "스킨 불러오는 중...";
+  const isCurrent = () => imageElement.isConnected && skinImageStates.get(imageElement) === state;
+  try {
+    const image = await getRenderedAccountSkin(uuid);
+    if (!isCurrent()) return;
+    state.loadedAt = Date.now();
+    imageElement.src = image;
+    imageElement.dataset.skinState = image === DEFAULT_SKIN_IMAGE ? "default" : "ready";
+    imageElement.title = displayName + " 스킨";
+  } catch {
+    if (!isCurrent()) return;
+    imageElement.dataset.skinState = "retry";
+    imageElement.title = "스킨을 불러오지 못했습니다. 잠시 후 다시 시도합니다.";
+    state.retryTimer = setTimeout(() => {
+      if (isCurrent()) void loadMinecraftModelImage(imageElement, uuid, displayName);
+    }, 30000);
+  } finally {
+    state.loading = false;
   }
-
-  let candidateIndex = 0;
-  const tryNextCandidate = () => {
-    if (candidateIndex >= candidates.length) {
-      imageElement.onerror = null;
-      imageElement.src = "./assets/app-icon.png";
-      return;
-    }
-    imageElement.src = candidates[candidateIndex];
-    candidateIndex += 1;
-  };
-
-  imageElement.onerror = () => {
-    tryNextCandidate();
-  };
-  imageElement.onload = () => {
-    imageElement.onerror = null;
-  };
-  tryNextCandidate();
 }
 
 function clampNewsRefreshMs(value, fallback = NEWS_REFRESH_DEFAULT_MS) {
@@ -892,10 +841,10 @@ async function refreshLauncherNews(options = {}) {
   }
 
   isNewsRequestPending = true;
-  const requestedProjectId = selectedProjectId;
+  const requestedProjectId = activeProjectId;
   try {
     const snapshot = await window.launcherApi.getNews({ forceRefresh, projectId: requestedProjectId });
-    if (requestedProjectId !== selectedProjectId) return false;
+    if (requestedProjectId !== activeProjectId) return false;
     const nextRefreshMs = clampNewsRefreshMs(snapshot?.refreshMs, newsRefreshMs);
     if (nextRefreshMs !== newsRefreshMs) {
       newsRefreshMs = nextRefreshMs;
@@ -906,7 +855,7 @@ async function refreshLauncherNews(options = {}) {
     applyLauncherNewsUi(snapshot, { forceRender });
     return !snapshot || snapshot.ok !== false;
   } catch {
-    if (requestedProjectId !== selectedProjectId) return false;
+    if (requestedProjectId !== activeProjectId) return false;
     setNewsBadgeText("\uC624\uD504\uB77C\uC778");
     return false;
   } finally {
@@ -915,7 +864,7 @@ async function refreshLauncherNews(options = {}) {
 }
 
 function startNewsPolling() {
-  if (!hasConfirmedProject || !selectedProjectId) return;
+  if (!hasActiveModpack || !activeProjectId) return;
   if (!newsList) {
     return;
   }
@@ -964,7 +913,7 @@ function setPlayerCountTooltip(text) {
 
 function buildPlayerListTooltip(server) {
   const names = Array.isArray(server?.playerNames)
-    ? server.playerNames.map((name) => asText(name)).filter(Boolean)
+    ? server.playerNames.map((name) => asText(name)).filter(name => /^[A-Za-z0-9_]{1,16}$/.test(name)).slice(0, 40)
     : [];
   const playersOnline = Number(server?.playersOnline);
   if (names.length === 0) {
@@ -986,7 +935,7 @@ function applyPlayerCountUi(snapshot) {
 
   if (!snapshot || snapshot.ok === false) {
     setPlayerCountText("\uD655\uC778 \uC2E4\uD328", true);
-    setPlayerCountTooltip(asText(snapshot?.error));
+    setPlayerCountTooltip("");
     return;
   }
 
@@ -1015,17 +964,18 @@ function applyPlayerCountUi(snapshot) {
 
   if (!snapshot?.hasServerTarget) {
     setPlayerCountText("\uC11C\uBC84 \uBBF8\uC124\uC815", true);
-    setPlayerCountTooltip(asText(server?.error));
+    setPlayerCountTooltip("");
     return;
   }
 
   setPlayerCountText("\uD655\uC778 \uC911...", false);
-  setPlayerCountTooltip(asText(server?.error));
+  setPlayerCountTooltip("");
 }
 
 async function refreshPlayerCount() {
   if (!window.launcherApi || typeof window.launcherApi.getServerStatus !== "function") {
     setPlayerCountText("\uD655\uC778 \uC2E4\uD328", true);
+    setPlayerCountTooltip("");
     return false;
   }
   if (isPlayerCountRequestPending) {
@@ -1033,16 +983,16 @@ async function refreshPlayerCount() {
   }
 
   isPlayerCountRequestPending = true;
-  const requestedProjectId = selectedProjectId;
+  const requestedProjectId = activeProjectId;
   try {
     const snapshot = await window.launcherApi.getServerStatus({ projectId: requestedProjectId });
-    if (requestedProjectId !== selectedProjectId) return false;
+    if (requestedProjectId !== activeProjectId) return false;
     applyPlayerCountUi(snapshot);
     return !snapshot || snapshot.ok !== false;
-  } catch (error) {
-    if (requestedProjectId !== selectedProjectId) return false;
+  } catch {
+    if (requestedProjectId !== activeProjectId) return false;
     setPlayerCountText("\uD655\uC778 \uC2E4\uD328", true);
-    setPlayerCountTooltip(String(error?.message || error));
+    setPlayerCountTooltip("");
     return false;
   } finally {
     isPlayerCountRequestPending = false;
@@ -1050,7 +1000,7 @@ async function refreshPlayerCount() {
 }
 
 function startPlayerCountPolling() {
-  if (!hasConfirmedProject || !selectedProjectId) return;
+  if (!hasActiveModpack || !activeProjectId) return;
   if (!playerCountValue) {
     return;
   }
@@ -1073,8 +1023,8 @@ function stopPlayerCountPolling() {
 }
 
 function canRunBackgroundModpackUpdateCheck() {
-  return hasConfirmedProject && !(
-    isProjectSwitching ||
+  return authState.signedIn && hasActiveModpack && activeModpack?.manifestConfigured && !(
+    isModpackPreparing ||
     isStartupModpackSyncRunning ||
     isModpackUpdateApplyRunning ||
     isLaunchRequestPending ||
@@ -1091,6 +1041,7 @@ async function refreshModpackUpdateStatus(options = {}) {
     return true;
   }
 
+  const sessionRevision = authSessionRevision;
   const silent = Boolean(options?.silent);
   const payload = buildModpackSyncPayload();
   if (!payload.minecraftDirectory) {
@@ -1104,7 +1055,7 @@ async function refreshModpackUpdateStatus(options = {}) {
   updateLaunchButtonUi();
   try {
     const result = await window.launcherApi.checkModpackUpdate(payload);
-    if (payload.projectId !== selectedProjectId) return false;
+    if (!authState.signedIn || sessionRevision !== authSessionRevision || payload.projectId !== activeProjectId) return false;
     if (!result?.ok) {
       if (!silent) {
         setLaunchStatus(localizeStatusMessage(result?.error || "Modpack update check failed."), true);
@@ -1135,7 +1086,7 @@ async function refreshModpackUpdateStatusInBackground() {
 }
 
 function startModpackUpdatePolling() {
-  if (!hasConfirmedProject || !selectedProjectId) return;
+  if (!hasActiveModpack || !activeProjectId || !activeModpack?.manifestConfigured) return;
   if (modpackUpdatePollTimer !== null) {
     window.clearInterval(modpackUpdatePollTimer);
   }
@@ -1541,9 +1492,9 @@ function bindJavaMemoryControlEvents() {
 
 function readStoredSettings() {
   try {
-    const storageKey = `betterlauncher.project.${selectedProjectId}.settings.v1`;
+    const storageKey = `betterlauncher.project.${activeProjectId}.settings.v1`;
     const raw = localStorage.getItem(storageKey) ||
-      (selectedProjectId === "bettermon" ? localStorage.getItem(LEGACY_SETTINGS_STORAGE_KEY) : null);
+      (activeProjectId === "bettermon" ? localStorage.getItem(LEGACY_SETTINGS_STORAGE_KEY) : null);
     if (!raw) {
       return normalizeSettings({}, launcherDefaults);
     }
@@ -1557,18 +1508,22 @@ function readStoredSettings() {
 
 function writeStoredSettings(settings) {
   try {
-    if (!selectedProjectId) return;
-    localStorage.setItem(`betterlauncher.project.${selectedProjectId}.settings.v1`, JSON.stringify(settings));
+    if (!activeProjectId) return;
+    localStorage.setItem(`betterlauncher.project.${activeProjectId}.settings.v1`, JSON.stringify(settings));
   } catch {
     // ignore storage failures
   }
+}
+
+function privateStatusText(message) {
+  return window.launcherPrivacy.redactPrivateDiagnostics(message);
 }
 
 function setSettingsStatus(message, isError = false) {
   if (!settingsStatus) {
     return;
   }
-  settingsStatus.textContent = message || "";
+  settingsStatus.textContent = privateStatusText(message);
   settingsStatus.style.color = isError ? "#ff9b9b" : "";
 }
 
@@ -1576,7 +1531,7 @@ function setLaunchStatus(message, isError = false) {
   if (!launchStatus) {
     return;
   }
-  const nextMessage = message || "";
+  const nextMessage = privateStatusText(message);
   const nextIsError = Boolean(nextMessage && isError);
   if (launchStatus.textContent !== nextMessage) {
     launchStatus.textContent = nextMessage;
@@ -1626,7 +1581,7 @@ function setStartupStatus(message, isError = false) {
   if (!startupStatus) {
     return;
   }
-  startupStatus.textContent = asText(message) || "\uB7F0\uCC98 \uC2DC\uC791 \uC911...";
+  startupStatus.textContent = privateStatusText(message) || "\uB7F0\uCC98 \uC2DC\uC791 \uC911...";
   startupStatus.classList.toggle("is-error", Boolean(isError));
 }
 
@@ -1760,7 +1715,7 @@ function getConfiguredMinecraftDirectory() {
 }
 
 async function ensureJavaPathAutoSelectedForProject() {
-  if (!projects.find((entry) => entry.id === selectedProjectId)?.manifestConfigured) return false;
+  if (!activeModpack?.manifestConfigured) return false;
   if (!window.launcherApi || typeof window.launcherApi.autoSelectJava !== "function") {
     return false;
   }
@@ -1773,10 +1728,10 @@ async function ensureJavaPathAutoSelectedForProject() {
     return false;
   }
 
-  setStartupProgress(STARTUP_SETTINGS_PROGRESS + 2, `Java ${projects.find((entry) => entry.id === selectedProjectId)?.javaMajor || 21} 실행 파일 자동 선택 중...`);
+  setStartupProgress(STARTUP_SETTINGS_PROGRESS + 2, `Java ${activeModpack?.javaMajor || 21} 실행 파일 자동 선택 중...`);
 
   try {
-    const result = await window.launcherApi.autoSelectJava({ minecraftDirectory, projectId: selectedProjectId });
+    const result = await window.launcherApi.autoSelectJava({ minecraftDirectory, projectId: activeProjectId });
     if (!result?.ok || !asText(result?.javaPath)) {
       setStartupProgress(
         STARTUP_SETTINGS_PROGRESS + 4,
@@ -1808,7 +1763,7 @@ function updateLaunchButtonUi() {
   const hasLauncherUpdateReady = isLauncherUpdateReadyToInstall();
   const isLauncherUpdateDownloading = isLauncherUpdateDownloadInProgress();
   const busy =
-    isProjectSwitching ||
+    isModpackPreparing ||
     isLaunchRequestPending ||
     isLauncherRunning ||
     isStartupModpackSyncRunning ||
@@ -1834,17 +1789,8 @@ function updateLaunchButtonUi() {
   } else if (hasPendingModpackUpdate) {
     label = "업데이트";
   }
-  const project = projects.find((entry) => entry.id === selectedProjectId);
-  startLaunchButton.disabled = busy || !hasConfirmedProject || (!hasLauncherUpdateReady && (!authState.signedIn || !project?.manifestConfigured));
-  const selectionBusy = busy || isModpackUpdateCheckRunning;
-  if (changeProjectButton) changeProjectButton.disabled = selectionBusy;
-  for (const card of projectCards?.querySelectorAll("button[data-project-id]") || []) {
-    const entry = projects.find((candidate) => candidate.id === card.dataset.projectId);
-    card.disabled = selectionBusy || !authState.signedIn || !entry?.manifestConfigured;
-  }
-  if (projectsScreen) projectsScreen.setAttribute("aria-busy", isProjectSwitching ? "true" : "false");
-  if (projectsAccountButton) projectsAccountButton.disabled = isProjectSwitching;
-  if (projectsSettingsButton) projectsSettingsButton.disabled = isProjectSwitching;
+  const project = activeModpack;
+  startLaunchButton.disabled = busy || (!hasLauncherUpdateReady && (!authState.signedIn || !hasActiveModpack || !project?.manifestConfigured));
   startLaunchButton.textContent = label;
   startLaunchButton.setAttribute("aria-label", label);
   startLaunchButton.setAttribute("aria-busy", busy ? "true" : "false");
@@ -1880,7 +1826,7 @@ function buildLaunchPayload() {
     asText(launcherDefaults.javaPath);
 
   return {
-    projectId: selectedProjectId,
+    projectId: activeProjectId,
     username: asText(authState.profileName, "\uD50C\uB808\uC774\uC5B4"),
     version: "",
     versionType: "release",
@@ -1898,7 +1844,7 @@ function buildLaunchPayload() {
 
 function buildModpackSyncPayload() {
   return {
-    projectId: selectedProjectId,
+    projectId: activeProjectId,
     minecraftDirectory: asText(launcherSettings.minecraftDirectory) || asText(launcherDefaults.minecraftDirectory),
     gameDirectory: ""
   };
@@ -1968,15 +1914,16 @@ async function ensureLatestLauncherBeforeLaunch() {
   }
 }
 
-async function checkSelectedProjectUpdate() {
-  if (!hasConfirmedProject || isStartupModpackSyncRunning) {
+async function checkModpackUpdateOnStartup() {
+  if (!hasActiveModpack || isStartupModpackSyncRunning) {
     return;
   }
-  if (!projects.find((entry) => entry.id === selectedProjectId)?.manifestConfigured) {
-    setLaunchStatus(selectedProjectId ? "모드팩 배포 주소를 설정하면 설치하고 실행할 수 있습니다." : "등록된 모드팩이 없습니다.");
+  if (!activeModpack?.manifestConfigured) {
+    setLaunchStatus(activeProjectId ? "모드팩 배포 주소를 설정하면 설치하고 실행할 수 있습니다." : "등록된 모드팩이 없습니다.");
     return;
   }
 
+  const sessionRevision = authSessionRevision;
   const payload = buildModpackSyncPayload();
   if (!payload.minecraftDirectory) {
     setStartupProgress(
@@ -1999,6 +1946,7 @@ async function checkSelectedProjectUpdate() {
     }
 
     const result = await window.launcherApi.checkModpackUpdate(payload);
+    if (!authState.signedIn || sessionRevision !== authSessionRevision) return;
     if (!result?.ok) {
       const message = localizeStatusMessage(result?.error || "Modpack update check failed.");
       setLaunchStatus(message, true);
@@ -2016,6 +1964,7 @@ async function checkSelectedProjectUpdate() {
       setStartupProgress(STARTUP_MODPACK_PROGRESS_DONE, "\uBAA8\uB4DC\uD329\uC774 \uCD5C\uC2E0 \uC0C1\uD0DC\uC785\uB2C8\uB2E4.");
     }
   } catch (error) {
+    if (!authState.signedIn || sessionRevision !== authSessionRevision) return;
     const message = localizeStatusMessage(asText(error?.message) || "Modpack update check failed.");
     setLaunchStatus(message, true);
     setStartupProgress(startupProgressPercent, message, true);
@@ -2118,7 +2067,7 @@ async function launchGame() {
     setLaunchStatus("런처 업데이트를 다운로드 중입니다. 완료되면 적용해 주세요.");
     return;
   }
-  if (isProjectSwitching) return;
+  if (isModpackPreparing) return;
 
   if (!authState.signedIn) {
     setLaunchStatus("Microsoft\uB85C \uBA3C\uC800 \uB85C\uADF8\uC778\uD574 \uC8FC\uC138\uC694.", true);
@@ -2126,8 +2075,8 @@ async function launchGame() {
     return;
   }
 
-  if (!hasConfirmedProject) {
-    openProjectSelection();
+  if (!hasActiveModpack) {
+    setLaunchStatus("모드팩 설정을 확인해 주세요.", true);
     return;
   }
 
@@ -2272,7 +2221,7 @@ function buildSettingsAccountCard(account, { placeholder = false } = {}) {
   const image = document.createElement("img");
   image.className = "settings-account-model-image";
   image.loading = "lazy";
-  image.src = "./assets/app-icon.png";
+  image.src = DEFAULT_SKIN_IMAGE;
   image.alt = "계정 모델";
 
   const meta = document.createElement("div");
@@ -2289,19 +2238,7 @@ function buildSettingsAccountCard(account, { placeholder = false } = {}) {
   nameField.appendChild(nameLabel);
   nameField.appendChild(nameValue);
 
-  const uuidField = document.createElement("div");
-  uuidField.className = "settings-account-field";
-  const uuidLabel = document.createElement("span");
-  uuidLabel.className = "settings-account-field-label";
-  uuidLabel.textContent = "UUID";
-  const uuidValue = document.createElement("span");
-  uuidValue.className = "settings-account-field-value settings-account-uuid-value";
-  uuidValue.textContent = placeholder ? "-" : normalizeMinecraftUuid(account?.uuid) || "-";
-  uuidField.appendChild(uuidLabel);
-  uuidField.appendChild(uuidValue);
-
   meta.appendChild(nameField);
-  meta.appendChild(uuidField);
 
   const state = document.createElement("div");
   state.className = "settings-account-state";
@@ -2377,15 +2314,15 @@ function selectSettingsTab(tabId) {
 }
 
 function openSettingsScreen(tabId = selectedSettingsTab) {
-  if (!settingsScreen || isProjectSwitching) {
+  if (!settingsScreen || isModpackPreparing) {
     return;
   }
   setSettingsStatus("");
   const projectTabs = ["settingsTabMinecraft", "settingsTabJava", "settingsTabLauncher"];
   for (const item of settingsNavItems) {
-    item.disabled = !hasConfirmedProject && projectTabs.includes(item.dataset.settingsTab);
+    item.disabled = !hasActiveModpack && projectTabs.includes(item.dataset.settingsTab);
   }
-  if (!hasConfirmedProject && projectTabs.includes(tabId)) tabId = "settingsTabAccount";
+  if (!hasActiveModpack && projectTabs.includes(tabId)) tabId = "settingsTabAccount";
   applySettingsToInputs(launcherSettings);
   selectSettingsTab(tabId);
   switchScreen("settings");
@@ -2393,7 +2330,7 @@ function openSettingsScreen(tabId = selectedSettingsTab) {
 }
 
 function persistSettingsSnapshot() {
-  if (!hasConfirmedProject) return;
+  if (!hasActiveModpack) return;
   const next = readSettingsFromInputs();
   next.selectedProfile = settingsProfileSelect
     ? asText(settingsProfileSelect.value, asText(launcherSettings.selectedProfile))
@@ -2404,7 +2341,7 @@ function persistSettingsSnapshot() {
 
 function closeSettingsScreen() {
   persistSettingsSnapshot();
-  switchScreen(authState.signedIn ? (hasConfirmedProject ? "launch" : "projects") : "login");
+  switchScreen(authState.signedIn ? "launch" : "login");
 }
 
 function fillProfileSelect(profiles, selectedProfile) {
@@ -2455,7 +2392,7 @@ async function refreshProfilesForDirectory(minecraftDirectory, selectedProfile =
   }
 
   try {
-    const result = await window.launcherApi.loadProfiles({ minecraftDirectory: targetDirectory, projectId: selectedProjectId });
+    const result = await window.launcherApi.loadProfiles({ minecraftDirectory: targetDirectory, projectId: activeProjectId });
     if (!result?.ok) {
       loadedProfiles = [];
       fillProfileSelect([], "");
@@ -2473,27 +2410,19 @@ async function refreshProfilesForDirectory(minecraftDirectory, selectedProfile =
   }
 }
 
-async function initializeSettings(projectId = "") {
+async function initializeSettings() {
   let defaults = null;
 
   try {
-    defaults = await window.launcherApi.getDefaults({ projectId });
+    defaults = await window.launcherApi.getDefaults();
   } catch {
     defaults = null;
   }
   if (!defaults || defaults.ok === false || !Array.isArray(defaults.projects)) {
     throw new Error(defaults?.error || "모드팩 프로젝트 설정을 불러올 수 없습니다.");
   }
-  projects = Array.isArray(defaults.projects) ? defaults.projects : [];
-  if (!projectId && !selectedProjectId) {
-    let storedProjectId = "";
-    try { storedProjectId = localStorage.getItem(SELECTED_PROJECT_STORAGE_KEY) || ""; } catch { /* unavailable storage */ }
-    recentProjectId = storedProjectId;
-    if (storedProjectId && storedProjectId !== defaults.projectId && projects.some((entry) => entry.id === storedProjectId)) {
-      return initializeSettings(storedProjectId);
-    }
-  }
-  selectedProjectId = defaults.projectId;
+  activeProjectId = asText(defaults.projectId);
+  activeModpack = defaults.projects.find((entry) => entry.id === activeProjectId) || null;
 
   try {
     const systemProfile = await window.launcherApi.getSystemProfile();
@@ -2529,52 +2458,14 @@ async function initializeSettings(projectId = "") {
 
   applySettingsToInputs(launcherSettings);
   writeStoredSettings(launcherSettings);
-  renderProjectPicker();
+  updateModpackControls();
   await refreshProfilesForDirectory(launcherSettings.minecraftDirectory, launcherSettings.selectedProfile);
 }
 
-function renderProjectPicker() {
-  if (projectCards) {
-    projectCards.replaceChildren();
-    projects.forEach((project, index) => {
-      const card = document.createElement("button");
-      card.type = "button";
-      card.className = `project-card project-tone-${index % 3}`;
-      card.dataset.projectId = project.id;
-      card.setAttribute("aria-label", `${project.name} · Minecraft ${project.minecraftVersion} · ${project.manifestConfigured ? "선택" : "배포 준비 중"}`);
-      const addText = (tag, className, text) => {
-        const element = document.createElement(tag);
-        element.className = className;
-        element.textContent = text;
-        card.appendChild(element);
-      };
-      addText("span", "project-card-index", String(index + 1).padStart(2, "0"));
-      addText("span", "project-card-state", project.manifestConfigured ? "플레이 가능" : "배포 준비 중");
-      addText("strong", "project-card-name", project.name);
-      addText("span", "project-card-description", project.description || "새로운 모험을 시작하세요.");
-      addText("span", "project-card-runtime", `Minecraft ${project.minecraftVersion} · ${project.modLoader} · Java ${project.javaMajor}`);
-      addText("span", "project-card-server", project.serverAddress ? `접속 서버 · ${project.serverAddress}` : "서버 없이 플레이");
-      addText("span", "project-card-action", project.manifestConfigured ? "선택하고 계속 →" : "배포를 준비하고 있어요");
-      if (project.id === recentProjectId) {
-        card.classList.add("is-recent");
-        addText("span", "project-card-recent", "최근 선택");
-      }
-      projectCards.appendChild(card);
-    });
-  }
-  if (projectsCount) projectsCount.textContent = `${projects.length}개`;
-  if (projectsEmpty) projectsEmpty.hidden = projects.length > 0;
-  if (projectsStatus && !isProjectSwitching) projectsStatus.textContent = "";
-  const project = projects.find((entry) => entry.id === selectedProjectId);
-  if (currentProjectName) currentProjectName.textContent = project?.name || "모드팩을 선택하세요";
-  if (currentProjectServer) currentProjectServer.textContent = project?.serverAddress ? `접속 서버 · ${project.serverAddress}` : "서버 없이 플레이";
+function updateModpackControls() {
+  const project = activeModpack;
   if (externalMedia) externalMedia.hidden = !project?.discordUrl;
   if (playerCountPanel) playerCountPanel.hidden = !project;
-  if (projectDescription) {
-    projectDescription.textContent = project
-      ? `${project.minecraftVersion} · ${project.modLoader} · Java ${project.javaMajor}${project.description ? " — " + project.description : ""}${project.manifestConfigured ? "" : " · 배포 준비 중"}`
-      : "등록된 모드팩 프로젝트가 없습니다.";
-  }
   if (discordButton) {
     discordButton.hidden = !project?.discordUrl;
     discordButton.setAttribute("aria-label", `${project?.name || "모드팩"} 디스코드`);
@@ -2582,74 +2473,52 @@ function renderProjectPicker() {
   updateLaunchButtonUi();
 }
 
-function isProjectNavigationBlocked() {
-  return isProjectSwitching || isLaunchRequestPending || isLauncherRunning ||
-    isModpackUpdateApplyRunning || isStartupModpackSyncRunning || isModpackUpdateCheckRunning ||
-    isLauncherUpdateInstallRunning || isLauncherUpdateGateRunning || isLauncherUpdateDownloadInProgress();
-}
-
-function openProjectSelection() {
-  if (!authState.signedIn || isProjectNavigationBlocked()) return;
-  writeStoredSettings(launcherSettings);
-  hasConfirmedProject = false;
-  stopNewsPolling();
-  stopPlayerCountPolling();
-  stopModpackUpdatePolling();
-  renderProjectPicker();
-  switchScreen("projects");
-  projectsHeading?.focus();
-}
-
-async function switchProject(projectId) {
-  const project = projects.find((entry) => entry.id === projectId);
-  if (!authState.signedIn || !project?.manifestConfigured || isProjectNavigationBlocked()) return;
-  writeStoredSettings(launcherSettings);
-  const previousProjectId = selectedProjectId;
-  isProjectSwitching = true;
-  if (projectsStatus) {
-    projectsStatus.classList.remove("is-error");
-    projectsStatus.textContent = `${project.name} 준비 중...`;
+async function prepareModpackForSession() {
+  if (!isLauncherInitialized || !authState.signedIn || isModpackPreparing) return;
+  if (!activeModpack) {
+    hasActiveModpack = false;
+    setLaunchStatus("모드팩 설정을 확인해 주세요.");
+    updateLaunchButtonUi();
+    return;
   }
+  const sessionRevision = authSessionRevision;
+  isModpackPreparing = true;
+  hasActiveModpack = true;
+  modpackUpdateState = null;
+  currentNewsItems = [];
+  renderNewsItems([], true);
+  renderSettingsAboutNewsItems();
+  setPlayerCountText("확인 중...", false);
+  setPlayerCountTooltip("");
   updateLaunchButtonUi();
   try {
-    if (projectId !== selectedProjectId) await initializeSettings(projectId);
-    if (!authState.signedIn) return;
-    hasConfirmedProject = true;
-    recentProjectId = selectedProjectId;
-    try { localStorage.setItem(SELECTED_PROJECT_STORAGE_KEY, selectedProjectId); } catch { /* unavailable storage */ }
-    modpackUpdateState = null;
-    currentNewsItems = [];
-    renderNewsItems([], true);
-    renderSettingsAboutNewsItems();
-    setPlayerCountText("확인 중...", false);
-    setPlayerCountTooltip("");
-    switchScreen("launch");
-    setLaunchStatus(`${project.name} 실행 준비 중...`);
+    if (!activeModpack.manifestConfigured) {
+      setLaunchStatus("모드팩 배포 준비 중입니다. 관리자에게 문의해 주세요.");
+      return;
+    }
+    setLaunchStatus(activeModpack.name + " 실행 준비 중...");
     await ensureJavaPathAutoSelectedForProject();
-    if (!authState.signedIn || !hasConfirmedProject) return;
-    await checkSelectedProjectUpdate();
+    if (!authState.signedIn || sessionRevision !== authSessionRevision) return;
+    await checkModpackUpdateOnStartup();
   } catch (error) {
-    hasConfirmedProject = false;
-    await initializeSettings(previousProjectId).catch(() => {});
-    if (authState.signedIn) switchScreen("projects");
-    if (projectsStatus) {
-      projectsStatus.classList.add("is-error");
-      projectsStatus.textContent = asText(error?.message) || "모드팩을 선택할 수 없습니다. 다시 시도해 주세요.";
+    if (authState.signedIn && sessionRevision === authSessionRevision) {
+      setLaunchStatus(asText(error?.message) || "모드팩을 준비할 수 없습니다. 다시 실행해 주세요.", true);
     }
   } finally {
-    isProjectSwitching = false;
-    if (hasConfirmedProject && authState.signedIn) {
+    isModpackPreparing = false;
+    if (authState.signedIn && sessionRevision === authSessionRevision && hasActiveModpack) {
       startNewsPolling();
       startPlayerCountPolling();
       startModpackUpdatePolling();
-      startLaunchButton?.focus();
+      if (currentScreen === "launch") startLaunchButton?.focus();
     }
     updateLaunchButtonUi();
+    if (authState.signedIn && sessionRevision !== authSessionRevision) void prepareModpackForSession();
   }
 }
 
 async function saveSettings(closeAfterSave = true) {
-  if (!hasConfirmedProject) {
+  if (!hasActiveModpack) {
     if (closeAfterSave) closeSettingsScreen();
     return;
   }
@@ -2680,22 +2549,22 @@ function updateAuthUi() {
     if (loginFlowActive) {
       gateAuthStatus.textContent = "Microsoft \uB85C\uADF8\uC778 \uC9C4\uD589 \uC911...";
     } else if (authState.signedIn) {
-      gateAuthStatus.textContent = `\uB85C\uADF8\uC778\uB428: ${authState.profileName || authState.uuid}`;
+      gateAuthStatus.textContent = `\uB85C\uADF8\uC778\uB428: ${authState.profileName || "플레이어"}`;
     } else {
       gateAuthStatus.textContent = "";
     }
   }
 
   if (!authState.signedIn) {
-    hasConfirmedProject = false;
+    hasActiveModpack = false;
     stopNewsPolling();
     stopPlayerCountPolling();
     stopModpackUpdatePolling();
     switchScreen("login");
   } else if (currentScreen === "login") {
-    switchScreen("projects");
+    switchScreen("launch");
+    void prepareModpackForSession();
   }
-  if (projectsAccountButton) projectsAccountButton.textContent = `${authState.profileName || "플레이어"} · 계정 관리`;
 
   if (!authState.signedIn && !isLauncherRunning && !isLaunchRequestPending) {
     setLaunchStatus("");
@@ -2708,6 +2577,7 @@ function updateAuthUi() {
 }
 
 function applyAuthState(nextState) {
+  if (authState.signedIn !== Boolean(nextState?.signedIn) || authState.uuid !== String(nextState?.uuid || "")) authSessionRevision += 1;
   authState = {
     signedIn: Boolean(nextState?.signedIn),
     profileName: String(nextState?.profileName || ""),
@@ -2927,19 +2797,9 @@ bindClick(gateMicrosoftLoginButton, async () => {
   await runMicrosoftLogin();
 });
 
-if (projectCards) {
-  projectCards.addEventListener("click", (event) => {
-    const card = event.target instanceof Element ? event.target.closest("button[data-project-id]") : null;
-    if (card && !card.disabled) void switchProject(card.dataset.projectId);
-  });
-}
-bindClick(changeProjectButton, openProjectSelection);
-bindClick(projectsAccountButton, () => openSettingsScreen("settingsTabAccount"));
-bindClick(projectsSettingsButton, () => openSettingsScreen("settingsTabUpdate"));
-
 bindClick(discordButton, async (event) => {
   event.preventDefault();
-  const discordUrl = projects.find((entry) => entry.id === selectedProjectId)?.discordUrl;
+  const discordUrl = activeModpack?.discordUrl;
   if (!discordUrl) return;
   const result = await window.launcherApi.openExternal(discordUrl);
   if (!result?.ok && gateAuthStatus) {
@@ -3036,10 +2896,10 @@ bindClick(settingsAutoJavaPathButton, async () => {
   if (settingsPickJavaPathButton) {
     settingsPickJavaPathButton.disabled = true;
   }
-  setSettingsStatus(`Java ${projects.find((entry) => entry.id === selectedProjectId)?.javaMajor || 21} 실행 파일 자동 선택 중...`);
+  setSettingsStatus(`Java ${activeModpack?.javaMajor || 21} 실행 파일 자동 선택 중...`);
 
   try {
-    const result = await window.launcherApi.autoSelectJava({ minecraftDirectory, projectId: selectedProjectId });
+    const result = await window.launcherApi.autoSelectJava({ minecraftDirectory, projectId: activeProjectId });
     if (!result?.ok || !asText(result?.javaPath)) {
       setSettingsStatus(asText(result?.error) || "Java 실행 파일 자동 선택에 실패했습니다.", true);
       return;
@@ -3291,6 +3151,8 @@ Promise.resolve()
     updateUpdaterUi(updaterState);
     setStartupProgress(STARTUP_SETTINGS_PROGRESS, "\uB7F0\uCC98 \uC124\uC815 \uBD88\uB7EC\uC624\uAE30 \uC644\uB8CC.");
     await ensureLatestLauncherOnStartup();
+    isLauncherInitialized = true;
+    await prepareModpackForSession();
   })
   .then(async () => {
     setStartupProgress(STARTUP_FINALIZING_PROGRESS, "\uB7F0\uCC98 \uC2DC\uC791 \uB9C8\uBB34\uB9AC \uC911...");
@@ -3301,16 +3163,15 @@ Promise.resolve()
     }
     setStartupProgress(STARTUP_COMPLETE_PROGRESS, "\uC2DC\uC791 \uC644\uB8CC.");
     await hideStartupOverlay();
-    if (currentScreen === "projects") projectsHeading?.focus();
+    if (currentScreen === "launch") startLaunchButton?.focus();
   })
   .catch(async (error) => {
     const message = localizeStatusMessage(
       asText(error?.message) || "\uC2DC\uC791 \uC2E4\uD328. \uACC4\uC18D \uC9C4\uD589\uD569\uB2C8\uB2E4."
     );
     setStartupProgress(startupProgressPercent, message, true);
-    if (projectsStatus) {
-      projectsStatus.classList.add("is-error");
-      projectsStatus.textContent = message;
-    }
+    isLauncherInitialized = true;
+    setLaunchStatus(message, true);
+    if (gateAuthStatus) gateAuthStatus.textContent = privateStatusText(message);
     await hideStartupOverlay();
   });
