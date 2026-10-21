@@ -35,14 +35,20 @@ function loadMain(root, safeStorage) {
   return { handlers: authenticatedHandlers, api: context.testApi, appPaths, webContents, context };
 }
 
-async function setup(t, safeStorage) {
+async function setup(t, safeStorage, { cacheManifests = false } = {}) {
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "betterlauncher-integration-"));
   const output = path.join(root, "distribution");
+  const cachedManifests = new Map();
   const server = http.createServer(async (req, res) => {
     try {
-      const file = path.resolve(output, "." + new URL(req.url, "http://localhost").pathname);
+      const url = new URL(req.url, "http://localhost");
+      const file = path.resolve(output, "." + url.pathname);
       if (!file.startsWith(path.resolve(output) + path.sep)) { res.writeHead(403); res.end(); return; }
-      const data = await fs.promises.readFile(file);
+      let data = await fs.promises.readFile(file);
+      if (cacheManifests && url.pathname.endsWith("/latest.json") && !url.search) {
+        if (!cachedManifests.has(url.pathname)) cachedManifests.set(url.pathname, data);
+        data = cachedManifests.get(url.pathname);
+      }
       res.writeHead(200); res.end(data);
     } catch { res.writeHead(404); res.end(); }
   });
@@ -143,6 +149,18 @@ test("private operating config stays local and can disable packaged updates", as
   assert.equal(api.isUpdaterEnabled(), false);
 });
 
+test("NeoForge runtime preparation uses administrator version and Java, never Fabric or user loader overrides", async t => {
+  const { handlers, config, root, context } = await setup(t);
+  Object.assign(config.projects[0], { minecraftVersion: "1.21.1", javaMajor: 21, modLoader: "neoforge", loaderVersion: "21.1.123" });
+  await fs.promises.writeFile(path.join(root, "modpack.config.json"), JSON.stringify(config));
+  vm.runInContext("ensureJavaRuntimeInDirectory = async () => 'fixture-java'; ensureFabricVersionInDirectory = async () => { throw new Error('Fabric must not be selected'); }; neoForgeRuntime.ensure = async (project, directory, java) => { globalThis.neoCall = { loader: project.modLoader, version: project.loaderVersion, java }; return 'neoforge-' + project.loaderVersion; };", context);
+  const defaults = await handlers.get("launcher:get-defaults")({}, { projectId: "alpha" });
+  const result = await handlers.get("launcher:prepare-runtime")({}, { projectId: "alpha", minecraftDirectory: defaults.minecraftDirectory, modLoader: "fabric", version: "fabric-loader-0.16.0-1.20.1" });
+  assert.equal(result.ok, true); assert.equal(result.loader, "neoforge"); assert.equal(result.versionId, "neoforge-21.1.123");
+  assert.equal(result.minecraftVersion, "1.21.1"); assert.equal(result.javaPath, "fixture-java");
+  assert.equal(context.neoCall.version, "21.1.123"); assert.equal(context.neoCall.java, "fixture-java");
+});
+
 test("skin IPC only retrieves signed-in or saved accounts without exposing credentials", async (t) => {
   const { handlers, context } = await setup(t);
   const skin = handlers.get("launcher:get-account-skin");
@@ -237,6 +255,18 @@ test("updated manifest replaces changed mods and removes obsolete files", async 
   assert.equal(updated.version, "2");
   assert.equal(fs.existsSync(path.join(defaults.minecraftDirectory, "mods", "shared-name.jar")), false);
   assert.equal(await fs.promises.readFile(path.join(defaults.minecraftDirectory, "mods", "new.jar"), "utf8"), "updated mod contents");
+});
+
+test("manifest updates bypass CDN caches without changing installed source identity", async t => {
+  const { handlers, output } = await setup(t, undefined, { cacheManifests: true });
+  const defaults = await handlers.get("launcher:get-defaults")({}, { projectId: "alpha" });
+  const payload = { projectId: "alpha", minecraftDirectory: defaults.minecraftDirectory };
+  assert.equal((await handlers.get("launcher:sync-modpack")({}, payload)).ok, true);
+  assert.equal((await handlers.get("launcher:check-modpack-update")({}, payload)).pending, false);
+  const file = path.join(output, "alpha", "latest.json");
+  const manifest = JSON.parse(await fs.promises.readFile(file)); manifest.version = "2";
+  await fs.promises.writeFile(file, JSON.stringify(manifest));
+  assert.equal((await handlers.get("launcher:check-modpack-update")({}, payload)).pending, true);
 });
 
 test("distribution migration and updates preserve player preferences", async (t) => {

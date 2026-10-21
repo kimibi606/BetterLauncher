@@ -1148,6 +1148,13 @@ function localizeStatusMessage(message) {
 
   const directMap = {
     "Preparing Fabric runtime...": "\uD328\uBE0C\uB9AD \uB7F0\uD0C0\uC784 \uC900\uBE44 \uC911...",
+    "Downloading NeoForge installer...": "NeoForge 설치 파일 다운로드 중...",
+    "Installing NeoForge runtime...": "NeoForge 실행 환경 설치 중...",
+    "NeoForge runtime already installed.": "NeoForge 실행 환경이 준비되었습니다.",
+    "NeoForge runtime installed.": "NeoForge 실행 환경 설치 완료.",
+    "NeoForge installation failed. Try again.": "NeoForge를 설치하지 못했습니다. 다시 실행해 주세요.",
+    "NeoForge installation timed out. Try again.": "NeoForge 설치 시간이 초과되었습니다. 다시 실행해 주세요.",
+    "Could not start the NeoForge installer.": "NeoForge 설치 프로그램을 실행하지 못했습니다. Java 설정을 확인해 주세요.",
     "Checking modpack updates...": "\uBAA8\uB4DC\uD329 \uC5C5\uB370\uC774\uD2B8 \uD655\uC778 \uC911...",
     "Modpack is up to date.": "\uBAA8\uB4DC\uD329\uC774 \uCD5C\uC2E0 \uC0C1\uD0DC\uC785\uB2C8\uB2E4.",
     "Modpack update completed.": "\uBAA8\uB4DC\uD329 \uC5C5\uB370\uC774\uD2B8\uAC00 \uC644\uB8CC\uB418\uC5C8\uC2B5\uB2C8\uB2E4.",
@@ -1638,7 +1645,7 @@ function applyStartupLogStatus(payload) {
     return;
   }
 
-  if (/(installing fabric|fetching fabric loader metadata|downloading fabric profile)/i.test(message)) {
+  if (/(installing fabric|fetching fabric loader metadata|downloading fabric profile|downloading neoforge installer|installing neoforge runtime)/i.test(message)) {
     setStartupProgress(STARTUP_RUNTIME_PROGRESS_START, localizedMessage || message);
     return;
   }
@@ -1663,7 +1670,7 @@ function applyStartupLogStatus(payload) {
     return;
   }
 
-  if (/(fabric profile installed|fabric runtime already installed)/i.test(message)) {
+  if (/(fabric profile installed|fabric runtime already installed|neoforge runtime (?:already )?installed)/i.test(message)) {
     setStartupProgress(STARTUP_RUNTIME_PROGRESS_DONE, localizedMessage || message);
     return;
   }
@@ -2720,7 +2727,7 @@ function applyLogStatus(payload) {
 
   const recentLaunchCapture = Date.now() < launchLogCaptureUntil;
   const busy = isLaunchRequestPending || isLauncherRunning || isStartupModpackSyncRunning || recentLaunchCapture;
-  const launchRelated = /(minecraft|java|launch|fabric|modpack|runtime|auth|session|auto-connect|quickplay|server|port)/i.test(
+  const launchRelated = /(minecraft|java|launch|fabric|neoforge|modpack|runtime|auth|session|auto-connect|quickplay|server|port)/i.test(
     message
   );
 
@@ -2747,7 +2754,7 @@ function applyLogStatus(payload) {
 
   if (
     (level === "info" || level === "warn") &&
-    /(preparing|downloading|checking|modpack|fabric|installing|runtime|minecraft|java|auth|launch|auto-connect|quickplay|server)/i.test(
+    /(preparing|downloading|checking|modpack|fabric|neoforge|installing|runtime|minecraft|java|auth|launch|auto-connect|quickplay|server)/i.test(
       message
     )
   ) {

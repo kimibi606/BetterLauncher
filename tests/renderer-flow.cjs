@@ -352,6 +352,15 @@ app.whenReady().then(async () => {
   await screenshot(win, "single-modpack-calendar");
   win.destroy();
 
+  catalog = [{ id: "new-loader", name: "Example", minecraftVersion: "1.21.1", modLoader: "neoforge", javaMajor: 21, manifestConfigured: true }];
+  win = await openWindow();
+  assert.equal(await js(win, "currentScreen === 'launch' && activeModpack.modLoader === 'neoforge' && activeModpack.javaMajor === 21"), true);
+  assert.equal(await js(win, "localizeStatusMessage('Installing NeoForge runtime...')"), "NeoForge 실행 환경 설치 중...");
+  await js(win, "startLaunchButton.click()");
+  await waitFor(win, "!isLaunchRequestPending");
+  assert.ok(calls.some(entry => entry.type === "launch" && entry.projectId === "new-loader" && entry.version === ""));
+  win.destroy();
+
   // An unconfigured or unpublished pack stays on the same launch screen without downloads.
   catalog = [fixtures[2]];
   calls.length = 0;

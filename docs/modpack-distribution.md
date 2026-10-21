@@ -39,10 +39,11 @@
 ```
 
 - `id`는 소문자 영문·숫자·`-`·`_`로 구성된 고유 식별자입니다. 배포 후 바꾸면 다른 설치로 취급합니다.
-- 게임 버전, Java, 서버, 공지, Discord와 설치 폴더를 프로젝트별로 관리합니다. 현재 지원하는 모드 로더는 Fabric입니다.
+- 게임 버전, Java, 서버, 공지, Discord와 설치 폴더를 프로젝트별로 관리합니다. Fabric과 NeoForge를 지원합니다.
 - `server.host`는 도메인 또는 IP만 입력합니다. `https://`나 포트를 포함하지 않습니다. 포트는 `server.port`에 별도로 지정하며 생략하면 25565입니다. 런처 화면에는 주소를 표시하지 않으며, 게임 시작 시 설정한 서버로 자동 접속합니다.
 - 서버 주소는 기본 모드팩의 관리자 설정만 사용합니다. 전역 `BETTERLAUNCHER_SERVER_HOST`·`BETTERMON_SERVER_HOST` 등의 환경변수와 사용자 실행 요청은 접속 주소를 덮어쓰지 않습니다. 기존 `serverStatus.host`·`serverStatus.port`는 `server`가 없는 프로젝트에서 호환용으로 읽으며, 새 프로젝트는 `server`를 사용하세요.
 - `loaderVersion`을 지정하면 특정 Fabric 버전을 사용합니다. 서버가 없는 프로젝트는 자동 서버 접속을 생략합니다.
+- NeoForge는 `modLoader: "neoforge"`와 Minecraft 버전에 맞는 `loaderVersion`을 반드시 지정합니다. 예를 들어 Minecraft `1.21.1`은 NeoForge `21.1.x`와 Java 21을 사용합니다. `loaderInstallerSha256`에 공식 설치 파일의 SHA-256을 지정할 수 있습니다. 실제 운영 버전과 해시는 비공개 설정에만 보관하세요. 공식 설치 프로그램이 전용 폴더에 실행 환경을 준비하며, 설치 실패·무결성 오류·잘못된 링크 경로는 실행을 중단합니다.
 - 공지는 `news.items` 또는 `news.url`로 지정합니다.
 - 모드팩이 없어도 로그인과 설정을 사용할 수 있습니다. 같은 실행 화면에 미설정 상태를 표시하고 게임 실행을 비활성화합니다. 배포 주소가 없는 모드팩은 배포 준비 상태로 안내합니다.
 - 개발 실행은 `.private/modpack.config.json`을 먼저 읽습니다. 설치된 런처는 앱에 포함된 관리자 설정만 읽습니다. `npm run dist:private`로 운영 설정을 포함한 설치 파일을 로컬에서 만들고 지인에게 직접 전달하세요. `.private` 폴더와 그 안의 설치 파일은 Git·GitHub 릴리즈·Actions에 업로드하지 않습니다.

@@ -13,7 +13,9 @@ const { downloadDistributionFile } = require("./lib/distribution-download");
 const { secureFetch } = require("./lib/secure-fetch");
 const { redactPrivateDiagnostics, sanitizeDiagnosticPayload } = require("./lib/log-security");
 const { normalizeSkinUuid, createAccountSkinService } = require("./lib/account-skin");
+const { createNeoForgeRuntime, createNeoForgeClient, neoForgeProfileId } = require("./lib/neoforge-runtime");
 const accountSkinService = createAccountSkinService();
+const neoForgeRuntime = createNeoForgeRuntime({ log: payload => sendLog(payload) });
 const projectContext = new AsyncLocalStorage();
 
 const { app, BrowserWindow, dialog, ipcMain, screen, session, shell, safeStorage } = require("electron");
@@ -1893,7 +1895,13 @@ async function fetchModpackManifestSource() {
   const config = readLauncherConfig();
   const source = resolveLauncherNewsSource(manifestUrl, config?.__configPath || path.join(__dirname, MODPACK_CONFIG_FILE));
   if (!source) throw new Error('Invalid modpack manifest URL: ' + manifestUrl);
-  const text = await readTextFromSource(source, 'modpack manifest');
+  // Some CDN edges retain removed/updated JSON despite cache-control headers.
+  // Fetch a fresh manifest while retaining the stable source identity and URL
+  // used to resolve file paths and compare the installed state.
+  const requestSource = source.kind === "http"
+    ? { ...source, value: appendRequestCacheBuster(source.value, "_manifestTs") }
+    : source;
+  const text = await readTextFromSource(requestSource, 'modpack manifest');
   return {
     text, json: JSON.parse(text), manifestLocation: source.value, sourceKind: source.kind,
     sourceKey: source.signatureKey || source.value
@@ -4586,8 +4594,8 @@ async function prepareRuntimeFromPayload(payload) {
   }
 
   try {
-    const versionId = await ensureFabricVersionInDirectory(minecraftDirectory);
     const resolvedJavaPath = await ensureJavaRuntimeInDirectory(minecraftDirectory, javaPath);
+    const versionId = await resolveLaunchVersionId(minecraftDirectory, "", resolvedJavaPath);
     return {
       ok: true,
       versionId,
@@ -7069,7 +7077,10 @@ async function ensureFabricVersionInDirectory(minecraftDirectory) {
   return versionId;
 }
 
-async function resolveLaunchVersionId(minecraftDirectory, requestedVersion) {
+async function resolveLaunchVersionId(minecraftDirectory, requestedVersion, javaPath = "") {
+  if (getProjectModLoader() === "neoforge") {
+    return neoForgeRuntime.ensure(getCurrentProject(), minecraftDirectory, javaPath);
+  }
   const explicitVersion = asTrimmedText(requestedVersion);
   if (isProjectFabricVersionId(explicitVersion)) {
     return explicitVersion;
@@ -7533,14 +7544,14 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
 
     let version;
     try {
-      version = await resolveLaunchVersionId(minecraftDirectory, requestedVersion);
+      version = await resolveLaunchVersionId(minecraftDirectory, requestedVersion, resolvedJavaPath);
     } catch (error) {
       return { ok: false, error: String(error?.message || error) };
     }
 
-    const isCustomFabricVersion = isProjectFabricVersionId(version);
-    const launchVersionNumber = isCustomFabricVersion ? getProjectMinecraftVersion() : version;
-    const launchVersionConfig = isCustomFabricVersion
+    const isCustomLoaderVersion = getProjectModLoader() === "neoforge" ? version === neoForgeProfileId(getCurrentProject()) : isProjectFabricVersionId(version);
+    const launchVersionNumber = isCustomLoaderVersion ? getProjectMinecraftVersion() : version;
+    const launchVersionConfig = isCustomLoaderVersion
       ? { number: launchVersionNumber, type: versionType, custom: version }
       : { number: launchVersionNumber, type: versionType };
 
@@ -7657,7 +7668,7 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
       message: `Integrity check passed (source: ${integrityResult.sourceType}, checked: ${integrityResult.checked}).`
     });
 
-    const launcher = new Client();
+    const launcher = getProjectModLoader() === "neoforge" ? createNeoForgeClient(Client, getCurrentProject()) : new Client();
     let launchFailureDetail = "";
     const minecraftDownloadState = {
       type: "",
@@ -7672,7 +7683,7 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
     });
     sendLog({
       level: "debug",
-      message: `Launch version config: number=${launchVersionNumber}${isCustomFabricVersion ? `, custom=${version}` : ""}`
+      message: `Launch version config: number=${launchVersionNumber}${isCustomLoaderVersion ? `, custom=${version}` : ""}`
     });
     sendLog({
       level: "info",
@@ -7808,6 +7819,9 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
         javaPath: resolvedJavaPath || undefined,
         overrides: {
           detached: false,
+          ...(getProjectModLoader() === "neoforge" ? {
+            versionJson: resolveModpackTargetPath(minecraftDirectory, `versions/${getProjectMinecraftVersion()}/${getProjectMinecraftVersion()}.json`)
+          } : {}),
           ...(gameDirectory ? { gameDirectory } : {})
         }
       });
