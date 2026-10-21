@@ -6,6 +6,7 @@ const path = require("path");
 const crypto = require("crypto");
 const { resolveProject } = require("../lib/projects");
 const { normalizePathRenames } = require("../lib/modpack-path-renames");
+const { normalizeResourcePackDefaults, readResourcePackDefaults } = require("../lib/resourcepack-settings");
 
 const CHUNK_BYTES = 20 * 1024 * 1024;
 const MAX_ASSET_BYTES = 25 * 1024 * 1024;
@@ -113,6 +114,8 @@ async function buildDistribution(args, config) {
   await validatePagesOutput(output);
   const filePaths = await collectFiles(source);
   if (filePaths.length === 0) throw new Error("No distributable modpack files found.");
+  const resourcePackDefaults = normalizeResourcePackDefaults(project.modpack?.resourcePackDefaults) ??
+    (filePaths.includes("options.txt") ? readResourcePackDefaults(await fs.promises.readFile(path.join(source, "options.txt"), "utf8")) : null);
   const keys = new Set();
   const projectOutput = path.join(output, project.id);
   const files = [];
@@ -156,7 +159,7 @@ async function buildDistribution(args, config) {
     files.push({ path: filePath, sha256, size, ...(pieces.length === 1 ? { url: pieces[0].url } : { chunks: pieces }) });
   }
   const manifest = { id: project.id, type: "distribution", version, minecraftVersion: project.minecraftVersion, files,
-    ...(pathRenames.length ? { pathRenames } : {}) };
+    ...(pathRenames.length ? { pathRenames } : {}), ...(resourcePackDefaults ? { resourcePackDefaults } : {}) };
   if (!args.dryRun) {
     // Keep previous hash assets for clients that have already fetched an older manifest.
     const manifestText = JSON.stringify(manifest, null, 2) + "\n";

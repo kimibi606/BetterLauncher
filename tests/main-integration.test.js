@@ -403,6 +403,40 @@ test("manifest filename repairs rename corrupted resourcepack folders while pres
   assert.equal((await handlers.get("launcher:sync-modpack")({}, payload)).ok, true);
 });
 
+test("fresh install repairs Korean pack paths and applies selection after vanilla options already exist", async t => {
+  const { handlers, config, root, output } = await setup(t);
+  const source = path.join(root, "alpha-source"), broken = "resourcepacks/Example \ufffd", corrected = "resourcepacks/한글 팩";
+  await fs.promises.mkdir(path.join(source, corrected), { recursive: true });
+  await fs.promises.writeFile(path.join(source, corrected, "pack.mcmeta"), '{"pack":{"pack_format":15,"description":"Example"}}');
+  const selected = ["vanilla", "file/한글 팩"];
+  await fs.promises.writeFile(path.join(source, "options.txt"), "resourcePacks:" + JSON.stringify(selected) + "\nincompatibleResourcePacks:[]\n");
+  config.projects[0].modpack.pathRenames = [{ from: broken, to: corrected }];
+  config.projects[0].modpack.resourcePackDefaults = { resourcePacks: selected, incompatibleResourcePacks: [] };
+  await fs.promises.writeFile(path.join(root, "modpack.config.json"), JSON.stringify(config));
+  await buildDistribution({ source, output, project: "alpha", version: "2" }, config);
+  // The installer must also fix an older live manifest without waiting for a redeploy.
+  const manifestFile = path.join(output, "alpha/latest.json");
+  const manifest = JSON.parse(await fs.promises.readFile(manifestFile));
+  delete manifest.resourcePackDefaults;
+  delete manifest.pathRenames;
+  for (const file of manifest.files) if (file.path.startsWith(corrected + "/")) file.path = broken + file.path.slice(corrected.length);
+  await fs.promises.writeFile(manifestFile, JSON.stringify(manifest));
+  const defaults = await handlers.get("launcher:get-defaults")({}, { projectId: "alpha" });
+  const instance = defaults.minecraftDirectory;
+  await fs.promises.mkdir(instance, { recursive: true });
+  await fs.promises.writeFile(path.join(instance, "options.txt"), "resourcePacks:[]\nincompatibleResourcePacks:[]\nfov:83\nmasterVolume:0.4\n");
+  const payload = { projectId: "alpha", minecraftDirectory: instance };
+  assert.equal((await handlers.get("launcher:sync-modpack")({}, payload)).ok, true);
+  const options = await fs.promises.readFile(path.join(instance, "options.txt"), "utf8");
+  assert.ok(options.includes("resourcePacks:" + JSON.stringify(selected)), "modpack selection must be applied to existing vanilla options");
+  assert.ok(options.includes("fov:83\nmasterVolume:0.4"), "other player preferences must be preserved");
+  assert.equal(fs.existsSync(path.join(instance, broken)), false);
+  assert.equal(fs.existsSync(path.join(instance, corrected, "pack.mcmeta")), true);
+  await fs.promises.writeFile(path.join(instance, "options.txt"), options.replace("resourcePacks:" + JSON.stringify(selected), "resourcePacks:[]"));
+  assert.equal((await handlers.get("launcher:sync-modpack")({}, payload)).ok, true);
+  assert.match(await fs.promises.readFile(path.join(instance, "options.txt"), "utf8"), /^resourcePacks:\[\]/);
+});
+
 test("legacy auth/session migration excludes existing modpack installations", async (t) => {
   const { root, api, appPaths } = await setup(t);
   const oldRoot = path.join(root, ".bettermonlauncher");

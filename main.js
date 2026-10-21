@@ -11,6 +11,7 @@ const { AsyncLocalStorage } = require("async_hooks");
 const { readProjects, resolveProject, getProjectDirectory, getProjectServer, formatServerAddress, buildProjectConnectionOptions } = require("./lib/projects");
 const { downloadDistributionFile } = require("./lib/distribution-download");
 const { normalizePathRenames, repairModpackPaths } = require("./lib/modpack-path-renames");
+const { normalizeResourcePackDefaults, repairResourcePackSettings } = require("./lib/resourcepack-settings");
 const { secureFetch } = require("./lib/secure-fetch");
 const { redactPrivateDiagnostics, sanitizeDiagnosticPayload } = require("./lib/log-security");
 const { normalizeSkinUuid, createAccountSkinService } = require("./lib/account-skin");
@@ -1947,7 +1948,9 @@ function getConfiguredPathRenames() {
 
 function computeModpackSourceDigest(text) {
   const repairs = getConfiguredPathRenames();
-  return computeSha256FromText(text + (repairs.length ? "\npath-repairs:" + JSON.stringify(repairs) : ""));
+  const defaults = normalizeResourcePackDefaults(getCurrentProject().modpack?.resourcePackDefaults);
+  return computeSha256FromText(text + (repairs.length ? "\npath-repairs:" + JSON.stringify(repairs) : "") +
+    (defaults ? "\nresource-pack-defaults:" + JSON.stringify(defaults) : ""));
 }
 
 function parseModpackManifest(manifestSource, preset) {
@@ -2942,6 +2945,8 @@ function parseDistributionIndex(distributionJson, preset, options = {}) {
     sourceKey,
     files,
     pathRenames,
+    resourcePackDefaults: normalizeResourcePackDefaults(source.resourcePackDefaults ?? distributionJson.resourcePackDefaults ??
+      getCurrentProject().modpack?.resourcePackDefaults),
     delete: deleteEntries.map((entry) => {
       const normalizedEntry = normalizeRelativeModpackPath(entry);
       assertModpackPathDoesNotTargetInternalState(normalizedEntry, "Distribution delete path");
@@ -3957,7 +3962,10 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
       });
     }
     const applyResult = await applyDistributionFiles(modpackRoot, parsedDistribution.files);
-    const unchanged = applyResult.updatedCount === 0 && removedCount === 0 && renamedCount === 0;
+    const selection = await repairResourcePackSettings(modpackRoot, {
+      defaults: parsedDistribution.resourcePackDefaults, pathRenames: parsedDistribution.pathRenames
+    });
+    const unchanged = applyResult.updatedCount === 0 && removedCount === 0 && renamedCount === 0 && !selection.changed;
     const signature = `distribution:${launcherPreset}:manifest:${manifest.sourceKey}:${manifest.manifestDigest}`;
     await writeModpackState(modpackRoot, {
       signature,
@@ -4177,7 +4185,10 @@ async function synchronizeModpackDistribution({ launcherPreset, modpackRoot, ses
     });
   }
   const applyResult = await applyDistributionFiles(modpackRoot, parsedDistribution.files);
-  const unchanged = applyResult.updatedCount === 0 && removedCount === 0 && renamedCount === 0;
+  const selection = await repairResourcePackSettings(modpackRoot, {
+    defaults: parsedDistribution.resourcePackDefaults, pathRenames: parsedDistribution.pathRenames
+  });
+  const unchanged = applyResult.updatedCount === 0 && removedCount === 0 && renamedCount === 0 && !selection.changed;
 
   await writeModpackState(modpackRoot, {
     signature,
