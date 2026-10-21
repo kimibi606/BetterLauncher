@@ -11,6 +11,8 @@ const { createRequire } = require("module");
 const { pathToFileURL } = require("url");
 const { EventEmitter } = require("events");
 const { buildDistribution } = require("../scripts/build-modpack-distribution");
+const { GitHubProvider } = require("electron-updater/out/providers/GitHubProvider");
+const { HttpError } = require("builder-util-runtime");
 
 const mainPath = path.resolve(__dirname, "..", "main.js");
 const nodeRequire = createRequire(mainPath);
@@ -189,7 +191,7 @@ test("inaccessible update releases produce a safe unavailable state, allow launc
     assert.equal(result.reason, "update-feed-unavailable");
     assert.equal(api.updaterState.enabled, true); assert.equal(api.updaterState.lastError, "");
     assert.equal(api.updaterState.available, false); assert.equal(api.updaterState.downloading, false);
-    assert.equal(messages.filter(entry => entry.channel === "launcher:log" && entry.payload.message.includes("접근할 수 없습니다")).length, 1);
+    assert.equal(messages.filter(entry => entry.channel === "launcher:log" && entry.payload.message === result.message).length, 1);
     const gate = await handlers.get("updater:ensure-latest")({});
     assert.equal(gate.ok, true); assert.equal(gate.unavailable, true);
     assert.notEqual(gate.restarting, true);
@@ -199,6 +201,57 @@ test("inaccessible update releases produce a safe unavailable state, allow launc
   const recovered = await handlers.get("updater:check")({});
   assert.equal(recovered.ok, true);
   assert.equal(api.updaterState.unavailable, false);
+  assert.equal(api.updaterState.lastError, "");
+});
+
+test("real GitHub provider missing releases stay nonfatal across repeated and concurrent checks", async t => {
+  const { api, handlers, context, updater, webContents } = await setup(t);
+  context.process.env = {};
+  vm.runInContext("require('electron').app.isPackaged = true; readLauncherConfig = () => ({ github: { owner: 'example', repo: 'launcher' } }); setTimeout = () => 0; setInterval = () => 0;", context);
+  api.setupAutoUpdater();
+  const messages = [];
+  webContents.send = (channel, payload) => messages.push({ channel, payload });
+  const provider = new GitHubProvider({ provider: "github", owner: "example", repo: "launcher" }, { allowPrerelease: false }, { executor: {}, platform: "win32" });
+  const feed = '<?xml version="1.0"?><feed><entry><link href="https://github.com/example/launcher/releases/tag/v0.0.1"/><title>Old tag</title></entry></feed>';
+  for (const emptyFeed of [false, true]) {
+    provider.httpRequest = async url => {
+      if (String(url).endsWith(".atom")) return emptyFeed ? "<feed/>" : feed;
+      throw new HttpError(406, "406 Not Acceptable\nHeaders: {}");
+    };
+    let calls = 0;
+    updater.checkForUpdates = async () => {
+      calls++;
+      updater.emit("checking-for-update");
+      try { await provider.getLatestVersion(); } catch (error) { updater.emit("error", error); throw error; }
+    };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const results = await Promise.all(Array.from({ length: 5 }, () => handlers.get("updater:check")({})));
+      assert.ok(results.every(result => result.ok && result.unavailable && result.noPublishedRelease));
+      assert.equal(calls, attempt + 1, "one provider request per group, with later retries allowed");
+      assert.equal(api.updaterState.lastError, "");
+      assert.equal(api.updaterState.checking, false);
+      assert.equal(api.updaterState.noPublishedRelease, true);
+    }
+  }
+  assert.doesNotMatch(JSON.stringify(messages), /406|Cannot parse|No published versions|example\/launcher|XML:/);
+  updater.checkForUpdates = async () => { updater.emit("update-not-available", { version: "0.0.1" }); return {}; };
+  assert.equal((await handlers.get("updater:check")({})).ok, true);
+  assert.equal(api.updaterState.noPublishedRelease, false);
+  updater.checkForUpdates = async () => { throw Object.assign(new Error("Cannot parse malformed release XML"), { code: "ERR_UPDATER_INVALID_RELEASE_FEED" }); };
+  assert.equal((await handlers.get("updater:check")({})).ok, false);
+  assert.equal(api.updaterState.noPublishedRelease, false);
+  assert.ok(api.updaterState.lastError);
+});
+
+test("synchronous updater failures do not prevent a later successful retry", async t => {
+  const { api, handlers, context, updater } = await setup(t);
+  context.process.env = {};
+  vm.runInContext("require('electron').app.isPackaged = true; readLauncherConfig = () => ({ github: { owner: 'example', repo: 'launcher' } }); setTimeout = () => 0; setInterval = () => 0;", context);
+  api.setupAutoUpdater();
+  updater.checkForUpdates = () => { throw new Error("Temporary network failure"); };
+  assert.equal((await handlers.get("updater:check")({})).ok, false);
+  updater.checkForUpdates = () => { updater.emit("update-not-available", { version: "0.0.1" }); return {}; };
+  assert.equal((await handlers.get("updater:check")({})).ok, true);
   assert.equal(api.updaterState.lastError, "");
 });
 

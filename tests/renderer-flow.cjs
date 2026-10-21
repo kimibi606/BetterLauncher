@@ -36,6 +36,9 @@ const calls = [];
 const defaultsRequests = [];
 let updaterFixture = { enabled: false, currentVersion: require("../package.json").version };
 let updaterResult = { ok: true };
+let blockUpdaterCheck = false;
+let releaseUpdaterCheck;
+let updaterCheckCount = 0;
 const mediaRequests = [];
 const auth = () => ({ signedIn, profileName: signedIn ? "Tester" : "", uuid: signedIn ? activeAccountUuid : "",
   accounts: signedIn ? [{ id: activeAccountUuid, uuid: activeAccountUuid, profileName: "Tester", selected: true }] : [] });
@@ -60,7 +63,11 @@ handle("launcher:get-system-profile", () => ({ totalMemoryGb: 32, preset: "high"
 handle("launcher:load-profiles", () => ({ ok: true, profiles: [] }));
 handle("updater:get-state", () => updaterFixture);
 handle("updater:ensure-latest", () => updaterResult);
-handle("updater:check", () => updaterResult);
+handle("updater:check", async () => {
+  updaterCheckCount++;
+  if (blockUpdaterCheck) await new Promise(resolve => { releaseUpdaterCheck = resolve; });
+  return updaterResult;
+});
 handle("launcher:get-github-release", () => ({ ok: true, configured: false }));
 handle("launcher:auto-select-java", async (payload) => {
   calls.push({ type: "java", ...payload });
@@ -386,6 +393,32 @@ app.whenReady().then(async () => {
   await js(win, "settingsCloseButton.click(); startLaunchButton.click()");
   await waitFor(win, "!isLaunchRequestPending");
   assert.ok(calls.some(entry => entry.type === "launch"));
+  win.destroy();
+  // A missing published release is informational. Repeated clicks share one
+  // pending action, then a later click can start a fresh check.
+  updaterFixture = { enabled: true, unavailable: true, noPublishedRelease: true, currentVersion: require("../package.json").version };
+  updaterResult = { ok: true, unavailable: true, noPublishedRelease: true,
+    message: "아직 배포된 런처 업데이트가 없습니다. 현재 버전으로 이용할 수 있습니다." };
+  win = await openWindow();
+  await js(win, "settingsButton.click(); document.querySelector('[data-settings-tab=settingsTabUpdate]').click()");
+  assert.match(await js(win, "settingsUpdateSummary.textContent"), /아직 배포된/);
+  assert.equal(await js(win, "settingsUpdateIndicator.classList.contains('is-error') || settingsUpdateIndicator.classList.contains('is-warning')"), false);
+  const checksBefore = updaterCheckCount;
+  blockUpdaterCheck = true;
+  releaseUpdaterCheck = null;
+  await js(win, "for(let i=0;i<15;i++) settingsUpdateActionButton.click()");
+  while (!releaseUpdaterCheck) await delay(20);
+  assert.equal(updaterCheckCount, checksBefore + 1);
+  assert.equal(await js(win, "settingsUpdateActionButton.disabled && isSettingsUpdateActionPending"), true);
+  releaseUpdaterCheck();
+  await waitFor(win, "!isSettingsUpdateActionPending");
+  assert.equal(await js(win, "settingsStatus.classList.contains('is-error') || settingsUpdateActionButton.disabled"), false);
+  assert.match(await js(win, "settingsStatus.textContent"), /아직 배포된/);
+  blockUpdaterCheck = false;
+  await js(win, "settingsUpdateActionButton.click()");
+  await waitFor(win, "!isSettingsUpdateActionPending");
+  assert.equal(updaterCheckCount, checksBefore + 2);
+  await screenshot(win, "updater-no-published-release");
   win.destroy();
   updaterFixture = { enabled: false, currentVersion: require("../package.json").version };
   updaterResult = { ok: true };

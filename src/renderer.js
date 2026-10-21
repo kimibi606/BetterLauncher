@@ -178,6 +178,7 @@ let isPlayerCountRequestPending = false;
 let modpackUpdatePollTimer = null;
 let isModpackUpdateCheckRunning = false;
 let updaterSnapshot = null;
+let isSettingsUpdateActionPending = false;
 let githubReleaseSnapshot = null;
 let isGitHubReleaseRequestPending = false;
 function delay(ms) {
@@ -2679,6 +2680,9 @@ function updateUpdaterUi(state) {
       actionDisabled = true;
       indicatorClass = "is-warning";
     }
+  } else if (snapshot.noPublishedRelease) {
+    summaryText = "아직 배포된 런처 업데이트가 없습니다. 현재 버전으로 이용할 수 있습니다.";
+    actionText = "업데이트 확인";
   } else if (snapshot.unavailable) {
     summaryText = "업데이트 배포에 접근할 수 없습니다. 현재 버전으로 이용할 수 있습니다.";
     actionText = "다시 확인";
@@ -2716,7 +2720,7 @@ function updateUpdaterUi(state) {
   settingsUpdateChannel.textContent = channelText;
   settingsUpdateVersion.textContent = versionText;
   settingsUpdateActionButton.textContent = actionText;
-  settingsUpdateActionButton.disabled = actionDisabled;
+  settingsUpdateActionButton.disabled = actionDisabled || isSettingsUpdateActionPending;
 
   settingsUpdateIndicator.classList.remove("is-pending", "is-warning", "is-error");
   if (indicatorClass) {
@@ -3045,6 +3049,18 @@ if (settingsProfileSelect) {
 }
 
 bindClick(settingsUpdateActionButton, async () => {
+  if (isSettingsUpdateActionPending) return;
+  isSettingsUpdateActionPending = true;
+  settingsUpdateActionButton.disabled = true;
+  try {
+    await handleSettingsUpdateAction();
+  } finally {
+    isSettingsUpdateActionPending = false;
+    updateUpdaterUi(updaterSnapshot);
+  }
+});
+
+async function handleSettingsUpdateAction() {
   if (!window.launcherApi || typeof window.launcherApi.getUpdaterState !== "function") {
     return;
   }
@@ -3099,7 +3115,7 @@ bindClick(settingsUpdateActionButton, async () => {
     return;
   }
   setSettingsStatus("런처가 최신 버전입니다.");
-});
+}
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && currentScreen === "launch" && isNewsPanelExpanded) {
     applyNewsPanelExpandedState(false);

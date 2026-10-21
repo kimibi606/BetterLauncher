@@ -150,6 +150,7 @@ let lastUpdaterFailure = null;
 const updaterState = {
   enabled: false,
   unavailable: false,
+  noPublishedRelease: false,
   checking: false,
   available: false,
   downloading: false,
@@ -5083,13 +5084,26 @@ function reportUpdaterFailure(error) {
   if (updaterState.downloaded) return { ok: true, downloaded: true, latestVersion: updaterState.latestVersion };
   if (lastUpdaterFailure?.error === error) return lastUpdaterFailure.result;
   const code = String(error?.code || "");
+  const detail = String(error?.message || "");
   const status = Number(error?.statusCode || error?.response?.statusCode || error?.response?.status ||
-    String(error?.message || "").match(/(?:^|[\s:])([45]\d\d)(?=[\s"(]|$)/)?.[1]);
+    detail.match(/(?:^|[\s:])([45]\d\d)(?=[\s"(]|$)/)?.[1]);
+  // GitHub can expose tag entries in Atom without a published release. The
+  // /latest lookup then redirects and returns 406 for the JSON request; the
+  // provider wraps that error and loses its original status/code properties.
+  const wrappedLatestLookup = code === "ERR_UPDATER_INVALID_RELEASE_FEED" &&
+    detail.includes("Unable to find latest version on GitHub");
+  const missingRelease = code === "ERR_UPDATER_NO_PUBLISHED_VERSIONS" ||
+    (code === "ERR_XML_MISSED_ELEMENT" && detail.trim() === "No published versions on GitHub") ||
+    (wrappedLatestLookup && status === 406);
+  const noPublishedRelease = !updaterState.downloading && !updaterState.available && missingRelease;
   const unavailable = !updaterState.downloading && !updaterState.available && (
+    missingRelease ||
     [401, 403, 404].includes(status) ||
     ["ERR_UPDATER_NO_PUBLISHED_VERSIONS", "ERR_UPDATER_LATEST_VERSION_NOT_FOUND", "ERR_UPDATER_CHANNEL_FILE_NOT_FOUND"].includes(code)
   );
-  const message = unavailable
+  const message = noPublishedRelease
+    ? "아직 배포된 런처 업데이트가 없습니다. 현재 버전으로 이용할 수 있습니다."
+    : unavailable
     ? "런처 업데이트 배포에 접근할 수 없습니다. 현재 버전으로 이용할 수 있습니다."
     : updaterState.downloading || updaterState.available
       ? "런처 업데이트를 다운로드하지 못했습니다. 잠시 후 다시 시도해 주세요."
@@ -5097,10 +5111,10 @@ function reportUpdaterFailure(error) {
   // The updater emits an error and also rejects its promise. Report it once,
   // without forwarding provider messages, response bodies, URLs or stacks.
   patchUpdaterState({ checking: false, available: false, downloading: false, downloaded: false,
-    unavailable, progressPercent: 0, latestVersion: "", releaseName: "", releaseDate: "",
+    unavailable, noPublishedRelease, progressPercent: 0, latestVersion: "", releaseName: "", releaseDate: "",
     lastError: unavailable ? "" : message, message });
   sendLog({ level: unavailable ? "info" : "warn", scope: "updater", message });
-  const result = { ok: unavailable, unavailable, downloaded: false,
+  const result = { ok: unavailable, unavailable, noPublishedRelease, downloaded: false,
     ...(unavailable ? { reason: "update-feed-unavailable", message } : { error: message }) };
   lastUpdaterFailure = { error, result };
   return result;
@@ -5129,10 +5143,13 @@ async function checkForAppUpdates({ manual = false } = {}) {
     return activeUpdaterCheckPromise;
   }
 
-  activeUpdaterCheckPromise = (async () => {
+  // Assign the shared promise before the provider runs: even synchronous
+  // failures must clear it so the next manual check can retry.
+  activeUpdaterCheckPromise = Promise.resolve().then(async () => {
     try {
       lastUpdaterFailure = null;
-      patchUpdaterState({ unavailable: false, lastError: "" });
+      patchUpdaterState({ checking: true, unavailable: false, noPublishedRelease: false, lastError: "",
+        lastCheckedAt: new Date().toISOString() });
       if (manual) {
         patchUpdaterState({
           message: "Checking for launcher updates...",
@@ -5167,7 +5184,7 @@ async function checkForAppUpdates({ manual = false } = {}) {
     } finally {
       activeUpdaterCheckPromise = null;
     }
-  })();
+  });
 
   return activeUpdaterCheckPromise;
 }
@@ -5279,6 +5296,7 @@ function setupAutoUpdater() {
     patchUpdaterState({
       checking: true,
       unavailable: false,
+      noPublishedRelease: false,
       available: false,
       downloaded: false,
       downloading: false,
@@ -5294,6 +5312,7 @@ function setupAutoUpdater() {
     patchUpdaterState({
       checking: false,
       unavailable: false,
+      noPublishedRelease: false,
       available: true,
       downloading: true,
       downloaded: false,
@@ -5315,6 +5334,7 @@ function setupAutoUpdater() {
     patchUpdaterState({
       checking: false,
       unavailable: false,
+      noPublishedRelease: false,
       available: false,
       downloading: false,
       downloaded: false,
@@ -5332,6 +5352,7 @@ function setupAutoUpdater() {
     patchUpdaterState({
       checking: false,
       unavailable: false,
+      noPublishedRelease: false,
       downloading: true,
       progressPercent: Number(progress?.percent || 0),
       message: `Downloading launcher update... ${Number(progress?.percent || 0).toFixed(1)}%`
@@ -5342,6 +5363,7 @@ function setupAutoUpdater() {
     patchUpdaterState({
       checking: false,
       unavailable: false,
+      noPublishedRelease: false,
       available: true,
       downloading: false,
       downloaded: true,
