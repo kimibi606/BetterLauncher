@@ -7,6 +7,19 @@ const path = require("node:path");
 const os = require("node:os");
 const Zip = require("adm-zip");
 const { importModpackZip, normalizeArchivePath } = require("../scripts/import-modpack-zip");
+const { decodeZipEntryName } = require("../lib/zip-entry-names");
+const { crc32 } = require("adm-zip/util");
+
+function unicodeExtra(raw, name, validCrc = true) {
+  const text = Buffer.from(name), extra = Buffer.alloc(9 + text.length);
+  extra.writeUInt16LE(0x7075); extra.writeUInt16LE(5 + text.length, 2); extra[4] = 1;
+  extra.writeUInt32LE(((crc32(raw) >>> 0) ^ (validCrc ? 0 : 1)) >>> 0, 5); text.copy(extra, 9);
+  return extra;
+}
+
+function legacyZip() {
+  return new Zip({ decoder: { efs: false, encode: value => Buffer.from(value, "utf8"), decode: value => value.toString("utf8") } });
+}
 
 async function fixture(t) {
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "betterlauncher-import-"));
@@ -41,4 +54,35 @@ test("ZIP import rejects Windows traversal, ADS, reserved paths and duplicate ca
   zip.addFile("mods/Example.jar", Buffer.from("one")); zip.addFile("mods/example.jar", Buffer.from("two")); zip.writeZip(state.archive);
   await assert.rejects(importModpackZip(state), /duplicate Windows paths/);
   assert.equal(fs.existsSync(state.destination), false);
+});
+
+test("ZIP import restores Korean Unicode extra names and CP949 filenames without changing file contents", async t => {
+  const state = await fixture(t), zip = legacyZip();
+  zip.addFile("mods/example.jar", Buffer.from("mod"));
+  const raw = Buffer.concat([Buffer.from("resourcepacks/"), Buffer.from("c7d1b1db", "hex"), Buffer.from("/pack.mcmeta")]);
+  zip.addFile("resourcepacks/placeholder/pack.mcmeta", Buffer.from("original pack content"));
+  const entry = zip.getEntry("resourcepacks/placeholder/pack.mcmeta");
+  entry.entryName = raw; entry.header.flags_efs = false;
+  entry.extra = unicodeExtra(raw, "resourcepacks/한글/pack.mcmeta");
+  zip.writeZip(state.archive);
+  const result = await importModpackZip(state);
+  assert.equal(result.fileCount, 2);
+  assert.equal(fs.readFileSync(path.join(state.destination, "resourcepacks/한글/pack.mcmeta"), "utf8"), "original pack content");
+  assert.equal(result.files.some(file => file.path.includes("\ufffd")), false);
+  assert.equal(decodeZipEntryName({ rawEntryName: raw, extra: Buffer.alloc(0), header: { flags: 0 } }), "resourcepacks/한글/pack.mcmeta");
+  assert.equal(decodeZipEntryName({ rawEntryName: raw, extra: unicodeExtra(raw, "wrong", false), header: { flags: 0 } }), "resourcepacks/한글/pack.mcmeta");
+  assert.throws(() => decodeZipEntryName({ rawEntryName: raw, header: { flags: 0x800 } }), /encoded data/);
+});
+
+test("Unicode ZIP names are still checked for traversal, duplicates and irreversible replacement characters", async t => {
+  const state = await fixture(t), zip = legacyZip();
+  zip.addFile("mods/example.jar", Buffer.from("mod"));
+  const entry = zip.getEntry("mods/example.jar");
+  entry.extra = unicodeExtra(entry.rawEntryName, "../outside.jar"); entry.header.flags_efs = false;
+  zip.writeZip(state.archive);
+  await assert.rejects(importModpackZip(state), /Unsafe path/);
+  assert.equal(fs.existsSync(state.destination), false);
+  assert.throws(() => normalizeArchivePath("resourcepacks/손상\ufffd/file"), /Unsafe path/);
+  const raw = Buffer.from("config/example.json");
+  assert.throws(() => decodeZipEntryName({ rawEntryName: raw, header: { flags: 0 }, extra: Buffer.concat([unicodeExtra(raw, "config/a.json"), unicodeExtra(raw, "config/b.json")]) }), /Conflicting/);
 });

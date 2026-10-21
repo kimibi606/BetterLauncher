@@ -10,6 +10,7 @@ const { fileURLToPath, pathToFileURL } = require("url");
 const { AsyncLocalStorage } = require("async_hooks");
 const { readProjects, resolveProject, getProjectDirectory, getProjectServer, formatServerAddress, buildProjectConnectionOptions } = require("./lib/projects");
 const { downloadDistributionFile } = require("./lib/distribution-download");
+const { normalizePathRenames, repairModpackPaths } = require("./lib/modpack-path-renames");
 const { secureFetch } = require("./lib/secure-fetch");
 const { redactPrivateDiagnostics, sanitizeDiagnosticPayload } = require("./lib/log-security");
 const { normalizeSkinUuid, createAccountSkinService } = require("./lib/account-skin");
@@ -1940,6 +1941,15 @@ function resolveModpackManifestArchiveSource(manifestSource, archiveUrl) {
   return null;
 }
 
+function getConfiguredPathRenames() {
+  return normalizePathRenames(getCurrentProject().modpack?.pathRenames);
+}
+
+function computeModpackSourceDigest(text) {
+  const repairs = getConfiguredPathRenames();
+  return computeSha256FromText(text + (repairs.length ? "\npath-repairs:" + JSON.stringify(repairs) : ""));
+}
+
 function parseModpackManifest(manifestSource, preset) {
   const json = manifestSource?.json;
   if (!json || typeof json !== "object") {
@@ -1953,7 +1963,7 @@ function parseModpackManifest(manifestSource, preset) {
     throw new Error("Modpack manifests cannot request deletion of the entire Minecraft directory.");
   }
   const archive = json.archive && typeof json.archive === "object" ? json.archive : null;
-  const manifestDigest = computeSha256FromText(manifestSource.text);
+  const manifestDigest = computeModpackSourceDigest(manifestSource.text);
   const baseManifest = {
     id: asTrimmedText(json.id) || getCurrentProject().id,
     minecraftVersion: asTrimmedText(json.minecraftVersion),
@@ -2902,11 +2912,17 @@ function parseDistributionIndex(distributionJson, preset, options = {}) {
   }
 
   const fileEntries = explicitFiles.length > 0 ? explicitFiles : moduleFiles;
+  const repairEntries = [...getConfiguredPathRenames(), ...normalizePathRenames(source.pathRenames || distributionJson.pathRenames)];
+  const pathRenames = normalizePathRenames([...new Map(repairEntries.map(entry =>
+    [entry.from.toLowerCase() + "\0" + entry.to.toLowerCase(), entry])).values()]);
   const resolvedBaseUrl = selectDistributionBaseUrl([source.baseUrl, distributionJson.baseUrl, options.defaultBaseUrl]);
   const files = [];
   const seenPaths = new Set();
   for (let index = 0; index < fileEntries.length; index += 1) {
     const file = normalizeDistributionFileEntry(fileEntries[index], index, resolvedBaseUrl);
+    for (const repair of pathRenames) {
+      if (file.path.startsWith(repair.from + "/")) file.path = repair.to + file.path.slice(repair.from.length);
+    }
     const pathKey = buildModpackPathKey(file.path);
     if (seenPaths.has(pathKey)) {
       throw new Error(`Duplicate modpack file path in distribution: ${file.path}`);
@@ -2925,6 +2941,7 @@ function parseDistributionIndex(distributionJson, preset, options = {}) {
     version: asTrimmedText(source.version || distributionJson.version),
     sourceKey,
     files,
+    pathRenames,
     delete: deleteEntries.map((entry) => {
       const normalizedEntry = normalizeRelativeModpackPath(entry);
       assertModpackPathDoesNotTargetInternalState(normalizedEntry, "Distribution delete path");
@@ -3916,6 +3933,7 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
   const previousState = readModpackState(modpackRoot);
   if (manifest.distribution) {
     const parsedDistribution = manifest.distribution;
+    const renamedCount = await repairModpackPaths(modpackRoot, parsedDistribution.pathRenames);
     const nextManagedFiles = parsedDistribution.files.map((file) => file.path);
     const nextManagedPathKeys = new Set(nextManagedFiles.map((filePath) => buildModpackPathKey(filePath)));
     const previousManagedFiles = normalizeStateManagedFiles(previousState?.managedFiles);
@@ -3939,7 +3957,7 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
       });
     }
     const applyResult = await applyDistributionFiles(modpackRoot, parsedDistribution.files);
-    const unchanged = applyResult.updatedCount === 0 && removedCount === 0;
+    const unchanged = applyResult.updatedCount === 0 && removedCount === 0 && renamedCount === 0;
     const signature = `distribution:${launcherPreset}:manifest:${manifest.sourceKey}:${manifest.manifestDigest}`;
     await writeModpackState(modpackRoot, {
       signature,
@@ -4130,9 +4148,10 @@ async function synchronizeModpackDistribution({ launcherPreset, modpackRoot, ses
     defaultBaseUrl: getDistributionSourceBaseUrl(distributionSource)
   });
   const distributionSourceKey = asTrimmedText(distributionSource?.signatureKey);
-  const distributionDigest = computeSha256FromText(distributionText);
+  const distributionDigest = computeModpackSourceDigest(distributionText);
   const version = asTrimmedText(parsedDistribution.version) || distributionDigest.slice(0, 12);
   const signature = `distribution:${launcherPreset}:${distributionSource.kind}:${distributionSourceKey}:${distributionDigest}`;
+  const renamedCount = await repairModpackPaths(modpackRoot, parsedDistribution.pathRenames);
   const previousState = readModpackState(modpackRoot);
   const previousManagedFiles = normalizeStateManagedFiles(previousState?.managedFiles);
   const nextManagedFiles = parsedDistribution.files.map((file) => file.path);
@@ -4158,7 +4177,7 @@ async function synchronizeModpackDistribution({ launcherPreset, modpackRoot, ses
     });
   }
   const applyResult = await applyDistributionFiles(modpackRoot, parsedDistribution.files);
-  const unchanged = applyResult.updatedCount === 0 && removedCount === 0;
+  const unchanged = applyResult.updatedCount === 0 && removedCount === 0 && renamedCount === 0;
 
   await writeModpackState(modpackRoot, {
     signature,

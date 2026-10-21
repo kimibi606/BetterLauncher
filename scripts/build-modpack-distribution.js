@@ -5,6 +5,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const { resolveProject } = require("../lib/projects");
+const { normalizePathRenames } = require("../lib/modpack-path-renames");
 
 const CHUNK_BYTES = 20 * 1024 * 1024;
 const MAX_ASSET_BYTES = 25 * 1024 * 1024;
@@ -35,7 +36,7 @@ function parseArgs(argv) {
 
 function normalizeManagedPath(value) {
   const normalized = String(value || "").replace(/\\/g, "/");
-  if (!normalized || normalized.includes("\0") || normalized.includes(":") || normalized.startsWith("/") || normalized.split("/").some((part) => !part || part === "." || part === "..")) {
+  if (!normalized || normalized.includes("\ufffd") || normalized.includes("\0") || normalized.includes(":") || normalized.startsWith("/") || normalized.split("/").some((part) => !part || part === "." || part === "..")) {
     throw new Error(`Invalid modpack file path: ${value}`);
   }
   const parts = normalized.split("/");
@@ -100,6 +101,7 @@ async function validatePagesOutput(output) {
 
 async function buildDistribution(args, config) {
   const project = resolveProject(config, args.project);
+  const pathRenames = normalizePathRenames(project.modpack?.pathRenames);
   const source = path.resolve(args.source || "");
   const output = path.resolve(args.output || "distribution");
   if (!args.source || !fs.existsSync(source) || !fs.statSync(source).isDirectory()) throw new Error("--source must point to an existing modpack directory.");
@@ -153,7 +155,8 @@ async function buildDistribution(args, config) {
     }
     files.push({ path: filePath, sha256, size, ...(pieces.length === 1 ? { url: pieces[0].url } : { chunks: pieces }) });
   }
-  const manifest = { id: project.id, type: "distribution", version, minecraftVersion: project.minecraftVersion, files };
+  const manifest = { id: project.id, type: "distribution", version, minecraftVersion: project.minecraftVersion, files,
+    ...(pathRenames.length ? { pathRenames } : {}) };
   if (!args.dryRun) {
     // Keep previous hash assets for clients that have already fetched an older manifest.
     const manifestText = JSON.stringify(manifest, null, 2) + "\n";

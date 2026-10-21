@@ -5,12 +5,13 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const Zip = require("adm-zip");
 const { safeRuntimePath } = require("../lib/neoforge-runtime");
+const { decodeZipEntryName } = require("../lib/zip-entry-names");
 
 const ALLOWED_DIRECTORIES = new Set(["mods", "config", "defaultconfigs", "resourcepacks", "shaderpacks", "cobblemon"]);
 
 function normalizeArchivePath(value) {
   const name = String(value).replace(/\\/g, "/").replace(/\/$/, "");
-  if (!name || name.startsWith("/") || name.split("/").some(part => !part || part === "." || part === ".." ||
+  if (!name || name.includes("\ufffd") || name.startsWith("/") || name.split("/").some(part => !part || part === "." || part === ".." ||
       /[<>:"|?*\x00-\x1f\x7f]/.test(part) || /[. ]$/.test(part) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))) {
     throw new Error("Unsafe path in modpack archive.");
   }
@@ -30,7 +31,7 @@ async function importModpackZip({ archive, destination }) {
   const seen = new Set(), plan = [];
   let totalBytes = 0, skipped = 0;
   for (const entry of entries) {
-    const relative = normalizeArchivePath(entry.entryName);
+    const relative = normalizeArchivePath(decodeZipEntryName(entry));
     if (((entry.header.attr >>> 16) & 0xf000) === 0xa000) throw new Error("Modpack archives cannot contain symbolic links.");
     const top = relative.split("/")[0];
     if (!ALLOWED_DIRECTORIES.has(top) && relative !== "options.txt") { skipped++; continue; }

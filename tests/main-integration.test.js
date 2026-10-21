@@ -372,6 +372,37 @@ test("distribution migration and updates preserve player preferences", async (t)
   assert.equal(await fs.promises.readFile(path.join(defaults.minecraftDirectory, "options.txt"), "utf8"), "player-controls");
 });
 
+test("manifest filename repairs rename corrupted resourcepack folders while preserving player changes", async t => {
+  const { handlers, config, root, output } = await setup(t);
+  const source = path.join(root, "alpha-source"), original = "resourcepacks/legacy", broken = "resourcepacks/Example \ufffd", corrected = "resourcepacks/한글 팩";
+  await fs.promises.mkdir(path.join(source, original), { recursive: true });
+  await fs.promises.writeFile(path.join(source, original, "pack.mcmeta"), "original pack");
+  await buildDistribution({ source, output, project: "alpha", version: "2" }, config);
+  const manifestFile = path.join(output, "alpha/latest.json");
+  const manifest = JSON.parse(await fs.promises.readFile(manifestFile));
+  for (const file of manifest.files) if (file.path.startsWith(original + "/")) file.path = broken + file.path.slice(original.length);
+  await fs.promises.writeFile(manifestFile, JSON.stringify(manifest));
+  const defaults = await handlers.get("launcher:get-defaults")({}, { projectId: "alpha" });
+  const payload = { projectId: "alpha", minecraftDirectory: defaults.minecraftDirectory };
+  assert.equal((await handlers.get("launcher:sync-modpack")({}, payload)).ok, true);
+  await fs.promises.writeFile(path.join(defaults.minecraftDirectory, broken, "pack.mcmeta"), "player edit");
+  config.projects[0].modpack.pathRenames = [{ from: broken, to: corrected }];
+  await fs.promises.writeFile(path.join(root, "modpack.config.json"), JSON.stringify(config));
+  // A corrected installer must repair an unchanged old manifest as well, so
+  // the next sync cannot recreate the corrupt folder before a separate deploy.
+  assert.equal((await handlers.get("launcher:check-modpack-update")({}, payload)).pending, true);
+  assert.equal((await handlers.get("launcher:sync-modpack")({}, payload)).ok, true);
+  assert.equal(fs.existsSync(path.join(defaults.minecraftDirectory, broken)), false);
+  assert.equal(await fs.promises.readFile(path.join(defaults.minecraftDirectory, corrected, "pack.mcmeta"), "utf8"), "player edit");
+  await fs.promises.rename(path.join(source, original), path.join(source, corrected));
+  await buildDistribution({ source, output, project: "alpha", version: "3" }, config);
+  const result = await handlers.get("launcher:sync-modpack")({}, payload);
+  assert.equal(result.ok, true, result.error);
+  assert.equal(fs.existsSync(path.join(defaults.minecraftDirectory, broken)), false);
+  assert.equal(await fs.promises.readFile(path.join(defaults.minecraftDirectory, corrected, "pack.mcmeta"), "utf8"), "player edit");
+  assert.equal((await handlers.get("launcher:sync-modpack")({}, payload)).ok, true);
+});
+
 test("legacy auth/session migration excludes existing modpack installations", async (t) => {
   const { root, api, appPaths } = await setup(t);
   const oldRoot = path.join(root, ".bettermonlauncher");
