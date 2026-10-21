@@ -144,8 +144,10 @@ const modpackSessionSyncedKeys = new Set();
 const modpackArchiveSessionCache = new Map();
 const modpackOperationPromises = new Map();
 let activeUpdaterCheckPromise = null;
+let lastUpdaterFailure = null;
 const updaterState = {
   enabled: false,
+  unavailable: false,
   checking: false,
   available: false,
   downloading: false,
@@ -1688,7 +1690,7 @@ function readGitHubReleaseConfig() {
     repo,
     apiBaseUrl: (apiBaseUrl || "https://api.github.com").replace(/\/+$/g, ""),
     timeoutMs,
-    configured: githubConfig.enabled !== false && Boolean(owner && repo)
+    configured: Boolean(owner && repo)
   };
 }
 
@@ -4926,7 +4928,8 @@ function sendLog(payload) {
   // Raw game output can contain chat, user properties and launch credentials.
   // These streams are unused by the UI; only launcher status events are sent.
   if (!["info", "warn", "error", "progress"].includes(payload?.level)) return;
-  sendToRenderer("launcher:log", { level: payload.level, message: payload.message });
+  sendToRenderer("launcher:log", { level: payload.level, message: payload.message,
+    ...(payload.scope === "updater" ? { scope: "updater" } : {}) });
 }
 
 function sendState(launching) {
@@ -4955,7 +4958,6 @@ function patchUpdaterState(patch) {
 }
 
 function isUpdaterEnabled() {
-  if (readLauncherConfig()?.github?.enabled === false) return false;
   if (app.isPackaged) {
     return true;
   }
@@ -5047,11 +5049,38 @@ function configureAutoUpdaterFeedFromGitHubConfig() {
   }
 }
 
+function reportUpdaterFailure(error) {
+  if (updaterState.downloaded) return { ok: true, downloaded: true, latestVersion: updaterState.latestVersion };
+  if (lastUpdaterFailure?.error === error) return lastUpdaterFailure.result;
+  const code = String(error?.code || "");
+  const status = Number(error?.statusCode || error?.response?.statusCode || error?.response?.status ||
+    String(error?.message || "").match(/(?:^|[\s:])([45]\d\d)(?=[\s"(]|$)/)?.[1]);
+  const unavailable = !updaterState.downloading && !updaterState.available && (
+    [401, 403, 404].includes(status) ||
+    ["ERR_UPDATER_NO_PUBLISHED_VERSIONS", "ERR_UPDATER_LATEST_VERSION_NOT_FOUND", "ERR_UPDATER_CHANNEL_FILE_NOT_FOUND"].includes(code)
+  );
+  const message = unavailable
+    ? "런처 업데이트 배포에 접근할 수 없습니다. 현재 버전으로 이용할 수 있습니다."
+    : updaterState.downloading || updaterState.available
+      ? "런처 업데이트를 다운로드하지 못했습니다. 잠시 후 다시 시도해 주세요."
+      : "런처 업데이트를 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.";
+  // The updater emits an error and also rejects its promise. Report it once,
+  // without forwarding provider messages, response bodies, URLs or stacks.
+  patchUpdaterState({ checking: false, available: false, downloading: false, downloaded: false,
+    unavailable, progressPercent: 0, latestVersion: "", releaseName: "", releaseDate: "",
+    lastError: unavailable ? "" : message, message });
+  sendLog({ level: unavailable ? "info" : "warn", scope: "updater", message });
+  const result = { ok: unavailable, unavailable, downloaded: false,
+    ...(unavailable ? { reason: "update-feed-unavailable", message } : { error: message }) };
+  lastUpdaterFailure = { error, result };
+  return result;
+}
+
 async function checkForAppUpdates({ manual = false } = {}) {
   if (!updaterState.enabled) {
     return {
       ok: false,
-      error: "Auto updater is disabled in development mode."
+      error: "Launcher updates are available in the installed application."
     };
   }
 
@@ -5072,6 +5101,8 @@ async function checkForAppUpdates({ manual = false } = {}) {
 
   activeUpdaterCheckPromise = (async () => {
     try {
+      lastUpdaterFailure = null;
+      patchUpdaterState({ unavailable: false, lastError: "" });
       if (manual) {
         patchUpdaterState({
           message: "Checking for launcher updates...",
@@ -5092,6 +5123,7 @@ async function checkForAppUpdates({ manual = false } = {}) {
         await downloadPromise;
       }
 
+      if (lastUpdaterFailure) return lastUpdaterFailure.result;
       return {
         ok: true,
         available: Boolean(updaterState.available),
@@ -5101,15 +5133,7 @@ async function checkForAppUpdates({ manual = false } = {}) {
         latestVersion: asTrimmedText(updaterState.latestVersion)
       };
     } catch (error) {
-      const message = String(error?.message || error);
-      patchUpdaterState({
-        checking: false,
-        downloading: false,
-        lastError: message,
-        message: `Update check failed: ${message}`
-      });
-      sendLog({ level: "error", message: `Auto update check failed: ${message}` });
-      return { ok: false, error: message };
+      return reportUpdaterFailure(error);
     } finally {
       activeUpdaterCheckPromise = null;
     }
@@ -5148,7 +5172,7 @@ async function ensureLatestLauncherVersion({ installIfDownloaded = false } = {})
   }
 
   const checkResult = await checkForAppUpdates({ manual: true });
-  if (!checkResult.ok) {
+  if (!checkResult.ok || checkResult.unavailable) {
     return checkResult;
   }
 
@@ -5183,8 +5207,7 @@ function schedulePeriodicUpdateChecks() {
       return;
     }
     checkForAppUpdates().catch((error) => {
-      const message = String(error?.message || error);
-      sendLog({ level: "warn", message: `Scheduled update check failed: ${message}` });
+      reportUpdaterFailure(error);
     });
   }, APP_UPDATE_CHECK_INTERVAL_MS);
 }
@@ -5207,23 +5230,25 @@ function setupAutoUpdater() {
   const feedResult = configureAutoUpdaterFeedFromGitHubConfig();
   if (!feedResult.ok) {
     updaterState.enabled = false;
-    updaterState.lastError = feedResult.error;
-    updaterState.message = `Auto updater feed configuration failed: ${feedResult.error}`;
-    sendLog({ level: "warn", message: updaterState.message });
+    updaterState.lastError = "런처 업데이트 설정을 준비하지 못했습니다. 현재 버전으로 이용할 수 있습니다.";
+    updaterState.message = updaterState.lastError;
+    sendLog({ level: "warn", scope: "updater", message: updaterState.message });
     sendUpdaterState();
     return;
   }
   sendLog({
     level: "info",
-    message: `Auto updater feed set to GitHub repo ${feedResult.owner}/${feedResult.repo} (${feedResult.configPath}).`
+    scope: "updater", message: "Launcher update feed configured."
   });
 
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
 
   autoUpdater.on("checking-for-update", () => {
+    lastUpdaterFailure = null;
     patchUpdaterState({
       checking: true,
+      unavailable: false,
       available: false,
       downloaded: false,
       downloading: false,
@@ -5232,12 +5257,13 @@ function setupAutoUpdater() {
       lastCheckedAt: new Date().toISOString(),
       message: "Checking for launcher updates..."
     });
-    sendLog({ level: "info", message: "Checking for launcher updates..." });
+    sendLog({ level: "info", scope: "updater", message: "Checking for launcher updates..." });
   });
 
   autoUpdater.on("update-available", (info) => {
     patchUpdaterState({
       checking: false,
+      unavailable: false,
       available: true,
       downloading: true,
       downloaded: false,
@@ -5245,10 +5271,12 @@ function setupAutoUpdater() {
       releaseName: asTrimmedText(info?.releaseName),
       releaseDate: asTrimmedText(info?.releaseDate),
       progressPercent: 0,
+      lastError: "",
       message: `Update found (${asTrimmedText(info?.version) || "new version"}). Downloading...`
     });
     sendLog({
       level: "info",
+      scope: "updater",
       message: `Launcher update available: ${asTrimmedText(info?.version) || "new version"}. Downloading...`
     });
   });
@@ -5256,6 +5284,7 @@ function setupAutoUpdater() {
   autoUpdater.on("update-not-available", (info) => {
     patchUpdaterState({
       checking: false,
+      unavailable: false,
       available: false,
       downloading: false,
       downloaded: false,
@@ -5266,12 +5295,13 @@ function setupAutoUpdater() {
       lastError: "",
       message: "Launcher is up to date."
     });
-    sendLog({ level: "info", message: "Launcher is up to date." });
+    sendLog({ level: "info", scope: "updater", message: "Launcher is up to date." });
   });
 
   autoUpdater.on("download-progress", (progress) => {
     patchUpdaterState({
       checking: false,
+      unavailable: false,
       downloading: true,
       progressPercent: Number(progress?.percent || 0),
       message: `Downloading launcher update... ${Number(progress?.percent || 0).toFixed(1)}%`
@@ -5281,6 +5311,7 @@ function setupAutoUpdater() {
   autoUpdater.on("update-downloaded", (info) => {
     patchUpdaterState({
       checking: false,
+      unavailable: false,
       available: true,
       downloading: false,
       downloaded: true,
@@ -5288,27 +5319,20 @@ function setupAutoUpdater() {
       releaseName: asTrimmedText(info?.releaseName),
       releaseDate: asTrimmedText(info?.releaseDate),
       progressPercent: 100,
+      lastError: "",
       message: "Update downloaded. It will be applied when the launcher restarts."
     });
-    sendLog({ level: "info", message: "Launcher update downloaded. Restart launcher to apply it." });
+    sendLog({ level: "info", scope: "updater", message: "Launcher update downloaded. Restart launcher to apply it." });
   });
 
   autoUpdater.on("error", (error) => {
-    const message = String(error?.message || error);
-    patchUpdaterState({
-      checking: false,
-      downloading: false,
-      lastError: message,
-      message: `Auto update error: ${message}`
-    });
-    sendLog({ level: "error", message: `Auto update error: ${message}` });
+    reportUpdaterFailure(error);
   });
 
   sendUpdaterState();
   setTimeout(() => {
     checkForAppUpdates().catch((error) => {
-      const message = String(error?.message || error);
-      sendLog({ level: "warn", message: `Initial update check failed: ${message}` });
+      reportUpdaterFailure(error);
     });
   }, 4000);
   schedulePeriodicUpdateChecks();

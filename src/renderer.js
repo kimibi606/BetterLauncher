@@ -1885,6 +1885,10 @@ async function ensureLatestLauncherOnStartup() {
       await new Promise(() => {});
     }
 
+    if (result.unavailable) {
+      setStartupProgress(STARTUP_SETTINGS_PROGRESS + 12, asText(result.message));
+      return;
+    }
     setStartupProgress(STARTUP_SETTINGS_PROGRESS + 12, "\uB7F0\uCC98 \uC5C5\uB370\uC774\uD2B8 \uD655\uC778 \uC644\uB8CC.");
   } finally {
     isLauncherUpdateGateRunning = false;
@@ -1914,6 +1918,7 @@ async function ensureLatestLauncherBeforeLaunch() {
       return false;
     }
 
+    if (result.unavailable) setLaunchStatus(asText(result.message));
     return true;
   } finally {
     isLauncherUpdateGateRunning = false;
@@ -2674,6 +2679,10 @@ function updateUpdaterUi(state) {
       actionDisabled = true;
       indicatorClass = "is-warning";
     }
+  } else if (snapshot.unavailable) {
+    summaryText = "업데이트 배포에 접근할 수 없습니다. 현재 버전으로 이용할 수 있습니다.";
+    actionText = "다시 확인";
+    indicatorClass = "is-warning";
   } else if (hasError) {
     summaryText = "업데이트 확인 중 문제가 발생했습니다.";
     actionText = "다시 확인";
@@ -3085,6 +3094,10 @@ bindClick(settingsUpdateActionButton, async () => {
     setSettingsStatus("업데이트 다운로드가 완료되었습니다. 런처를 다시 시작하면 적용됩니다.");
     return;
   }
+  if (checkResult.unavailable) {
+    setSettingsStatus(asText(checkResult.message));
+    return;
+  }
   setSettingsStatus("런처가 최신 버전입니다.");
 });
 document.addEventListener("keydown", (event) => {
@@ -3126,6 +3139,7 @@ window.launcherApi.onUpdaterState((payload) => {
 });
 
 window.launcherApi.onLog((payload) => {
+  if (payload?.scope === "updater") return;
   applyStartupLogStatus(payload);
   applyLogStatus(payload);
 });

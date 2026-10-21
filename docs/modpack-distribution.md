@@ -1,6 +1,6 @@
 # BetterLauncher 모드팩 운영
 
-운영 모드팩과 서버 정보는 Git에서 제외한 `.private/modpack.config.json`에 관리합니다. 저장소에 포함한 설정은 빈 목록이며 실제 운영값을 커밋하지 않습니다. 런처 자동 업데이트는 현재 비활성화되어 있습니다.
+운영 모드팩과 서버 정보는 Git에서 제외한 `.private/modpack.config.json`에 관리합니다. 저장소에 포함한 설정은 빈 목록이며 실제 운영값을 커밋하지 않습니다. 모든 설치 파일은 하나의 빌드 경로로 운영 설정을 포함하며 GitHub 런처 업데이트를 사용합니다.
 
 ## 모드팩 설정
 
@@ -32,8 +32,7 @@
   "github": {
     "owner": "kimibi606",
     "repo": "BetterLauncher",
-    "timeoutMs": 7000,
-    "enabled": false
+    "timeoutMs": 7000
   }
 }
 ```
@@ -46,7 +45,7 @@
 - NeoForge는 `modLoader: "neoforge"`와 Minecraft 버전에 맞는 `loaderVersion`을 반드시 지정합니다. 예를 들어 Minecraft `1.21.1`은 NeoForge `21.1.x`와 Java 21을 사용합니다. `loaderInstallerSha256`에 공식 설치 파일의 SHA-256을 지정할 수 있습니다. 실제 운영 버전과 해시는 비공개 설정에만 보관하세요. 공식 설치 프로그램이 전용 폴더에 실행 환경을 준비하며, 설치 실패·무결성 오류·잘못된 링크 경로는 실행을 중단합니다.
 - 공지는 `news.items` 또는 `news.url`로 지정합니다.
 - 모드팩이 없어도 로그인과 설정을 사용할 수 있습니다. 같은 실행 화면에 미설정 상태를 표시하고 게임 실행을 비활성화합니다. 배포 주소가 없는 모드팩은 배포 준비 상태로 안내합니다.
-- 개발 실행은 `.private/modpack.config.json`을 먼저 읽습니다. 설치된 런처는 앱에 포함된 관리자 설정만 읽습니다. `npm run dist:private`로 운영 설정을 포함한 설치 파일을 로컬에서 만들고 지인에게 직접 전달하세요. `.private` 폴더와 그 안의 설치 파일은 Git·GitHub 릴리즈·Actions에 업로드하지 않습니다.
+- 개발 실행은 `.private/modpack.config.json`을 먼저 읽습니다. 설치된 런처는 앱에 포함된 관리자 설정만 읽습니다. `npm run dist:win`으로 설치 파일을 로컬에 만듭니다. `dist:private`도 같은 명령이며 별도 배포본을 만들지 않습니다. 운영 설정이 없거나 모드팩이 여러 개면 빌드를 중단합니다. `.private`와 원본 운영 설정은 Git에 포함하지 않습니다.
 
 Minecraft 1.20 이상은 Quick Play 인수를 사용하며, 이전 버전은 `--server`·`--port`를 사용합니다. [Minecraft 공식 1.20 변경 사항](https://feedback.minecraft.net/hc/en-us/articles/16499677456781-Minecraft-Java-Edition-1-20-Trails-Tales)에 따라 게임 버전별로 접속 인수를 생성합니다. 서버 설정이 없는 모드팩은 서버에 자동 접속하지 않고 게임을 실행합니다.
 
@@ -81,7 +80,11 @@ npm run modpack:build -- --project skyblock --source "C:\Modpacks\Skyblock" --ve
 
 ## 런처 릴리즈
 
-현재 저장소는 비공개이며 GitHub Actions와 공개 자동 업데이트를 중지했습니다. 지인용 설치 파일은 `npm run dist:private`로 생성합니다. 저장소의 빈 설정을 사용하는 일반 빌드에는 운영 모드팩이 포함되지 않습니다.
+`npm run dist:win`은 `.private/releases/<버전>`에 설치 파일·blockmap·`latest.yml`을 생성하며 자동 업로드하지 않습니다. `npm run release:github`도 같은 빌드에 검증을 추가한 로컬 준비 명령입니다. 빈 설정을 사용하는 별도 빌드와 GitHub Actions 릴리즈 빌드는 제거했습니다. 관리자가 업로드를 명시적으로 요청했을 때만 검증한 파일을 게시합니다.
+
+설치된 런처의 업데이트 확인·다운로드·재시작 설치 흐름은 공통입니다. 과거 `github.enabled: false`는 더 이상 배포본의 업데이트를 끄지 않습니다. 개발 실행에서는 기본적으로 자동 업데이트를 실행하지 않습니다.
+
+현재 GitHub 저장소는 비공개이고 릴리즈가 없어 실제 자동 업데이트 배포는 아직 연결되지 않았습니다. 자동 업데이트에는 인증 없이 읽을 수 있는 GitHub 릴리즈가 필요합니다. GitHub 토큰을 앱에 넣거나 저장소를 임의로 공개하지 않습니다. 설치 파일에는 운영 설정이 포함되므로, 배포 접근 범위를 확인한 뒤 게시해야 합니다. 소스 push와 설치 파일 릴리즈는 별도 작업입니다.
 
 - 프로그램·패키지·설치 파일 이름은 BetterLauncher입니다. Windows 설치 GUID는 기존 값을 유지합니다.
 - 설치를 누르면 사용자별·전체 사용자 설치의 32비트·64비트 등록 정보에서 기존 BetterMonLauncher를 확인하고, 해당 앱의 제거 프로그램으로 교체합니다. 설치 마법사를 취소하면 기존 앱은 유지합니다. 제거 명령에는 데이터 보존 옵션을 전달하며, 제거 실패·잘못된 설치 경로·심볼릭 링크 경로는 새 설치를 중단합니다. 일반 BetterLauncher 재설치는 기존 업데이트 절차를 사용합니다.

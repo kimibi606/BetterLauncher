@@ -35,6 +35,9 @@ function main() {
     fail("repository config must contain an empty catalog; keep operating settings in .private/modpack.config.json");
   }
   if (readProjects(config).length > 0) resolveProject(config);
+  if (Object.hasOwn(config.github || {}, "enabled")) {
+    fail("launcher updates must not vary with the operating catalog");
+  }
   if (packageJson.name !== "betterlauncher" || packageJson.build?.productName !== "BetterLauncher") {
     fail("package name and product name must use BetterLauncher");
   }

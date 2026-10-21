@@ -9,6 +9,7 @@ const vm = require("vm");
 const http = require("http");
 const { createRequire } = require("module");
 const { pathToFileURL } = require("url");
+const { EventEmitter } = require("events");
 const { buildDistribution } = require("../scripts/build-modpack-distribution");
 
 const mainPath = path.resolve(__dirname, "..", "main.js");
@@ -16,15 +17,17 @@ const nodeRequire = createRequire(mainPath);
 
 function loadMain(root, safeStorage) {
   const handlers = new Map();
+  const updater = new EventEmitter();
+  updater.setFeedURL = feed => { updater.feed = feed; };
   const appPaths = { appData: root, userData: path.join(root, ".betterlauncher"), sessionData: path.join(root, "session") };
   const app = { getVersion: () => "0.3.14", getName: () => "BetterLauncher", getPath: (name) => appPaths[name], setPath: (name, value) => { appPaths[name] = value; }, requestSingleInstanceLock: () => false, on() {}, quit() {}, isPackaged: false };
   const context = vm.createContext({
     require: (name) => name === "electron" ? { app, safeStorage, ipcMain: { handle: (channel, fn) => handlers.set(channel, fn), on() {} } }
-      : name === "electron-updater" ? { autoUpdater: {} } : nodeRequire(name),
+      : name === "electron-updater" ? { autoUpdater: updater } : nodeRequire(name),
     __dirname: path.dirname(mainPath), process: { ...process, cwd: () => root },
     console, Buffer, URL, AbortSignal, fetch, setTimeout, clearTimeout, setInterval, clearInterval
   });
-  vm.runInContext(fs.readFileSync(mainPath, "utf8") + "\nglobalThis.testApi = { projectContext, getCurrentProject, readLauncherConfig, readGitHubReleaseConfig, isUpdaterEnabled, queryMinecraftServerStatus, readServerStatusConfig, buildAutoConnectTarget, buildProjectConnectionOptions, getModpackConfigCandidatePaths, isProjectFabricVersionId, migrateLegacyUserDataIfNeeded, migrateLegacyStateLayoutIfNeeded, verifyLaunchIntegrity };", context);
+  vm.runInContext(fs.readFileSync(mainPath, "utf8") + "\nglobalThis.testApi = { projectContext, getCurrentProject, readLauncherConfig, readGitHubReleaseConfig, isUpdaterEnabled, setupAutoUpdater, checkForAppUpdates, updaterState, queryMinecraftServerStatus, readServerStatusConfig, buildAutoConnectTarget, buildProjectConnectionOptions, getModpackConfigCandidatePaths, isProjectFabricVersionId, migrateLegacyUserDataIfNeeded, migrateLegacyStateLayoutIfNeeded, verifyLaunchIntegrity };", context);
   const mainFrame = { url: pathToFileURL(path.join(path.dirname(mainPath), "src", "index.html")).href };
   const webContents = { mainFrame, send() {} };
   context.testWindow = { webContents, isDestroyed: () => false };
@@ -32,7 +35,7 @@ function loadMain(root, safeStorage) {
   const trustedEvent = { sender: webContents, senderFrame: mainFrame };
   const authenticatedHandlers = new Map([...handlers].map(([channel, callback]) => [channel,
     (event, payload) => callback(Object.keys(event || {}).length ? event : trustedEvent, payload)]));
-  return { handlers: authenticatedHandlers, api: context.testApi, appPaths, webContents, context };
+  return { handlers: authenticatedHandlers, api: context.testApi, appPaths, webContents, context, updater };
 }
 
 async function setup(t, safeStorage, { cacheManifests = false } = {}) {
@@ -137,16 +140,90 @@ test("administrator catalogs isolate server targets from global environment and 
   assert.deepEqual(Array.from(api.getModpackConfigCandidatePaths()), [path.join(path.dirname(mainPath), "modpack.config.json")]);
 });
 
-test("private operating config stays local and can disable packaged updates", async (t) => {
-  const { api, config, context, root } = await setup(t);
+test("operating config stays local while all installed launchers share updates, including an old disable flag", async (t) => {
+  const { api, config, context, root, updater } = await setup(t);
   const privatePath = path.join(root, ".private", "modpack.config.json");
   await fs.promises.mkdir(path.dirname(privatePath));
   config.github = { owner: "example", repo: "launcher", enabled: false };
   await fs.promises.writeFile(privatePath, JSON.stringify(config));
   assert.equal(api.readLauncherConfig().__configPath, privatePath);
-  assert.equal(api.readGitHubReleaseConfig().configured, false);
-  vm.runInContext("require('electron').app.isPackaged = true; readLauncherConfig = () => ({ github: { enabled: false } });", context);
+  assert.equal(api.readGitHubReleaseConfig().configured, true);
+  context.process.env = {};
   assert.equal(api.isUpdaterEnabled(), false);
+  vm.runInContext("require('electron').app.isPackaged = true; readLauncherConfig = () => ({ github: { owner: 'example', repo: 'launcher', enabled: false } }); setTimeout = () => 0; setInterval = () => 0;", context);
+  assert.equal(api.isUpdaterEnabled(), true);
+  api.setupAutoUpdater();
+  assert.equal(updater.feed.owner, "example");
+  assert.equal(updater.feed.private, false);
+  assert.equal(updater.autoDownload, true);
+  assert.equal(updater.autoInstallOnAppQuit, true);
+  updater.checkForUpdates = async () => {
+    updater.emit("checking-for-update");
+    updater.emit("update-available", { version: "0.0.2" });
+    updater.emit("download-progress", { percent: 50 });
+    updater.emit("update-downloaded", { version: "0.0.2" });
+    return { downloadPromise: Promise.resolve() };
+  };
+  const result = await api.checkForAppUpdates({ manual: true });
+  assert.equal(result.ok, true);
+  assert.equal(result.downloaded, true);
+  assert.equal(api.updaterState.enabled, true);
+  assert.equal(api.updaterState.latestVersion, "0.0.2");
+});
+
+test("inaccessible update releases produce a safe unavailable state, allow launch gates and recover on retry", async t => {
+  const { api, handlers, context, updater, webContents } = await setup(t);
+  context.process.env = {};
+  vm.runInContext("require('electron').app.isPackaged = true; readLauncherConfig = () => ({ github: { owner: 'example', repo: 'launcher' } }); setTimeout = () => 0; setInterval = () => 0;", context);
+  api.setupAutoUpdater();
+  const messages = [];
+  webContents.send = (channel, payload) => messages.push({ channel, payload });
+  for (const properties of [{ statusCode: 404 }, { statusCode: 401 }, { statusCode: 403 }, {},
+    { code: "ERR_UPDATER_NO_PUBLISHED_VERSIONS" }, { code: "ERR_UPDATER_CHANNEL_FILE_NOT_FOUND" }]) {
+    const prefix = properties.code ? "No release artifacts:" : '404 "method: GET url:';
+    const error = Object.assign(new Error(prefix + ' https://updates.example/private?token=secret" response-body-sensitive'), properties);
+    updater.checkForUpdates = async () => { updater.emit("checking-for-update"); updater.emit("error", error); throw error; };
+    messages.length = 0;
+    const result = await handlers.get("updater:check")({});
+    assert.equal(result.ok, true); assert.equal(result.unavailable, true);
+    assert.equal(result.reason, "update-feed-unavailable");
+    assert.equal(api.updaterState.enabled, true); assert.equal(api.updaterState.lastError, "");
+    assert.equal(api.updaterState.available, false); assert.equal(api.updaterState.downloading, false);
+    assert.equal(messages.filter(entry => entry.channel === "launcher:log" && entry.payload.message.includes("접근할 수 없습니다")).length, 1);
+    const gate = await handlers.get("updater:ensure-latest")({});
+    assert.equal(gate.ok, true); assert.equal(gate.unavailable, true);
+    assert.notEqual(gate.restarting, true);
+    assert.doesNotMatch(JSON.stringify([messages, result, gate]), /updates\.example|PRIVATE URL|method:|token=|response-body-sensitive/);
+  }
+  updater.checkForUpdates = async () => { updater.emit("checking-for-update"); updater.emit("update-not-available", { version: "0.0.1" }); return {}; };
+  const recovered = await handlers.get("updater:check")({});
+  assert.equal(recovered.ok, true);
+  assert.equal(api.updaterState.unavailable, false);
+  assert.equal(api.updaterState.lastError, "");
+});
+
+test("failed update downloads clear busy state and retain real errors without leaking provider diagnostics", async t => {
+  const { api, handlers, context, updater, webContents } = await setup(t);
+  context.process.env = {};
+  vm.runInContext("require('electron').app.isPackaged = true; readLauncherConfig = () => ({ github: { owner: 'example', repo: 'launcher' } }); setTimeout = () => 0; setInterval = () => 0;", context);
+  api.setupAutoUpdater();
+  const messages = [];
+  webContents.send = (channel, payload) => messages.push({ channel, payload });
+  for (const properties of [{ statusCode: 404 }, { code: "ERR_CHECKSUM_MISMATCH" }]) {
+    const error = Object.assign(new Error("private-provider-body https://updates.example/binary?token=secret"), properties);
+    updater.checkForUpdates = async () => {
+      updater.emit("checking-for-update"); updater.emit("update-available", { version: "0.0.2" });
+      updater.emit("error", error); throw error;
+    };
+    messages.length = 0;
+    const result = await handlers.get("updater:check")({});
+    assert.equal(result.ok, false); assert.equal(result.unavailable, false);
+    assert.match(result.error, /다운로드/);
+    assert.equal(api.updaterState.available, false); assert.equal(api.updaterState.downloading, false);
+    assert.equal(api.updaterState.checking, false); assert.equal(api.updaterState.downloaded, false);
+    assert.equal(messages.filter(entry => entry.channel === "launcher:log" && entry.payload.level === "warn").length, 1);
+    assert.doesNotMatch(JSON.stringify([messages, result]), /updates\.example|PRIVATE URL|token=|private-provider-body/);
+  }
 });
 
 test("NeoForge runtime preparation uses administrator version and Java, never Fabric or user loader overrides", async t => {

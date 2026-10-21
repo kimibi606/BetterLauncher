@@ -34,6 +34,8 @@ const skinRequests = [];
 const { skinPng } = require("./skin-fixture.cjs");
 const calls = [];
 const defaultsRequests = [];
+let updaterFixture = { enabled: false, currentVersion: require("../package.json").version };
+let updaterResult = { ok: true };
 const mediaRequests = [];
 const auth = () => ({ signedIn, profileName: signedIn ? "Tester" : "", uuid: signedIn ? activeAccountUuid : "",
   accounts: signedIn ? [{ id: activeAccountUuid, uuid: activeAccountUuid, profileName: "Tester", selected: true }] : [] });
@@ -56,8 +58,9 @@ handle("launcher:microsoft-login", () => { signedIn = true; return { ok: true, s
 handle("window:get-state", () => ({ maximized: false }));
 handle("launcher:get-system-profile", () => ({ totalMemoryGb: 32, preset: "high" }));
 handle("launcher:load-profiles", () => ({ ok: true, profiles: [] }));
-handle("updater:get-state", () => ({ enabled: false, currentVersion: require("../package.json").version }));
-handle("updater:ensure-latest", () => ({ ok: true }));
+handle("updater:get-state", () => updaterFixture);
+handle("updater:ensure-latest", () => updaterResult);
+handle("updater:check", () => updaterResult);
 handle("launcher:get-github-release", () => ({ ok: true, configured: false }));
 handle("launcher:auto-select-java", async (payload) => {
   calls.push({ type: "java", ...payload });
@@ -360,6 +363,32 @@ app.whenReady().then(async () => {
   await waitFor(win, "!isLaunchRequestPending");
   assert.ok(calls.some(entry => entry.type === "launch" && entry.projectId === "new-loader" && entry.version === ""));
   win.destroy();
+
+  // Missing/private update releases are distinct from "up to date", while
+  // current games still launch and updater diagnostics never replace game status.
+  updaterFixture = { enabled: true, unavailable: true, currentVersion: require("../package.json").version };
+  updaterResult = { ok: true, unavailable: true, message: "런처 업데이트 배포에 접근할 수 없습니다. 현재 버전으로 이용할 수 있습니다." };
+  catalog = [fixtures[0]];
+  calls.length = 0;
+  win = await openWindow();
+  assert.equal(await js(win, "!startLaunchButton.disabled && !launchStatus.classList.contains('is-error')"), true);
+  await js(win, "setLaunchStatus('게임 실행 준비 완료');");
+  win.webContents.send("launcher:log", { scope: "updater", level: "error", message: '404 method: GET url: https://updates.example/private?token=secret' });
+  await delay(40);
+  assert.equal(await js(win, "launchStatus.textContent"), "게임 실행 준비 완료");
+  await js(win, "settingsButton.click(); document.querySelector('[data-settings-tab=settingsTabUpdate]').click()");
+  assert.match(await js(win, "settingsUpdateSummary.textContent"), /접근할 수 없습니다/);
+  assert.equal(await js(win, "settingsUpdateActionButton.disabled || settingsUpdateIndicator.classList.contains('is-error')"), false);
+  await js(win, "settingsUpdateActionButton.click()");
+  await waitFor(win, "settingsStatus.textContent.includes('현재 버전')");
+  assert.doesNotMatch(await js(win, "settingsStatus.textContent"), /최신|404|PRIVATE URL|method:|updates\.example/);
+  await screenshot(win, "updater-release-unavailable");
+  await js(win, "settingsCloseButton.click(); startLaunchButton.click()");
+  await waitFor(win, "!isLaunchRequestPending");
+  assert.ok(calls.some(entry => entry.type === "launch"));
+  win.destroy();
+  updaterFixture = { enabled: false, currentVersion: require("../package.json").version };
+  updaterResult = { ok: true };
 
   // An unconfigured or unpublished pack stays on the same launch screen without downloads.
   catalog = [fixtures[2]];

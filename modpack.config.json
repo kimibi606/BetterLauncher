@@ -4,7 +4,6 @@
   "github": {
     "owner": "kimibi606",
     "repo": "BetterLauncher",
-    "enabled": false,
     "timeoutMs": 7000
   }
 }

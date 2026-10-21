@@ -23,7 +23,6 @@
   "github": {
     "owner": "kimibi606",
     "repo": "BetterLauncher",
-    "timeoutMs": 7000,
-    "enabled": false
+    "timeoutMs": 7000
   }
 }
