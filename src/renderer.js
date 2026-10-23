@@ -152,6 +152,8 @@ let launcherSettings = { ...DEFAULT_SETTINGS };
 let selectedSettingsTab = "settingsTabAccount";
 let currentScreen = "login";
 let loginRequestedByUser = false;
+let isMicrosoftLoginRequestPending = false;
+let loginErrorMessage = "";
 let loginWaitingEnterTimer = null;
 let loginGateEnterTimer = null;
 let loadedProfiles = [];
@@ -271,7 +273,7 @@ function switchScreen(targetScreen) {
 }
 
 function isLoginFlowActive() {
-  return loginRequestedByUser && authState.loggingIn && !authState.signedIn;
+  return loginRequestedByUser && (authState.loggingIn || isMicrosoftLoginRequestPending) && !authState.signedIn;
 }
 
 function clearLoginTransitionTimers() {
@@ -292,6 +294,17 @@ function updateLoginWaitingState() {
   }
 
   const showWaiting = isLoginFlowActive() && isElementVisible("login");
+  const waitingText = loginWaitingState.querySelector(".login-waiting-text");
+  if (waitingText) {
+    const messages = {
+      preparing: "로그인 연결을 준비하는 중...",
+      "microsoft-sign-in": "Microsoft의 응답을 기다리는 중...",
+      "microsoft-token-exchange": "Microsoft 로그인 응답을 확인하는 중...",
+      "minecraft-session": "Microsoft 로그인 완료. 게임 계정을 확인하는 중...",
+      "saving-account": "게임 계정 연결을 마무리하는 중..."
+    };
+    waitingText.textContent = messages[authState.loginStage] || "Microsoft의 응답을 기다리는 중...";
+  }
   const waitingWasVisible = loginWaitingState.classList.contains("is-active");
   clearLoginTransitionTimers();
 
@@ -2564,8 +2577,9 @@ function updateAuthUi() {
     } else if (authState.signedIn) {
       gateAuthStatus.textContent = `\uB85C\uADF8\uC778\uB428: ${authState.profileName || "플레이어"}`;
     } else {
-      gateAuthStatus.textContent = "";
+      gateAuthStatus.textContent = loginErrorMessage;
     }
+    gateAuthStatus.classList.toggle("is-error", Boolean(loginErrorMessage) && !loginFlowActive && !authState.signedIn);
   }
 
   if (!authState.signedIn) {
@@ -2590,13 +2604,16 @@ function updateAuthUi() {
 }
 
 function applyAuthState(nextState) {
+  if (nextState?.signedIn || nextState?.loggingIn) loginErrorMessage = "";
+  else if (asText(nextState?.lastError)) loginErrorMessage = privateStatusText(nextState.lastError);
   if (authState.signedIn !== Boolean(nextState?.signedIn) || authState.uuid !== String(nextState?.uuid || "")) authSessionRevision += 1;
   authState = {
     signedIn: Boolean(nextState?.signedIn),
     profileName: String(nextState?.profileName || ""),
     uuid: String(nextState?.uuid || ""),
     accounts: Array.isArray(nextState?.accounts) ? nextState.accounts : [],
-    loggingIn: Boolean(nextState?.loggingIn)
+    loggingIn: Boolean(nextState?.loggingIn),
+    loginStage: asText(nextState?.loginStage)
   };
 
   if (!authState.loggingIn || authState.signedIn) {
@@ -2787,14 +2804,23 @@ async function hideStartupOverlay() {
 }
 
 async function runMicrosoftLogin() {
-  const result = await window.launcherApi.microsoftLogin();
-  if (result?.status) {
-    applyAuthState(result.status);
-  } else {
-    applyAuthState({
-      ...authState,
-      loggingIn: false
-    });
+  if (isMicrosoftLoginRequestPending) return;
+  isMicrosoftLoginRequestPending = true;
+  loginErrorMessage = "";
+  updateAuthUi();
+  try {
+    const result = await window.launcherApi.microsoftLogin();
+    if (result?.status) applyAuthState(result.status);
+    else applyAuthState({ ...authState, loggingIn: false });
+    if (!result?.ok || !authState.signedIn) {
+      loginErrorMessage = privateStatusText(result?.error || "게임 계정 연결을 완료하지 못했습니다. 다시 로그인해 주세요.");
+    }
+  } catch {
+    loginErrorMessage = "로그인 요청을 처리하지 못했습니다. 다시 로그인해 주세요.";
+    authState.loggingIn = false;
+  } finally {
+    isMicrosoftLoginRequestPending = false;
+    updateAuthUi();
   }
 }
 

@@ -587,6 +587,63 @@ test("modpack writes cannot follow a directory junction outside the instance", a
   assert.equal(await fs.promises.readFile(path.join(outside, "shared-name.jar"), "utf8"), "outside-file");
 });
 
+function mockInteractiveLogin(context) {
+  vm.runInContext(`
+    createMinecraftLauncherLoginRequest = async () => ({authorizeUrl:'https://login.example/',redirectUri:'https://login.example/callback',expectedState:'test-state',codeVerifier:'test-verifier',sessionId:'test-session'});
+    requestMicrosoftAuthorizationCode = async () => 'test-auth-code';
+    exchangeMinecraftLauncherAuthorizationCode = async () => ({access_token:'test-microsoft-token',refresh_token:'test-refresh-token',expires_in:3600});
+    authenticateMinecraftLauncherSession = async () => {
+      if(globalThis.loginFailure) throw loginFailure;
+      return {profileId:'0123456789abcdef0123456789abcdef',profileName:'NewPlayer',minecraftAccessToken:'test-minecraft-token',minecraftExpiresAt:0,xuid:'test-xuid'};
+    };
+  `, context);
+}
+
+test("new account login failures remain visible in auth state without provider data or credentials", async t => {
+  const { handlers, context, webContents } = await setup(t);
+  mockInteractiveLogin(context);
+  const messages = [];
+  webContents.send = (channel, payload) => messages.push({ channel, payload });
+  for (const [detail, expected] of [
+    ["Xbox XSTS authentication failed (HTTP 401 XErr 2148916233)", "auth-xbox-profile-required"],
+    ["Minecraft profile fetch failed (HTTP 404)", "auth-minecraft-profile-unavailable"],
+    ["Minecraft launcher token request failed (HTTP 503)", "auth-service-unavailable"]
+  ]) {
+    context.loginFailure = new Error(detail + " https://private.example/?code=secret refresh_token=private-token");
+    const result = await handlers.get("launcher:microsoft-login")({});
+    assert.equal(result.ok, false);
+    assert.equal(result.code, expected);
+    assert.equal(result.status.signedIn, false);
+    assert.equal(result.status.loggingIn, false);
+    assert.equal(result.status.lastError, result.error);
+    assert.equal(result.status.errorCode, expected);
+    assert.equal((await handlers.get("launcher:get-auth-state")({})).lastError, result.error);
+    assert.doesNotMatch(JSON.stringify([result, messages]), /private\.example|private-token|\?code=secret|XErr/);
+  }
+});
+
+test("first account signs in after a failed attempt, persists encrypted and clears stale login errors", async t => {
+  const { handlers, context } = await setup(t, {
+    isEncryptionAvailable: () => true,
+    encryptString: value => Buffer.from(value).reverse(),
+    decryptString: value => Buffer.from(value).reverse().toString("utf8")
+  });
+  mockInteractiveLogin(context);
+  context.loginFailure = new Error("Xbox account does not have an Xbox profile");
+  assert.equal((await handlers.get("launcher:microsoft-login")({})).ok, false);
+  context.loginFailure = null;
+  const result = await handlers.get("launcher:microsoft-login")({});
+  assert.equal(result.ok, true);
+  assert.equal(result.status.signedIn, true);
+  assert.equal(result.status.profileName, "NewPlayer");
+  assert.equal(result.status.lastError, "");
+  assert.equal(result.status.loginStage, "");
+  const cachePath = vm.runInContext("getMicrosoftAuthCachePath()", context);
+  assert.doesNotMatch(fs.readFileSync(cachePath, "utf8"), /test-microsoft-token|test-minecraft-token|test-refresh-token/);
+  vm.runInContext("microsoftAccount=null; loadCachedMicrosoftAccount()", context);
+  assert.equal((await handlers.get("launcher:get-auth-state")({})).signedIn, true);
+});
+
 test("OS encryption failure never writes a plaintext login token", async (t) => {
   const { context } = await setup(t, { isEncryptionAvailable: () => true, encryptString: () => { throw new Error("OS encryption failure"); } });
   context.testToken = { access_token: "sensitive-access-token", refreshToken: "sensitive-refresh-token" };

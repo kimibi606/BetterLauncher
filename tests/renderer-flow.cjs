@@ -39,6 +39,11 @@ let updaterResult = { ok: true };
 let blockUpdaterCheck = false;
 let releaseUpdaterCheck;
 let updaterCheckCount = 0;
+let loginFailure = null;
+let loginThrows = false;
+let blockLogin = false;
+let releaseLogin;
+let loginCalls = 0;
 const mediaRequests = [];
 const auth = () => ({ signedIn, profileName: signedIn ? "Tester" : "", uuid: signedIn ? activeAccountUuid : "",
   accounts: signedIn ? [{ id: activeAccountUuid, uuid: activeAccountUuid, profileName: "Tester", selected: true }] : [] });
@@ -57,7 +62,13 @@ handle("launcher:get-account-skin", async ({ uuid }) => {
   return { ok: true, uuid, model: uuid.startsWith("2") ? "slim" : "classic",
     textureDataUrl: "data:image/png;base64," + skinPng({ color: uuid.startsWith("2") ? [152, 60, 172] : [48, 152, 172] }).toString("base64") };
 });
-handle("launcher:microsoft-login", () => { signedIn = true; return { ok: true, status: auth() }; });
+handle("launcher:microsoft-login", async () => {
+  loginCalls++;
+  if (blockLogin) await new Promise(resolve => { releaseLogin = resolve; });
+  if (loginThrows) throw new Error("Test login IPC failure");
+  if (loginFailure) return { ...loginFailure, status: { ...auth(), signedIn: false, loggingIn: false } };
+  signedIn = true; return { ok: true, status: auth() };
+});
 handle("window:get-state", () => ({ maximized: false }));
 handle("launcher:get-system-profile", () => ({ totalMemoryGb: 32, preset: "high" }));
 handle("launcher:load-profiles", () => ({ ok: true, profiles: [] }));
@@ -125,6 +136,42 @@ async function openWindow({ webgl = true } = {}) {
 
 app.whenReady().then(async () => {
   fs.mkdirSync(output, { recursive: true });
+  signedIn = false;
+  loginFailure = { ok: false, ...require("../lib/microsoft-login-errors").describeMicrosoftLoginFailure(new Error("Xbox account does not have an Xbox profile")) };
+  let loginWin = await openWindow();
+  await js(loginWin, "gateMicrosoftLoginButton.click()");
+  await waitFor(loginWin, "!authState.loggingIn && !gateMicrosoftLoginButton.disabled");
+  assert.equal(await js(loginWin, "gateAuthStatus.textContent"), loginFailure.error);
+  assert.equal(await js(loginWin, "gateAuthStatus.classList.contains('is-error')"), true);
+  loginWin.webContents.send("launcher:auth-state", auth());
+  await delay(50);
+  assert.equal(await js(loginWin, "gateAuthStatus.textContent"), loginFailure.error, "later signed-out state must not erase the failure");
+  await screenshot(loginWin, "login-failure-visible");
+  loginFailure = null;
+  loginThrows = true;
+  await js(loginWin, "gateMicrosoftLoginButton.click()");
+  await waitFor(loginWin, "!authState.loggingIn && !gateMicrosoftLoginButton.disabled");
+  assert.match(await js(loginWin, "gateAuthStatus.textContent"), /다시/);
+  assert.equal(await js(loginWin, "currentScreen"), "login");
+  loginThrows = false;
+  blockLogin = true;
+  releaseLogin = null;
+  const callsBefore = loginCalls;
+  await js(loginWin, "for(let i=0;i<10;i++) gateMicrosoftLoginButton.click()");
+  while (!releaseLogin) await delay(20);
+  assert.equal(loginCalls, callsBefore + 1);
+  assert.equal(await js(loginWin, "gateAuthStatus.classList.contains('is-error')"), false);
+  loginWin.webContents.send("launcher:auth-state", { ...auth(), loggingIn: true, loginStage: "minecraft-session" });
+  await waitFor(loginWin, "loginWaitingState.classList.contains('is-active')");
+  assert.match(await js(loginWin, "document.querySelector('.login-waiting-text').textContent"), /게임 계정/);
+  releaseLogin();
+  await waitFor(loginWin, "currentScreen === 'launch' && hasActiveModpack && !isModpackPreparing");
+  assert.equal(await js(loginWin, "gateAuthStatus.classList.contains('is-error')"), false);
+  blockLogin = false;
+  loginWin.destroy();
+  skinRequests.length = 0;
+  calls.length = 0;
+  defaultsRequests.length = 0;
   let win = await openWindow();
   assert.equal(await js(win, "currentScreen"), "launch");
   assert.equal(await js(win, "document.querySelector('#projectsScreen, #changeProjectButton, .project-cards')"), null);

@@ -12,6 +12,7 @@ const { readProjects, resolveProject, getProjectDirectory, getProjectServer, for
 const { downloadDistributionFile } = require("./lib/distribution-download");
 const { normalizePathRenames, repairModpackPaths } = require("./lib/modpack-path-renames");
 const { normalizeResourcePackDefaults, repairResourcePackSettings } = require("./lib/resourcepack-settings");
+const { describeMicrosoftLoginFailure } = require("./lib/microsoft-login-errors");
 const { secureFetch } = require("./lib/secure-fetch");
 const { redactPrivateDiagnostics, sanitizeDiagnosticPayload } = require("./lib/log-security");
 const { normalizeSkinUuid, createAccountSkinService } = require("./lib/account-skin");
@@ -135,6 +136,8 @@ let mainWindow;
 let isLaunching = false;
 let isLaunchRequestInProgress = false;
 let isMicrosoftLoggingIn = false;
+let microsoftLoginStage = "";
+let lastMicrosoftLoginFailure = null;
 let microsoftAccount = null;
 let isUpdaterInitialized = false;
 let updaterPeriodicTimer = null;
@@ -4929,7 +4932,10 @@ function getMicrosoftStatus() {
     profileName: asTrimmedText(microsoftAccount?.name),
     uuid: asTrimmedText(microsoftAccount?.uuid),
     accounts,
-    loggingIn: isMicrosoftLoggingIn
+    loggingIn: isMicrosoftLoggingIn,
+    loginStage: microsoftLoginStage,
+    lastError: lastMicrosoftLoginFailure?.error || "",
+    errorCode: lastMicrosoftLoginFailure?.code || ""
   };
 }
 
@@ -6635,6 +6641,8 @@ async function startMicrosoftLogin() {
   }
 
   isMicrosoftLoggingIn = true;
+  microsoftLoginStage = "preparing";
+  lastMicrosoftLoginFailure = null;
   sendMicrosoftAuthState();
   let response;
 
@@ -6642,6 +6650,8 @@ async function startMicrosoftLogin() {
     sendLog({ level: "info", message: "Opening Microsoft login window..." });
     const previouslySelectedAccountId = getMicrosoftAccountId(microsoftAccount);
     const loginRequest = await createMinecraftLauncherLoginRequest();
+    microsoftLoginStage = "microsoft-sign-in";
+    sendMicrosoftAuthState();
     const authorizationCode = await requestMicrosoftAuthorizationCode({
       authorizeUrl: loginRequest.authorizeUrl,
       redirectUri: loginRequest.redirectUri,
@@ -6649,10 +6659,14 @@ async function startMicrosoftLogin() {
     });
 
     sendLog({ level: "auth", message: "Exchanging authorization code..." });
+    microsoftLoginStage = "microsoft-token-exchange";
+    sendMicrosoftAuthState();
     const oauthToken = await exchangeMinecraftLauncherAuthorizationCode(
       authorizationCode,
       loginRequest.codeVerifier
     );
+    microsoftLoginStage = "minecraft-session";
+    sendMicrosoftAuthState();
     const minecraftSession = await authenticateMinecraftLauncherSession({
       microsoftAccessToken: oauthToken.access_token,
       sessionId: loginRequest.sessionId
@@ -6665,6 +6679,8 @@ async function startMicrosoftLogin() {
     });
     const nextAccountId = getMicrosoftAccountId(nextAccount);
     const shouldSelectNewAccount = !previouslySelectedAccountId || previouslySelectedAccountId === nextAccountId;
+    microsoftLoginStage = "saving-account";
+    sendMicrosoftAuthState();
     saveMicrosoftAuthCache(nextAccount, { select: shouldSelectNewAccount });
     microsoftAccount = shouldSelectNewAccount ? nextAccount : readMicrosoftAuthCache();
 
@@ -6674,11 +6690,12 @@ async function startMicrosoftLogin() {
     });
     response = { ok: true };
   } catch (error) {
-    const message = formatMicrosoftAuthError(error);
-    sendLog({ level: "error", message: `Microsoft login failed: ${message}` });
-    response = { ok: false, error: message };
+    lastMicrosoftLoginFailure = describeMicrosoftLoginFailure(error, microsoftLoginStage);
+    sendLog({ level: "error", message: lastMicrosoftLoginFailure.error });
+    response = { ok: false, ...lastMicrosoftLoginFailure };
   } finally {
     isMicrosoftLoggingIn = false;
+    microsoftLoginStage = "";
     sendMicrosoftAuthState();
   }
 
