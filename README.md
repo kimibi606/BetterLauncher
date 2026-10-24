@@ -7,7 +7,7 @@ Electron 기반의 단일 모드팩 Minecraft 런처입니다. 로그인하면 �
 - 개발 실행: `npm install` 후 `npm start` — 로컬 운영 설정을 먼저 읽습니다.
 - 검증: `npm run check`, `npm test`
 - 설치 파일: `npm run dist:win` — 운영 설정과 GitHub 업데이트 설정을 포함한 하나의 런처를 `.private/releases/<버전>`에 만듭니다.
-- 기존 BetterMonLauncher가 설치돼 있으면 새 설치 프로그램의 설치 단계에서 기존 앱을 제거하고 BetterLauncher로 교체합니다. 로그인 정보와 게임 데이터는 보존하며, 기존 앱 제거에 실패하면 새 설치를 중단합니다.
+- 기존 BetterMonLauncher가 정상적으로 제거되면 BetterLauncher로 교체합니다. 제거 프로그램 누락·부분 삭제·제거 실패가 있어도 남은 파일과 로그인·게임 데이터를 보존하고 새 설치를 계속합니다. 안전하지 않은 이전 경로의 파일은 실행하거나 삭제하지 않고 새 기본 경로를 사용합니다.
 - `npm run dist`, `npm run dist:win`, 이전 `npm run dist:private`는 같은 빌드 명령입니다. `npm run dist:dir`도 동일한 설정으로 설치 전 폴더를 만듭니다. 운영 설정이 없으면 빈 모드팩 설치 파일을 만드는 대신 빌드를 중단합니다.
 
 [모드팩 프로젝트 등록과 배포 안내](docs/modpack-distribution.md)를 참고하세요. 설치된 런처는 모두 GitHub 릴리즈의 업데이트를 확인합니다. 모드팩은 별도 HTTP(S) 배포를 사용합니다. 설치 파일과 설정을 로컬에서 준비하고, GitHub 업로드는 관리자가 요청한 경우에만 진행합니다. GitHub 접근 토큰을 런처에 포함하지 마세요.

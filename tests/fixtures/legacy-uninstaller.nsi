@@ -34,7 +34,9 @@ Section "Uninstall"
   RMDir "$INSTDIR\resources"
   Delete "$INSTDIR\Uninstall ${TEST_EXE_NAME}.exe"
   RMDir "$INSTDIR"
-  DeleteRegKey HKCU "${TEST_INSTALL_KEY}"
-  DeleteRegKey HKCU "${TEST_UNINSTALL_KEY}"
+  !if ${TEST_RESULT} != 6
+    DeleteRegKey HKCU "${TEST_INSTALL_KEY}"
+    DeleteRegKey HKCU "${TEST_UNINSTALL_KEY}"
+  !endif
   SetErrorLevel 0
 SectionEnd

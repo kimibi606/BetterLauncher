@@ -16,6 +16,13 @@ OutFile "${TEST_INSTALLER}"
 !insertmacro customHeader
 
 Function .onInit
+  !ifdef TEST_LOCK_LEGACY
+    System::Call 'kernel32::CreateFileW(w "${TEST_LEGACY_EXE}", i 0x80000000, i 1, p 0, i 3, i 0, p 0) p .r0'
+    ${If} $0 = -1
+      SetErrorLevel 99
+      Quit
+    ${EndIf}
+  !endif
   StrCpy $INSTDIR "${TEST_DESTINATION}"
   ${GetParameters} $0
   ClearErrors
