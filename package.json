@@ -27,7 +27,7 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "electron-updater": "^6.8.9",
+    "electron-updater": "^6.8.11",
     "minecraft-launcher-core": "^3.18.2",
     "request": "file:vendor/request",
     "undici": "7.29.1"
