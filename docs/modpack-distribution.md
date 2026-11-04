@@ -22,10 +22,6 @@
       },
       "modpack": {
         "manifestUrl": "https://YOUR_PROJECT.pages.dev/skyblock/latest.json"
-      },
-      "serverStatus": {},
-      "news": {
-        "items": []
       }
     }
   ],
@@ -38,23 +34,25 @@
 ```
 
 - `id`는 소문자 영문·숫자·`-`·`_`로 구성된 고유 식별자입니다. 배포 후 바꾸면 다른 설치로 취급합니다.
-- 게임 버전, Java, 서버, 공지, Discord와 설치 폴더를 프로젝트별로 관리합니다. Fabric과 NeoForge를 지원합니다.
+- 게임 버전, Java, 서버와 설치 폴더를 프로젝트별로 관리합니다. Fabric과 NeoForge를 지원합니다.
 - `server.host`는 도메인 또는 IP만 입력합니다. `https://`나 포트를 포함하지 않습니다. 포트는 `server.port`에 별도로 지정하며 생략하면 25565입니다. 런처 화면에는 주소를 표시하지 않으며, 게임 시작 시 설정한 서버로 자동 접속합니다.
 - 서버 주소는 기본 모드팩의 관리자 설정만 사용합니다. 전역 `BETTERLAUNCHER_SERVER_HOST`·`BETTERMON_SERVER_HOST` 등의 환경변수와 사용자 실행 요청은 접속 주소를 덮어쓰지 않습니다. 기존 `serverStatus.host`·`serverStatus.port`는 `server`가 없는 프로젝트에서 호환용으로 읽으며, 새 프로젝트는 `server`를 사용하세요.
 - `loaderVersion`을 지정하면 특정 Fabric 버전을 사용합니다. 서버가 없는 프로젝트는 자동 서버 접속을 생략합니다.
 - NeoForge는 `modLoader: "neoforge"`와 Minecraft 버전에 맞는 `loaderVersion`을 반드시 지정합니다. 예를 들어 Minecraft `1.21.1`은 NeoForge `21.1.x`와 Java 21을 사용합니다. `loaderInstallerSha256`에 공식 설치 파일의 SHA-256을 지정할 수 있습니다. 실제 운영 버전과 해시는 비공개 설정에만 보관하세요. 공식 설치 프로그램이 전용 폴더에 실행 환경을 준비하며, 설치 실패·무결성 오류·잘못된 링크 경로는 실행을 중단합니다.
-- 공지는 `news.items` 또는 `news.url`로 지정합니다.
-- 모드팩이 없어도 로그인과 설정을 사용할 수 있습니다. 같은 실행 화면에 미설정 상태를 표시하고 게임 실행을 비활성화합니다. 배포 주소가 없는 모드팩은 배포 준비 상태로 안내합니다.
+- 메인 화면은 계정 모델, 게임 시작, 바로가기와 접속 인원 표시를 사용합니다. 시작 버튼 옆의 전체 진행률은 준비 단계와 파일 처리 수를 합산하며 게임 프로세스가 생성되면 100%가 됩니다. 상태 문구는 표시하지 않고 오류는 버튼 툴팁으로 확인합니다. 창 바에는 닫기 버튼만 표시합니다.
+- 창 크기를 조절할 때는 16:9 비율을 유지합니다. 기본 크기는 1280×720, 최소 크기는 1184×666이며 운영체제의 최대화·전체 화면 전환은 사용하지 않습니다. 진행률은 업데이트·실행 중에만 표시합니다.
+- 설정 팝업은 계정·게임·Java·정보 메뉴를 제공합니다. 런처·업데이트 메뉴와 뉴스·업데이트 노트는 제공하지 않으며, 런처 자동 업데이트는 계속 동작합니다.
+- 모드팩이 없거나 배포 주소가 준비되지 않아도 로그인과 설정을 사용할 수 있으며 게임 실행은 비활성화합니다.
 - 개발 실행은 `.private/modpack.config.json`을 먼저 읽습니다. 설치된 런처는 앱에 포함된 관리자 설정만 읽습니다. `npm run dist:win`으로 설치 파일을 로컬에 만듭니다. `dist:private`도 같은 명령이며 별도 배포본을 만들지 않습니다. 운영 설정이 없거나 모드팩이 여러 개면 빌드를 중단합니다. `.private`와 원본 운영 설정은 Git에 포함하지 않습니다.
 
 Minecraft 1.20 이상은 Quick Play 인수를 사용하며, 이전 버전은 `--server`·`--port`를 사용합니다. [Minecraft 공식 1.20 변경 사항](https://feedback.minecraft.net/hc/en-us/articles/16499677456781-Minecraft-Java-Edition-1-20-Trails-Tales)에 따라 게임 버전별로 접속 인수를 생성합니다. 서버 설정이 없는 모드팩은 서버에 자동 접속하지 않고 게임을 실행합니다.
 
 ## 새 모드팩 배포
 
-`npm install` 후 아래 명령을 프로젝트 루트에서 실행합니다. Wrangler는 명령 주입 보안 패치가 적용된 4.59.2로 고정했으며, 하위 의존성도 패치 버전으로 고정했습니다.
+`npm install` 후 아래 명령을 프로젝트 루트에서 실행합니다. Wrangler는 4.157.0으로 고정했으며, 배포 전 `npm audit`으로 하위 의존성도 확인합니다.
 
 ```powershell
-npx wrangler@4.59.2 login --scopes account:read user:read pages:write
+npx wrangler@4.157.0 login --scopes account:read user:read pages:write
 npm run modpack:build -- --project skyblock --source "C:\Modpacks\Skyblock" --version 1.0.0
 $env:CLOUDFLARE_PAGES_PROJECT = "YOUR_PROJECT"
 npm run modpack:deploy

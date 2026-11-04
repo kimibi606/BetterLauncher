@@ -26,6 +26,11 @@ let releaseJava;
 let blockJava = false;
 let expireLaunch = false;
 let activeAccountUuid = "0123456789abcdef0123456789abcdef";
+let extraAccount = null;
+let accountSwitchCount = 0;
+let blockLaunch = false;
+let releaseLaunch;
+let launchResult = { ok: false, error: "테스트 실행 요청 확인 완료" };
 let delayedSkinUuid = "";
 let failedSkinUuid = "";
 let failServerStatus = false;
@@ -33,20 +38,21 @@ let releaseSkin;
 const skinRequests = [];
 const { skinPng } = require("./skin-fixture.cjs");
 const calls = [];
+const removedFeatureRequests = [];
 const defaultsRequests = [];
 let updaterFixture = { enabled: false, currentVersion: require("../package.json").version };
 let updaterResult = { ok: true };
-let blockUpdaterCheck = false;
-let releaseUpdaterCheck;
-let updaterCheckCount = 0;
 let loginFailure = null;
 let loginThrows = false;
 let blockLogin = false;
 let releaseLogin;
 let loginCalls = 0;
 const mediaRequests = [];
-const auth = () => ({ signedIn, profileName: signedIn ? "Tester" : "", uuid: signedIn ? activeAccountUuid : "",
-  accounts: signedIn ? [{ id: activeAccountUuid, uuid: activeAccountUuid, profileName: "Tester", selected: true }] : [] });
+const auth = () => ({ signedIn, profileName: signedIn ? (extraAccount?.uuid === activeAccountUuid ? extraAccount.profileName : "Tester") : "", uuid: signedIn ? activeAccountUuid : "",
+  accounts: signedIn ? (extraAccount ? [
+    { id: "0123456789abcdef0123456789abcdef", uuid: "0123456789abcdef0123456789abcdef", profileName: "Tester" }, extraAccount
+  ].map(account => ({ ...account, selected: account.uuid === activeAccountUuid }))
+    : [{ id: activeAccountUuid, uuid: activeAccountUuid, profileName: "Tester", selected: true }]) : [] });
 const handle = (name, fn) => ipcMain.handle(name, (_event, payload = {}) => fn(payload));
 handle("launcher:get-defaults", ({ projectId }) => {
   defaultsRequests.push(projectId);
@@ -55,12 +61,19 @@ handle("launcher:get-defaults", ({ projectId }) => {
   return { projectId: project?.id || "", projects: catalog, minecraftDirectory: project ? path.join(output, "instances", project.id) : "", javaPath: "", ramMin: 6144, ramMax: 6144, jvmArgs: "-XX:+UseZGC" };
 });
 handle("launcher:get-auth-state", auth);
+handle("launcher:microsoft-select-account", (accountId) => {
+  assert.ok(auth().accounts.some(account => account.id === accountId));
+  activeAccountUuid = accountId;
+  accountSwitchCount++;
+  return { ok: true, status: auth() };
+});
 handle("launcher:get-account-skin", async ({ uuid }) => {
   skinRequests.push(uuid);
   if (uuid === delayedSkinUuid) await new Promise((resolve) => { releaseSkin = resolve; });
   if (uuid === failedSkinUuid) return { ok: false };
   return { ok: true, uuid, model: uuid.startsWith("2") ? "slim" : "classic",
-    textureDataUrl: "data:image/png;base64," + skinPng({ color: uuid.startsWith("2") ? [152, 60, 172] : [48, 152, 172] }).toString("base64") };
+    textureDataUrl: "data:image/png;base64," + skinPng({ color: uuid.startsWith("2") ? [152, 60, 172] : [48, 152, 172],
+      faceColor: [188, 137, 106].map((value, index) => value - (parseInt(uuid[0], 16) % 7) * (index + 1) * 2) }).toString("base64") };
 });
 handle("launcher:microsoft-login", async () => {
   loginCalls++;
@@ -74,11 +87,7 @@ handle("launcher:get-system-profile", () => ({ totalMemoryGb: 32, preset: "high"
 handle("launcher:load-profiles", () => ({ ok: true, profiles: [] }));
 handle("updater:get-state", () => updaterFixture);
 handle("updater:ensure-latest", () => updaterResult);
-handle("updater:check", async () => {
-  updaterCheckCount++;
-  if (blockUpdaterCheck) await new Promise(resolve => { releaseUpdaterCheck = resolve; });
-  return updaterResult;
-});
+handle("updater:check", () => updaterResult);
 handle("launcher:get-github-release", () => ({ ok: true, configured: false }));
 handle("launcher:auto-select-java", async (payload) => {
   calls.push({ type: "java", ...payload });
@@ -91,19 +100,20 @@ handle("launcher:check-modpack-update", async (payload) => {
   return { ok: true, pending: pendingUpdate };
 });
 handle("launcher:sync-modpack", (payload) => { calls.push({ type: "sync", ...payload }); pendingUpdate = false; return { ok: true, version: "1.0.1" }; });
-handle("launcher:get-news", (payload) => { calls.push({ type: "news", ...payload }); return { ok: true, items: [], configured: false }; });
+handle("launcher:get-news", (payload) => { removedFeatureRequests.push({ type: "news", ...payload }); return { ok: true, items: [], configured: false }; });
 handle("launcher:get-server-status", (payload) => {
   calls.push({ type: "server", ...payload });
   if (failServerStatus) throw new Error("connect 203.0.113.42:25565 alpha.example");
   return { ok: true, hasServerTarget: false };
 });
-handle("launcher:launch", (payload) => {
+handle("launcher:launch", async (payload) => {
   calls.push({ type: "launch", ...payload });
+  if (blockLaunch) await new Promise(resolve => { releaseLaunch = resolve; });
   if (expireLaunch) {
     signedIn = false;
     return { ok: false, code: "auth-session-expired", status: auth(), error: "로그인이 만료되었습니다." };
   }
-  return { ok: false, error: "테스트 실행 요청 확인 완료" };
+  return launchResult;
 });
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -182,7 +192,11 @@ app.whenReady().then(async () => {
   assert.equal(await js(win, "document.querySelector('.modpack-info, #currentProjectName, #currentProjectServer, #projectDescription')"), null);
   assert.equal(await js(win, "'serverAddress' in activeModpack"), false);
   assert.equal(await js(win, "document.querySelectorAll('audio, #bgmControl').length"), 0);
-  assert.equal(await js(win, "externalMedia.hidden"), true);
+  assert.equal(await js(win, "document.querySelector('#newsPanel, #settingsAboutNewsList, .launcher-footer, .start-launch-logo')"), null);
+  assert.equal(await js(win, "typeof launcherApi.getNews === 'undefined' && typeof launcherApi.getServerStatus === 'function'"), true);
+  assert.equal(await js(win, "document.querySelector('#launchStatus, .start-launch-status, #windowMinimize, #windowMaximize, #settingsTabLauncher, #settingsTabUpdate, [data-settings-tab=settingsTabLauncher], [data-settings-tab=settingsTabUpdate]')"), null);
+  assert.equal(await js(win, "launchProgress.textContent"), "100%");
+  assert.equal(await js(win, "launchProgress.hidden"), true, "ready-to-play state must not show a percentage");
   await waitFor(win, "accountModelImage.dataset.skinState === 'ready'");
   assert.equal(await js(win, "accountModelImage.src.startsWith('data:image/png;base64,') && accountModelImage.naturalHeight === 576"), true);
   assert.equal(await js(win, "window.minecraftSkinModel.renderer"), "webgl");
@@ -232,18 +246,73 @@ app.whenReady().then(async () => {
   for (const setter of ["setLaunchStatus", "setSettingsStatus", "setStartupStatus"]) {
     await js(win, setter + "(" + JSON.stringify(privateDiagnostic) + ", true)");
   }
-  for (const element of ["launchStatus", "settingsStatus", "startupStatus"]) {
+  assert.doesNotMatch(await js(win, "launchStatusMessage + (startLaunchButton.title || '')"), /203\.0\.113\.42|alpha\.example|cdn\.example|game-secret|Friend Name|01234567/);
+  for (const element of ["settingsStatus", "startupStatus"]) {
     assert.doesNotMatch(await js(win, element + ".textContent"), /203\.0\.113\.42|alpha\.example|cdn\.example|game-secret|Friend Name|01234567/);
   }
-  await js(win, "setLaunchStatus('모드팩이 최신 상태입니다.'); refreshPlayerCount()");
+  await js(win, "setLaunchStatus('모드팩이 최신 상태입니다.');");
 
   await js(win, "settingsButton.click()");
   assert.equal(await js(win, "currentScreen"), "settings");
   assert.equal(await js(win, "document.querySelector('[data-settings-tab=settingsTabJava]').disabled"), false);
-  await waitFor(win, "settingsAccountList.querySelector('img').dataset.skinState === 'ready'");
-  assert.equal(await js(win, "settingsAccountList.querySelector('img').src === accountModelImage.src"), true);
+  await waitFor(win, "settingsAccountList.querySelector('img').dataset.skinState === 'ready' && settingsAccountList.querySelector('img').naturalHeight === 8");
+  assert.equal(await js(win, "settingsAccountList.querySelector('img').naturalHeight === 8 && accountModelImage.naturalHeight === 576"), true);
   assert.equal(await js(win, "settingsAccountList.textContent.includes(authState.uuid) || !!settingsAccountList.querySelector('.settings-account-uuid-value')"), false);
   assert.equal(skinRequests.length, 1, "menu and settings reuse the same skin request");
+  await screenshot(win, "single-modpack-settings");
+  assert.equal(await js(win, "!launchScreen.hidden && launchScreen.inert && settingsScreen.querySelector('[role=dialog][aria-modal=true]') !== null"), true);
+  for (const [width, height] of [[1280, 720], [860, 660]]) {
+    win.setSize(width, height);
+    await delay(120);
+    for (const tab of ["Account", "Minecraft", "Java", "About"]) {
+      await js(win, `document.querySelector('[data-settings-tab=settingsTab${tab}]').click()`);
+      const geometry = await js(win, `(() => {
+        const dialog = document.querySelector('.settings-container').getBoundingClientRect();
+        const panel = document.querySelector('.settings-content-panel');
+        const close = settingsCloseButton.getBoundingClientRect();
+        return { fits: dialog.left >= 0 && dialog.top >= 0 && dialog.right <= innerWidth && dialog.bottom <= innerHeight,
+          noHorizontalOverflow: panel.scrollWidth <= panel.clientWidth,
+          closeClickable: document.elementFromPoint(close.x + close.width / 2, close.y + close.height / 2)?.id === 'settingsCloseButton' };
+      })()`);
+      assert.ok(geometry.fits && geometry.noHorizontalOverflow && geometry.closeClickable, `${width}px ${tab} settings must fit and remain usable`);
+      if (["Account", "Minecraft", "Java"].includes(tab)) await screenshot(win, `settings-${tab.toLowerCase()}-${width}`);
+      if (tab === "Java") {
+        assert.equal(await js(win, `(() => {
+          const panel = document.querySelector('.settings-content-panel');
+          panel.scrollTop = panel.scrollHeight;
+          const close = settingsCloseButton.getBoundingClientRect();
+          const clickable = document.elementFromPoint(close.x + close.width / 2, close.y + close.height / 2)?.id === 'settingsCloseButton';
+          panel.scrollTop = 0;
+          return clickable;
+        })()`), true, "closing the modal must remain possible after scrolling");
+      }
+    }
+  }
+  win.setSize(1280, 720);
+  const originalDirectories = await js(win, "[launcherSettings.minecraftDirectory, launcherSettings.dataDirectory]");
+  await js(win, "launcherSettings.minecraftDirectory += '-custom'; launcherSettings.dataDirectory += '-custom'");
+  await js(win, "selectSettingsTab('settingsTabMinecraft'); settingsGameWidthInput.value = '1440'; settingsFullscreenInput.checked = true; settingsCloseButton.click()");
+  assert.equal(await js(win, "launcherSettings.gameWidth === 1440 && launcherSettings.fullscreen"), true);
+  assert.deepEqual(await js(win, "[launcherSettings.minecraftDirectory, launcherSettings.dataDirectory]"), originalDirectories.map(value => value + '-custom'));
+  await js(win, "[launcherSettings.minecraftDirectory, launcherSettings.dataDirectory] = " + JSON.stringify(originalDirectories));
+
+  await js(win, "settingsButton.click()");
+  assert.equal(await js(win, "settingsGameWidthInput.value === '1440' && settingsFullscreenInput.checked"), true);
+  await js(win, "settingsGameWidthInput.value = '1280'; settingsFullscreenInput.checked = false; selectSettingsTab('settingsTabAccount')");
+  extraAccount = { id: "2".repeat(32), uuid: "2".repeat(32), profileName: "SecondPlayer" };
+  win.webContents.send("launcher:auth-state", auth());
+  await waitFor(win, "settingsAccountList.querySelectorAll('.settings-account-card').length === 2");
+  await js(win, "settingsAccountList.querySelector('.settings-account-card:not(.is-selected)').click()");
+  await waitFor(win, "authState.profileName === 'SecondPlayer' && !isModpackPreparing");
+  assert.equal(accountSwitchCount, 1);
+  assert.equal(await js(win, "settingsAccountList.querySelector('.is-selected').getAttribute('aria-pressed')"), "true");
+  await js(win, "const firstAccountCard = settingsAccountList.querySelector('.settings-account-card:not(.is-selected)'); firstAccountCard.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))");
+  await waitFor(win, "authState.profileName === 'Tester' && !isModpackPreparing");
+  assert.equal(accountSwitchCount, 2);
+  extraAccount = null;
+  win.webContents.send("launcher:auth-state", auth());
+  await js(win, "settingsMicrosoftAddButton.focus(); document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }))");
+  assert.equal(await js(win, "document.activeElement === settingsNavItems[0]"), true);
   await js(win, "settingsCloseButton.click()");
   assert.equal(await js(win, "currentScreen"), "launch");
 
@@ -288,27 +357,75 @@ app.whenReady().then(async () => {
   await js(win, "gateMicrosoftLoginButton.click()");
   await waitFor(win, "currentScreen === 'launch' && hasActiveModpack && !isModpackPreparing");
   await screenshot(win, "account-skin-loaded");
+  blockLaunch = true;
+  releaseLaunch = null;
   await js(win, "startLaunchButton.click()");
-  await waitFor(win, "!isLaunchRequestPending");
+  await waitFor(win, "isLaunchRequestPending && !launchProgress.hidden && launchProgress.textContent === '5%'");
+  while (!releaseLaunch) await delay(20);
+  const firstProgress = calls.filter(entry => entry.type === "launch").at(-1);
+  const sendProgress = (percent, overrides = {}) => win.webContents.send("launcher:progress", {
+    id: firstProgress.progressId, projectId: firstProgress.projectId, percent, ...overrides
+  });
+  sendProgress(37.6);
+  await waitFor(win, "launchProgress.textContent === '37%'");
+  sendProgress(10);
+  sendProgress(95, { id: "previous-operation" });
+  sendProgress(95, { projectId: "beta" });
+  sendProgress(NaN);
+  await delay(40);
+  assert.equal(await js(win, "launchProgress.textContent"), "37%");
+  win.webContents.send("launcher:log", { level: "warn", message: "Retrying modpack download verification" });
+  await delay(40);
+  assert.equal(await js(win, "launchProgressState.active && !launchProgressState.failed"), true, "recoverable warnings must not stop overall progress");
+  const placement = await js(win, `(() => {
+    const button = startLaunchButton.getBoundingClientRect();
+    const percent = launchProgress.getBoundingClientRect();
+    const gap = percent.left - button.right;
+    return gap > 0 && gap <= 8 && Math.abs(percent.bottom - button.bottom) < 2;
+  })()`);
+  assert.ok(placement, "overall progress sits close to the play button and aligns with its bottom edge");
+  await screenshot(win, "launch-progress");
+  releaseLaunch();
+  await waitFor(win, "!isLaunchRequestPending && launchProgress.classList.contains('is-error')");
+  assert.equal(await js(win, "launchProgress.hidden"), true, "failed launches return to a play button without progress");
+  sendProgress(100);
+  await delay(40);
+  assert.equal(await js(win, "launchProgress.textContent"), "37%", "a failed operation must never become complete");
+  releaseLaunch = null;
+  launchResult = { ok: true };
+  await js(win, "startLaunchButton.click()");
+  await waitFor(win, "isLaunchRequestPending && launchProgress.textContent === '5%'");
+  while (!releaseLaunch) await delay(20);
+  const retry = calls.filter(entry => entry.type === "launch").at(-1);
+  assert.notEqual(retry.progressId, firstProgress.progressId);
+  sendProgress(99);
+  win.webContents.send("launcher:progress", { id: retry.progressId, projectId: retry.projectId, percent: 99.9 });
+  await waitFor(win, "launchProgress.textContent === '99%'");
+  releaseLaunch();
+  await waitFor(win, "!isLaunchRequestPending && launchProgress.textContent === '100%'");
+  blockLaunch = false;
+  launchResult = { ok: false, error: "Launch fixture failed" };
   const launch = calls.find((entry) => entry.type === "launch");
   assert.equal(launch.projectId, "alpha");
   assert.equal(launch.minecraftDirectory, path.join(output, "instances", "alpha"));
   assert.equal("autoConnect" in launch, false);
   win.webContents.send("launcher:state", { launching: true });
-  await waitFor(win, "startLaunchButton.disabled");
+  await waitFor(win, "startLaunchButton.disabled && !launchProgress.hidden");
   const launchCount = calls.filter((entry) => entry.type === "launch").length;
   await js(win, "startLaunchButton.click()");
   assert.equal(calls.filter((entry) => entry.type === "launch").length, launchCount);
   win.webContents.send("launcher:state", { launching: false });
-  await waitFor(win, "!startLaunchButton.disabled");
+  await waitFor(win, "!startLaunchButton.disabled && launchProgress.hidden");
 
   pendingUpdate = true;
   await js(win, "refreshModpackUpdateStatus({ forceRefresh: true })");
   assert.equal(await js(win, "startLaunchButton.textContent"), "업데이트");
+  assert.equal(await js(win, "launchProgress.hidden"), true, "an available update is not an active update");
   await js(win, "startLaunchButton.click()");
   await waitFor(win, "!isModpackUpdateApplyRunning && !modpackUpdateState.pending");
   assert.equal(calls.find((entry) => entry.type === "sync").projectId, "alpha");
   assert.equal(await js(win, "startLaunchButton.textContent"), "게임 시작");
+  assert.equal(await js(win, "launchProgress.hidden"), true);
 
   // Session expiry returns to login; signing back in prepares the same pack automatically.
   expireLaunch = true;
@@ -418,54 +535,34 @@ app.whenReady().then(async () => {
   assert.ok(calls.some(entry => entry.type === "launch" && entry.projectId === "new-loader" && entry.version === ""));
   win.destroy();
 
-  // Missing/private update releases are distinct from "up to date", while
-  // current games still launch and updater diagnostics never replace game status.
+  // Removing the update settings page must preserve automatic launcher updates.
   updaterFixture = { enabled: true, unavailable: true, currentVersion: require("../package.json").version };
-  updaterResult = { ok: true, unavailable: true, message: "런처 업데이트 배포에 접근할 수 없습니다. 현재 버전으로 이용할 수 있습니다." };
+  updaterResult = { ok: true, unavailable: true, message: "Current version remains usable." };
   catalog = [fixtures[0]];
   calls.length = 0;
   win = await openWindow();
-  assert.equal(await js(win, "!startLaunchButton.disabled && !launchStatus.classList.contains('is-error')"), true);
-  await js(win, "setLaunchStatus('게임 실행 준비 완료');");
-  win.webContents.send("launcher:log", { scope: "updater", level: "error", message: '404 method: GET url: https://updates.example/private?token=secret' });
+  assert.equal(await js(win, "!startLaunchButton.disabled && !launchStatusIsError"), true);
+  await js(win, "setLaunchStatus('Ready');");
+  win.webContents.send("launcher:log", { scope: "updater", level: "error", message: '404 https://updates.example/private?token=secret' });
   await delay(40);
-  assert.equal(await js(win, "launchStatus.textContent"), "게임 실행 준비 완료");
-  await js(win, "settingsButton.click(); document.querySelector('[data-settings-tab=settingsTabUpdate]').click()");
-  assert.match(await js(win, "settingsUpdateSummary.textContent"), /접근할 수 없습니다/);
-  assert.equal(await js(win, "settingsUpdateActionButton.disabled || settingsUpdateIndicator.classList.contains('is-error')"), false);
-  await js(win, "settingsUpdateActionButton.click()");
-  await waitFor(win, "settingsStatus.textContent.includes('현재 버전')");
-  assert.doesNotMatch(await js(win, "settingsStatus.textContent"), /최신|404|PRIVATE URL|method:|updates\.example/);
-  await screenshot(win, "updater-release-unavailable");
-  await js(win, "settingsCloseButton.click(); startLaunchButton.click()");
-  await waitFor(win, "!isLaunchRequestPending");
-  assert.ok(calls.some(entry => entry.type === "launch"));
-  win.destroy();
-  // A missing published release is informational. Repeated clicks share one
-  // pending action, then a later click can start a fresh check.
-  updaterFixture = { enabled: true, unavailable: true, noPublishedRelease: true, currentVersion: require("../package.json").version };
-  updaterResult = { ok: true, unavailable: true, noPublishedRelease: true,
-    message: "아직 배포된 런처 업데이트가 없습니다. 현재 버전으로 이용할 수 있습니다." };
-  win = await openWindow();
-  await js(win, "settingsButton.click(); document.querySelector('[data-settings-tab=settingsTabUpdate]').click()");
-  assert.match(await js(win, "settingsUpdateSummary.textContent"), /아직 배포된/);
-  assert.equal(await js(win, "settingsUpdateIndicator.classList.contains('is-error') || settingsUpdateIndicator.classList.contains('is-warning')"), false);
-  const checksBefore = updaterCheckCount;
-  blockUpdaterCheck = true;
-  releaseUpdaterCheck = null;
-  await js(win, "for(let i=0;i<15;i++) settingsUpdateActionButton.click()");
-  while (!releaseUpdaterCheck) await delay(20);
-  assert.equal(updaterCheckCount, checksBefore + 1);
-  assert.equal(await js(win, "settingsUpdateActionButton.disabled && isSettingsUpdateActionPending"), true);
-  releaseUpdaterCheck();
-  await waitFor(win, "!isSettingsUpdateActionPending");
-  assert.equal(await js(win, "settingsStatus.classList.contains('is-error') || settingsUpdateActionButton.disabled"), false);
-  assert.match(await js(win, "settingsStatus.textContent"), /아직 배포된/);
-  blockUpdaterCheck = false;
-  await js(win, "settingsUpdateActionButton.click()");
-  await waitFor(win, "!isSettingsUpdateActionPending");
-  assert.equal(updaterCheckCount, checksBefore + 2);
-  await screenshot(win, "updater-no-published-release");
+  assert.equal(await js(win, "launchStatusMessage"), "Ready");
+  await js(win, "settingsButton.click()");
+  assert.deepEqual(await js(win, "settingsNavItems.map(item => item.dataset.settingsTab)"),
+    ["settingsTabAccount", "settingsTabMinecraft", "settingsTabJava", "settingsTabAbout"]);
+  await js(win, "settingsCloseButton.click()");
+  win.webContents.send("updater:state", { enabled: true, downloading: true, available: true, progressPercent: 33.7 });
+  await waitFor(win, "!launchProgress.hidden && launchProgress.textContent === '33%' && startLaunchButton.disabled");
+  await screenshot(win, "launcher-update-progress");
+  win.webContents.send("updater:state", { enabled: true, downloading: true, available: true, progressPercent: 100 });
+  await waitFor(win, "launchProgress.textContent === '99%'");
+  win.webContents.send("updater:state", { enabled: true, downloaded: true, progressPercent: 100 });
+  await waitFor(win, "launchProgress.hidden && launchProgress.textContent === '100%' && !startLaunchButton.disabled");
+  win.webContents.send("updater:state", { enabled: true, downloading: true, available: true, progressPercent: 12 });
+  await waitFor(win, "launchProgress.textContent === '12%'");
+  win.webContents.send("updater:state", { enabled: true, downloading: false, lastError: "Download fixture failed" });
+  await waitFor(win, "launchProgress.classList.contains('is-error')");
+  win.webContents.send("updater:state", { enabled: true, downloading: true, available: true, progressPercent: 3 });
+  await waitFor(win, "launchProgress.textContent === '3%' && !launchProgress.classList.contains('is-error')");
   win.destroy();
   updaterFixture = { enabled: false, currentVersion: require("../package.json").version };
   updaterResult = { ok: true };
@@ -475,7 +572,7 @@ app.whenReady().then(async () => {
   calls.length = 0;
   win = await openWindow();
   assert.equal(await js(win, "currentScreen === 'launch' && startLaunchButton.disabled"), true);
-  assert.match(await js(win, "launchStatus.textContent"), /배포 준비/);
+  assert.match(await js(win, "launchStatusMessage"), /배포 준비/);
   assert.equal(await js(win, "modpackUpdatePollTimer === null"), true);
   assert.equal(calls.some((entry) => ["java", "check", "launch"].includes(entry.type)), false);
   win.destroy();
@@ -483,7 +580,7 @@ app.whenReady().then(async () => {
   calls.length = 0;
   win = await openWindow();
   assert.equal(await js(win, "currentScreen === 'launch' && startLaunchButton.disabled"), true);
-  assert.match(await js(win, "launchStatus.textContent"), /모드팩 설정/);
+  assert.match(await js(win, "launchStatusMessage"), /모드팩 설정/);
   assert.equal(calls.length, 0);
   await js(win, "settingsButton.click(); settingsCloseButton.click()");
   assert.equal(await js(win, "currentScreen"), "launch");
@@ -514,8 +611,9 @@ app.whenReady().then(async () => {
   assert.equal(await js(win, "startLaunchButton.disabled"), true);
   win.destroy();
   assert.ok(defaultsRequests.every((id) => !id), "UI must always use the administrator's default");
+  assert.equal(removedFeatureRequests.length, 0, "removed news feature must not request updates");
   assert.equal(mediaRequests.length, 0, "the launcher must not load BGM in any screen");
-  console.log("Renderer flow passed: full-body 3D portraits, transparent background, legacy hats, slim arms, GPU fallback, shared skin cache, retry/account races and single-modpack flow.");
+  console.log("Renderer flow passed: restored main screen, news removed, responsive settings modal, avatar cards, account switching, saved settings, skin cache/races and launch/update flow.");
   app.quit();
 }).catch((error) => { console.error(error); app.exit(1); });
-setTimeout(() => { console.error("Renderer test timed out"); app.exit(1); }, 75000).unref();
+setTimeout(() => { console.error("Renderer test timed out"); app.exit(1); }, 100000).unref();

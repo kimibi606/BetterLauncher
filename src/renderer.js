@@ -1,5 +1,3 @@
-﻿const WINDOW_MAX_ICON = "\u25A1";
-const WINDOW_RESTORE_ICON = "\u2750";
 const STARTUP_MIN_DURATION_MS = 1200;
 const STARTUP_FADE_DURATION_MS = 420;
 const STARTUP_SETTINGS_PROGRESS = 8;
@@ -15,15 +13,10 @@ const LAUNCH_LOG_CAPTURE_MS = 45000;
 const LAUNCH_START_TIMEOUT_MS = 20000;
 const PLAYER_COUNT_REFRESH_MS = 15000;
 const MODPACK_UPDATE_REFRESH_MS = 60000;
-const NEWS_REFRESH_DEFAULT_MS = 15000;
-const NEWS_REFRESH_MIN_MS = 5000;
-const NEWS_REFRESH_MAX_MS = 30 * 60 * 1000;
-const GITHUB_RELEASE_NOTES_MAX_ITEMS = 8;
 const JAVA_RAM_MIN_MB = 6144;
 const JAVA_RAM_STEP_MB = 512;
 const JAVA_PATH_AUTO_SELECT_PLACEHOLDERS = new Set(["java", "java.exe", "javaw", "javaw.exe"]);
 const LEGACY_SETTINGS_STORAGE_KEY = "bettermon.launcher.settings.v1";
-const NEWS_PANEL_EXPANDED_STORAGE_KEY = "bettermon.launcher.news.expanded.v1";
 const LOGIN_WAITING_ENTER_DELAY_MS = 220;
 const LOGIN_GATE_ENTER_DELAY_MS = 180;
 const MODPACK_PROGRESS_PATTERN = /\[Modpack\s+(\d+)\s*\/\s*(\d+)\]\s*(.*)/i;
@@ -51,8 +44,6 @@ const loginWaitingState = document.getElementById("loginWaitingState");
 const mainLayout = document.getElementById("mainLayout");
 const gateMicrosoftLoginButton = document.getElementById("gateMicrosoftLogin");
 const gateAuthStatus = document.getElementById("gateAuthStatus");
-const windowMinimizeButton = document.getElementById("windowMinimize");
-const windowMaximizeButton = document.getElementById("windowMaximize");
 const windowCloseButton = document.getElementById("windowClose");
 const startupOverlay = document.getElementById("startupOverlay");
 const startupStatus = document.getElementById("startupStatus");
@@ -62,10 +53,6 @@ const startupProgressText = document.getElementById("startupProgressText");
 const accountModelPanel = document.getElementById("accountModelPanel");
 const accountModelImage = document.getElementById("accountModelImage");
 const accountModelName = document.getElementById("accountModelName");
-const newsPanel = document.getElementById("newsPanel");
-const newsList = document.getElementById("newsList");
-const newsPanelBadge = document.getElementById("newsPanelBadge");
-const newsPanelExpandButton = document.getElementById("newsPanelExpandButton");
 const playerCountPanel = document.getElementById("playerCountPanel");
 const playerCountValue = document.getElementById("playerCountValue");
 const playerCountTooltip = document.getElementById("playerCountTooltip");
@@ -79,7 +66,11 @@ let isLauncherInitialized = false;
 let authSessionRevision = 0;
 let isModpackPreparing = false;
 let hasActiveModpack = false;
-const launchStatus = document.getElementById("launchStatus");
+const launchProgress = document.getElementById("launchProgress");
+let launchStatusMessage = "";
+let launchStatusIsError = false;
+let progressSequence = 0;
+let launchProgressState = { id: "", kind: "idle", percent: 0, active: false, failed: false };
 const settingsCloseButton = document.getElementById("settingsCloseButton");
 const settingsDoneButton = document.getElementById("settingsDoneButton");
 const settingsStatus = document.getElementById("settingsStatus");
@@ -89,8 +80,6 @@ const settingsGameWidthInput = document.getElementById("settingsGameWidth");
 const settingsGameHeightInput = document.getElementById("settingsGameHeight");
 const settingsFullscreenInput = document.getElementById("settingsFullscreen");
 const settingsLaunchDetachedInput = document.getElementById("settingsLaunchDetached");
-const settingsMinecraftDirectoryInput = document.getElementById("settingsMinecraftDirectory");
-const settingsPickMinecraftDirectoryButton = document.getElementById("settingsPickMinecraftDirectory");
 const settingsProfileSelect = document.getElementById("settingsProfileSelect");
 const settingsJavaPathInput = document.getElementById("settingsJavaPath");
 const settingsAutoJavaPathButton = document.getElementById("settingsAutoJavaPath");
@@ -103,17 +92,9 @@ const settingsJavaTotalMemory = document.getElementById("settingsJavaTotalMemory
 const settingsJavaUsableMemory = document.getElementById("settingsJavaUsableMemory");
 const settingsJavaPathStatus = document.getElementById("settingsJavaPathStatus");
 const settingsJvmArgsInput = document.getElementById("settingsJvmArgs");
-const settingsDataDirectoryInput = document.getElementById("settingsDataDirectory");
-const settingsUpdateSummary = document.getElementById("settingsUpdateSummary");
-const settingsUpdateIndicator = document.getElementById("settingsUpdateIndicator");
-const settingsUpdateChannel = document.getElementById("settingsUpdateChannel");
-const settingsUpdateVersion = document.getElementById("settingsUpdateVersion");
-const settingsUpdateActionButton = document.getElementById("settingsUpdateAction");
 const settingsAboutChannel = document.getElementById("settingsAboutChannel");
 const settingsAboutVersion = document.getElementById("settingsAboutVersion");
 const settingsAboutReleaseDate = document.getElementById("settingsAboutReleaseDate");
-const settingsAboutReleaseTitle = document.getElementById("settingsAboutReleaseTitle");
-const settingsAboutNewsList = document.getElementById("settingsAboutNewsList");
 const settingsNavItems = Array.from(document.querySelectorAll(".settings-nav-item[data-settings-tab]"));
 const settingsTabs = Array.from(document.querySelectorAll(".settings-tab"));
 
@@ -126,12 +107,10 @@ const SCREEN_ELEMENTS = {
 const SETTINGS_TEXT_INPUTS = {
   gameWidth: settingsGameWidthInput,
   gameHeight: settingsGameHeightInput,
-  minecraftDirectory: settingsMinecraftDirectoryInput,
   javaPath: settingsJavaPathInput,
   jvmArgs: settingsJvmArgsInput,
   ramMin: settingsRamMinInput,
-  ramMax: settingsRamMaxInput,
-  dataDirectory: settingsDataDirectoryInput
+  ramMax: settingsRamMaxInput
 };
 
 const SETTINGS_BOOLEAN_INPUTS = {
@@ -169,20 +148,14 @@ let startupProgressPercent = 0;
 let startupOverlayDismissed = false;
 let launchLogCaptureUntil = 0;
 let launchStartTimeoutId = null;
-let newsRefreshMs = NEWS_REFRESH_DEFAULT_MS;
-let newsPollTimer = null;
-let isNewsRequestPending = false;
-let currentNewsItems = [];
-let lastRenderedNewsSignature = "";
-let isNewsPanelExpanded = false;
 let playerCountPollTimer = null;
 let isPlayerCountRequestPending = false;
 let modpackUpdatePollTimer = null;
 let isModpackUpdateCheckRunning = false;
 let updaterSnapshot = null;
-let isSettingsUpdateActionPending = false;
 let githubReleaseSnapshot = null;
 let isGitHubReleaseRequestPending = false;
+let settingsReturnFocus = null;
 function delay(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -215,41 +188,6 @@ function bindClick(element, handler) {
   element.addEventListener("click", handler);
 }
 
-function readStoredNewsPanelExpanded() {
-  try {
-    return localStorage.getItem(NEWS_PANEL_EXPANDED_STORAGE_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
-function writeStoredNewsPanelExpanded(expanded) {
-  try {
-    if (expanded) {
-      localStorage.setItem(NEWS_PANEL_EXPANDED_STORAGE_KEY, "1");
-    } else {
-      localStorage.removeItem(NEWS_PANEL_EXPANDED_STORAGE_KEY);
-    }
-  } catch {
-    // ignore storage failures
-  }
-}
-
-function applyNewsPanelExpandedState(expanded, persist = true) {
-  isNewsPanelExpanded = Boolean(expanded);
-  if (newsPanel) {
-    newsPanel.classList.toggle("is-expanded", isNewsPanelExpanded);
-  }
-  if (newsPanelExpandButton) {
-    newsPanelExpandButton.setAttribute("aria-expanded", isNewsPanelExpanded ? "true" : "false");
-    newsPanelExpandButton.setAttribute("aria-label", isNewsPanelExpanded ? "뉴스 패널 줄이기" : "뉴스 패널 늘리기");
-    newsPanelExpandButton.textContent = isNewsPanelExpanded ? "줄이기" : "늘리기";
-  }
-  if (persist) {
-    writeStoredNewsPanelExpanded(isNewsPanelExpanded);
-  }
-}
-
 function switchScreen(targetScreen) {
   const next = targetScreen in SCREEN_ELEMENTS ? targetScreen : "login";
   currentScreen = next;
@@ -263,9 +201,10 @@ function switchScreen(targetScreen) {
     }
 
     const isActive = screenKey === next;
-    screenElement.hidden = !isActive;
+    const isBackdrop = next === "settings" && screenKey === (authState.signedIn ? "launch" : "login");
+    screenElement.hidden = !isActive && !isBackdrop;
     screenElement.inert = !isActive;
-    screenElement.classList.toggle("screen-active", isActive);
+    screenElement.classList.toggle("screen-active", isActive || isBackdrop);
     setAriaHidden(screenElement, !isActive);
   }
 
@@ -358,34 +297,57 @@ function normalizeMinecraftUuid(value) {
 }
 
 const DEFAULT_SKIN_IMAGE = "./assets/default-skin.svg";
+const DEFAULT_AVATAR_IMAGE = "./assets/default-avatar.svg";
 const SKIN_CACHE_MS = 5 * 60 * 1000;
 const renderedSkinCache = new Map();
 const renderedSkinRequests = new Map();
 const skinImageStates = new WeakMap();
 
-async function getRenderedAccountSkin(uuid) {
+async function renderAccountAvatar(textureDataUrl) {
+  const texture = new Image();
+  texture.src = textureDataUrl;
+  await texture.decode();
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 8;
+  const context = canvas.getContext("2d");
+  context.imageSmoothingEnabled = false;
+  context.drawImage(texture, 8, 8, 8, 8, 0, 0, 8, 8);
+  // Legacy textures can contain opaque unused pixels where modern hats live.
+  if (texture.naturalHeight === 64) context.drawImage(texture, 40, 8, 8, 8, 0, 0, 8, 8);
+  return canvas.toDataURL("image/png");
+}
+
+function defaultSkinImage(imageElement) {
+  return imageElement.dataset.skinVariant === "avatar" ? DEFAULT_AVATAR_IMAGE : DEFAULT_SKIN_IMAGE;
+}
+
+async function getRenderedAccountSkin(uuid, variant = "image") {
   const saved = renderedSkinCache.get(uuid);
-  if (saved && saved.expiresAt > Date.now()) return saved.image;
-  if (renderedSkinRequests.has(uuid)) return renderedSkinRequests.get(uuid);
-  const request = (async () => {
-    let timer;
-    try {
-      const result = await Promise.race([
-        window.launcherApi.getAccountSkin(uuid),
-        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Skin request timed out.")), 12000); })
-      ]);
-      if (!result?.ok || normalizeMinecraftUuid(result.uuid) !== uuid) throw new Error("Skin is unavailable.");
-      const image = result.textureDataUrl ? await window.minecraftSkinModel.render(result.textureDataUrl, result.model) : DEFAULT_SKIN_IMAGE;
-      renderedSkinCache.delete(uuid);
-      renderedSkinCache.set(uuid, { image, expiresAt: Date.now() + SKIN_CACHE_MS });
-      if (renderedSkinCache.size > 32) renderedSkinCache.delete(renderedSkinCache.keys().next().value);
-      return image;
-    } finally {
-      clearTimeout(timer);
-    }
-  })().finally(() => renderedSkinRequests.delete(uuid));
-  renderedSkinRequests.set(uuid, request);
-  return request;
+  if (saved && saved.expiresAt > Date.now()) return saved[variant];
+  if (!renderedSkinRequests.has(uuid)) {
+    const request = (async () => {
+      let timer;
+      try {
+        const result = await Promise.race([
+          window.launcherApi.getAccountSkin(uuid),
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Skin request timed out.")), 12000); })
+        ]);
+        if (!result?.ok || normalizeMinecraftUuid(result.uuid) !== uuid) throw new Error("Skin is unavailable.");
+        const skin = result.textureDataUrl ? {
+          image: await window.minecraftSkinModel.render(result.textureDataUrl, result.model),
+          avatar: await renderAccountAvatar(result.textureDataUrl)
+        } : { image: DEFAULT_SKIN_IMAGE, avatar: DEFAULT_AVATAR_IMAGE };
+        renderedSkinCache.delete(uuid);
+        renderedSkinCache.set(uuid, { ...skin, expiresAt: Date.now() + SKIN_CACHE_MS });
+        if (renderedSkinCache.size > 32) renderedSkinCache.delete(renderedSkinCache.keys().next().value);
+        return skin;
+      } finally {
+        clearTimeout(timer);
+      }
+    })().finally(() => renderedSkinRequests.delete(uuid));
+    renderedSkinRequests.set(uuid, request);
+  }
+  return (await renderedSkinRequests.get(uuid))[variant];
 }
 
 function resetMinecraftModelImage(imageElement) {
@@ -394,7 +356,7 @@ function resetMinecraftModelImage(imageElement) {
   if (state?.retryTimer) clearTimeout(state.retryTimer);
   skinImageStates.delete(imageElement);
   imageElement.onerror = null;
-  imageElement.src = DEFAULT_SKIN_IMAGE;
+  imageElement.src = defaultSkinImage(imageElement);
   imageElement.dataset.skinState = "default";
 }
 
@@ -426,11 +388,11 @@ async function loadMinecraftModelImage(imageElement, uuidValue, profileNameValue
   imageElement.title = "스킨 불러오는 중...";
   const isCurrent = () => imageElement.isConnected && skinImageStates.get(imageElement) === state;
   try {
-    const image = await getRenderedAccountSkin(uuid);
+    const image = await getRenderedAccountSkin(uuid, imageElement.dataset.skinVariant === "avatar" ? "avatar" : "image");
     if (!isCurrent()) return;
     state.loadedAt = Date.now();
     imageElement.src = image;
-    imageElement.dataset.skinState = image === DEFAULT_SKIN_IMAGE ? "default" : "ready";
+    imageElement.dataset.skinState = image === defaultSkinImage(imageElement) ? "default" : "ready";
     imageElement.title = displayName + " 스킨";
   } catch {
     if (!isCurrent()) return;
@@ -442,49 +404,6 @@ async function loadMinecraftModelImage(imageElement, uuidValue, profileNameValue
   } finally {
     state.loading = false;
   }
-}
-
-function clampNewsRefreshMs(value, fallback = NEWS_REFRESH_DEFAULT_MS) {
-  const parsed = Number.parseInt(String(value), 10);
-  if (!Number.isFinite(parsed)) {
-    return fallback;
-  }
-  return Math.max(NEWS_REFRESH_MIN_MS, Math.min(NEWS_REFRESH_MAX_MS, parsed));
-}
-
-function normalizeNewsTextValue(value) {
-  if (Array.isArray(value)) {
-    return value.map((line) => asText(line)).filter(Boolean).join("\n");
-  }
-  return asText(value);
-}
-
-function normalizeNewsItem(rawItem) {
-  if (typeof rawItem === "string") {
-    const text = normalizeNewsTextValue(rawItem);
-    if (!text) {
-      return null;
-    }
-    return {
-      type: "\uC548\uB0B4",
-      date: "",
-      text
-    };
-  }
-
-  if (!rawItem || typeof rawItem !== "object") {
-    return null;
-  }
-
-  const text = normalizeNewsTextValue(rawItem.text);
-  if (!text) {
-    return null;
-  }
-  return {
-    type: asText(rawItem.type, "\uC548\uB0B4") || "\uC548\uB0B4",
-    date: asText(rawItem.date),
-    text
-  };
 }
 
 function formatReleaseDateLabel(value) {
@@ -507,14 +426,6 @@ function formatReleaseDateLabel(value) {
   } catch {
     return raw;
   }
-}
-
-function formatReleaseVersionLabel(value) {
-  const normalized = asText(value);
-  if (!normalized || normalized === "-") {
-    return "v-";
-  }
-  return normalized.toLowerCase().startsWith("v") ? normalized : `v${normalized}`;
 }
 
 function normalizeGitHubTagToVersion(tagName) {
@@ -549,57 +460,8 @@ function isGitHubReleaseConfigured(snapshot) {
   return Boolean(snapshot && typeof snapshot === "object" && snapshot.configured);
 }
 
-function parseGitHubReleaseNotes(bodyText, publishedAt = "") {
-  const body = String(bodyText || "").replace(/\r/g, "");
-  if (!body) {
-    return [];
-  }
-
-  const notes = [];
-  const lines = body.split("\n");
-  const formattedNoteDate = formatReleaseDateLabel(publishedAt);
-  const noteDate = formattedNoteDate === "-" ? "" : formattedNoteDate;
-
-  for (const rawLine of lines) {
-    const line = asText(rawLine);
-    if (!line) {
-      continue;
-    }
-    if (/^#{1,6}\s+/.test(line)) {
-      continue;
-    }
-
-    const text = line.replace(/^[-*]\s+/, "");
-    if (!text || /^[-=_]{3,}$/.test(text)) {
-      continue;
-    }
-
-    notes.push({
-      type: "GitHub",
-      date: noteDate,
-      text
-    });
-
-    if (notes.length >= GITHUB_RELEASE_NOTES_MAX_ITEMS) {
-      break;
-    }
-  }
-
-  return notes;
-}
-
-function getAboutReleaseNoteItems() {
-  if (isGitHubReleaseConfigured(githubReleaseSnapshot)) {
-    if (githubReleaseSnapshot?.ok) {
-      return parseGitHubReleaseNotes(githubReleaseSnapshot.body, githubReleaseSnapshot.publishedAt);
-    }
-    return currentNewsItems;
-  }
-  return currentNewsItems;
-}
-
 function updateSettingsAboutReleaseUi() {
-  if (!settingsAboutChannel || !settingsAboutVersion || !settingsAboutReleaseDate || !settingsAboutReleaseTitle) {
+  if (!settingsAboutChannel || !settingsAboutVersion || !settingsAboutReleaseDate) {
     return;
   }
 
@@ -619,73 +481,16 @@ function updateSettingsAboutReleaseUi() {
   const releaseVersion = github
     ? githubVersion || asText(updater.latestVersion) || asText(updater.currentVersion) || "-"
     : asText(updater.latestVersion) || asText(updater.currentVersion) || "-";
-  const releaseVersionLabel = formatReleaseVersionLabel(releaseVersion);
   const releaseDateLabel = formatReleaseDateLabel(github ? asText(github.publishedAt) : asText(updater.releaseDate));
 
   settingsAboutChannel.textContent = releaseName;
   settingsAboutVersion.textContent = `Version ${releaseVersion}`;
   settingsAboutReleaseDate.textContent = releaseDateLabel === "-" ? "Updated -" : `Updated ${releaseDateLabel}`;
-  settingsAboutReleaseTitle.textContent = `Release ${releaseVersionLabel}`;
-}
-
-function buildSettingsAboutNewsItemElement(item) {
-  const element = document.createElement("li");
-  element.className = "settings-about-news-item";
-
-  const headElement = document.createElement("div");
-  headElement.className = "settings-about-news-head";
-
-  const typeElement = document.createElement("span");
-  typeElement.className = "settings-about-news-type";
-  typeElement.textContent = asText(item?.type, "\uC548\uB0B4") || "\uC548\uB0B4";
-
-  const dateElement = document.createElement("span");
-  dateElement.className = "settings-about-news-date";
-  dateElement.textContent = asText(item?.date);
-
-  const textElement = document.createElement("p");
-  textElement.className = "settings-about-news-text";
-  textElement.textContent = asText(item?.text);
-
-  headElement.appendChild(typeElement);
-  headElement.appendChild(dateElement);
-  element.appendChild(headElement);
-  element.appendChild(textElement);
-  return element;
-}
-
-function renderSettingsAboutNewsItems(items = null) {
-  if (!settingsAboutNewsList) {
-    return;
-  }
-
-  settingsAboutNewsList.innerHTML = "";
-  const githubConfigured = isGitHubReleaseConfigured(githubReleaseSnapshot);
-  const preferredItems = Array.isArray(items) ? items : getAboutReleaseNoteItems();
-  const normalizedItems = preferredItems
-    .map((item) => normalizeNewsItem(item))
-    .filter(Boolean)
-    .slice(0, GITHUB_RELEASE_NOTES_MAX_ITEMS);
-
-  if (normalizedItems.length === 0) {
-    const emptyElement = document.createElement("li");
-    emptyElement.className = "settings-about-news-empty";
-    emptyElement.textContent = githubConfigured
-      ? "표시할 GitHub 릴리즈 노트가 없습니다."
-      : "\uD45C\uC2DC\uD560 \uB9B4\uB9AC\uC988 \uB178\uD2B8\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.";
-    settingsAboutNewsList.appendChild(emptyElement);
-    return;
-  }
-
-  for (const item of normalizedItems) {
-    settingsAboutNewsList.appendChild(buildSettingsAboutNewsItemElement(item));
-  }
 }
 
 function applyGitHubReleaseUi(snapshot) {
   githubReleaseSnapshot = snapshot && typeof snapshot === "object" ? { ...snapshot } : null;
   updateSettingsAboutReleaseUi();
-  renderSettingsAboutNewsItems();
   updateUpdaterUi(updaterSnapshot);
 }
 
@@ -716,191 +521,6 @@ async function refreshGitHubReleaseInfo(options = {}) {
   } finally {
     isGitHubReleaseRequestPending = false;
   }
-}
-
-function readNewsItemsFromDom() {
-  if (!newsList) {
-    return [];
-  }
-
-  const items = [];
-  const itemElements = Array.from(newsList.querySelectorAll(".news-item"));
-  for (const itemElement of itemElements) {
-    const normalized = normalizeNewsItem({
-      type: itemElement.querySelector(".news-item-type")?.textContent || "",
-      date: itemElement.querySelector(".news-item-date")?.textContent || "",
-      text: itemElement.querySelector(".news-item-text")?.textContent || ""
-    });
-    if (normalized) {
-      items.push(normalized);
-    }
-  }
-  return items;
-}
-
-function setNewsBadgeText(text) {
-  if (!newsPanelBadge) {
-    return;
-  }
-  const nextText = asText(text) || "\uC0C8\uC18C\uC2DD";
-  if (newsPanelBadge.textContent === nextText) {
-    return;
-  }
-  newsPanelBadge.textContent = nextText;
-}
-
-function normalizeNewsItems(items) {
-  return Array.isArray(items) ? items.map((item) => normalizeNewsItem(item)).filter(Boolean) : [];
-}
-
-function buildNewsItemsSignature(items) {
-  if (!Array.isArray(items) || items.length === 0) {
-    return "empty";
-  }
-
-  return items
-    .map((item) => `${asText(item?.type)}\u001f${asText(item?.date)}\u001f${asText(item?.text)}`)
-    .join("\u001e");
-}
-
-function buildNewsItemElement(item) {
-  const element = document.createElement("li");
-  element.className = "news-item";
-
-  const typeElement = document.createElement("span");
-  typeElement.className = "news-item-type";
-  typeElement.textContent = asText(item?.type, "\uC548\uB0B4") || "\uC548\uB0B4";
-
-  const dateElement = document.createElement("span");
-  dateElement.className = "news-item-date";
-  dateElement.textContent = asText(item?.date);
-
-  const textElement = document.createElement("p");
-  textElement.className = "news-item-text";
-  textElement.textContent = asText(item?.text);
-
-  element.appendChild(typeElement);
-  element.appendChild(dateElement);
-  element.appendChild(textElement);
-  return element;
-}
-
-function renderNewsItems(items, force = false) {
-  if (!newsList) {
-    return false;
-  }
-
-  const normalizedItems = normalizeNewsItems(items);
-  const nextSignature = buildNewsItemsSignature(normalizedItems);
-  if (!force && nextSignature === lastRenderedNewsSignature) {
-    return false;
-  }
-
-  lastRenderedNewsSignature = nextSignature;
-  newsList.innerHTML = "";
-  if (normalizedItems.length === 0) {
-    newsList.appendChild(
-      buildNewsItemElement({
-        type: "\uC548\uB0B4",
-        date: "",
-        text: "\uD45C\uC2DC\uD560 \uC0C8 \uC18C\uC2DD\uC774 \uC5C6\uC2B5\uB2C8\uB2E4."
-      })
-    );
-    return true;
-  }
-
-  for (const item of normalizedItems) {
-    newsList.appendChild(buildNewsItemElement(item));
-  }
-  return true;
-}
-
-function applyLauncherNewsUi(snapshot, options = {}) {
-  if (!newsList) {
-    return;
-  }
-
-  if (!snapshot || snapshot.ok === false) {
-    setNewsBadgeText("\uC624\uD504\uB77C\uC778");
-    renderSettingsAboutNewsItems();
-    return;
-  }
-
-  const incomingItems = Array.isArray(snapshot.items) ? snapshot.items : [];
-  currentNewsItems = normalizeNewsItems(incomingItems);
-  const didRenderNews = renderNewsItems(currentNewsItems, Boolean(options?.forceRender));
-  if (didRenderNews) {
-    renderSettingsAboutNewsItems();
-  }
-  setNewsBadgeText(snapshot?.hasSource ? "\uC2E4\uC2DC\uAC04" : "\uC0C8\uC18C\uC2DD");
-}
-
-function restartNewsPollingTimer() {
-  if (newsPollTimer !== null) {
-    window.clearInterval(newsPollTimer);
-  }
-  newsPollTimer = window.setInterval(() => {
-    void refreshLauncherNews();
-  }, newsRefreshMs);
-}
-
-async function refreshLauncherNews(options = {}) {
-  if (!newsList || !window.launcherApi || typeof window.launcherApi.getNews !== "function") {
-    return false;
-  }
-  const forceRefresh = Boolean(options?.forceRefresh);
-  const forceRender = Boolean(options?.forceRender);
-  if (isNewsRequestPending && !forceRefresh) {
-    return true;
-  }
-
-  isNewsRequestPending = true;
-  const requestedProjectId = activeProjectId;
-  try {
-    const snapshot = await window.launcherApi.getNews({ forceRefresh, projectId: requestedProjectId });
-    if (requestedProjectId !== activeProjectId) return false;
-    const nextRefreshMs = clampNewsRefreshMs(snapshot?.refreshMs, newsRefreshMs);
-    if (nextRefreshMs !== newsRefreshMs) {
-      newsRefreshMs = nextRefreshMs;
-      if (newsPollTimer !== null) {
-        restartNewsPollingTimer();
-      }
-    }
-    applyLauncherNewsUi(snapshot, { forceRender });
-    return !snapshot || snapshot.ok !== false;
-  } catch {
-    if (requestedProjectId !== activeProjectId) return false;
-    setNewsBadgeText("\uC624\uD504\uB77C\uC778");
-    return false;
-  } finally {
-    isNewsRequestPending = false;
-  }
-}
-
-function startNewsPolling() {
-  if (!hasActiveModpack || !activeProjectId) return;
-  if (!newsList) {
-    return;
-  }
-
-  currentNewsItems = normalizeNewsItems(readNewsItemsFromDom());
-  renderNewsItems(currentNewsItems, true);
-  renderSettingsAboutNewsItems();
-  if (!window.launcherApi || typeof window.launcherApi.getNews !== "function") {
-    setNewsBadgeText("\uC624\uD504\uB77C\uC778");
-    return;
-  }
-
-  void refreshLauncherNews();
-  restartNewsPollingTimer();
-}
-
-function stopNewsPolling() {
-  if (newsPollTimer === null) {
-    return;
-  }
-  window.clearInterval(newsPollTimer);
-  newsPollTimer = null;
 }
 
 function setPlayerCountText(text, isError = false) {
@@ -1549,15 +1169,55 @@ function setSettingsStatus(message, isError = false) {
 }
 
 function setLaunchStatus(message, isError = false) {
-  if (!launchStatus) {
-    return;
+  launchStatusMessage = privateStatusText(message);
+  launchStatusIsError = Boolean(launchStatusMessage && isError);
+  if (launchStatusIsError) {
+    startLaunchButton?.setAttribute("title", launchStatusMessage);
+    startLaunchButton?.setAttribute("aria-description", launchStatusMessage);
+    launchProgressState.active = false;
+    launchProgressState.failed = true;
+    renderLaunchProgress();
+  } else {
+    startLaunchButton?.removeAttribute("title");
+    startLaunchButton?.removeAttribute("aria-description");
   }
-  const nextMessage = privateStatusText(message);
-  const nextIsError = Boolean(nextMessage && isError);
-  if (launchStatus.textContent !== nextMessage) {
-    launchStatus.textContent = nextMessage;
-  }
-  launchStatus.classList.toggle("is-error", nextIsError);
+}
+
+function renderLaunchProgress() {
+  if (!launchProgress) return;
+  const inProgress = isLaunchRequestPending || isLauncherRunning || isModpackUpdateApplyRunning ||
+    isLauncherUpdateInstallRunning || isLauncherUpdateDownloadInProgress();
+  launchProgress.hidden = !authState.signedIn || !inProgress || isLauncherUpdateGateRunning;
+  const percent = Math.floor(launchProgressState.percent);
+  launchProgress.textContent = `${percent}%`;
+  launchProgress.setAttribute("aria-valuenow", String(percent));
+  launchProgress.classList.toggle("is-error", launchProgressState.failed);
+}
+
+function beginLaunchProgress(kind) {
+  launchProgressState = { id: `${Date.now()}-${++progressSequence}`, kind, percent: 0,
+    active: true, failed: false, projectId: activeProjectId, session: authSessionRevision };
+  setLaunchStatus("");
+  renderLaunchProgress();
+}
+
+function resetLaunchProgress() {
+  launchProgressState = { id: "", kind: "idle", percent: 0, active: false, failed: false };
+  renderLaunchProgress();
+}
+
+function setLaunchProgress(percent, complete = false) {
+  if (!launchProgressState.active || !Number.isFinite(percent)) return;
+  launchProgressState.percent = Math.max(launchProgressState.percent, Math.min(complete ? 100 : 99, Math.max(0, percent)));
+  if (complete) launchProgressState.active = false;
+  renderLaunchProgress();
+}
+
+function applyOperationProgress(payload) {
+  if (!authState.signedIn || !launchProgressState.active || payload?.id !== launchProgressState.id ||
+    payload?.projectId !== activeProjectId || launchProgressState.session !== authSessionRevision ||
+    !Number.isFinite(payload?.percent)) return;
+  setLaunchProgress(payload.percent, payload.percent >= 100);
 }
 
 function clearLaunchStartTimeout() {
@@ -1614,6 +1274,7 @@ function setStartupProgress(percent, message = "", isError = false, allowDecreas
   const normalized = clampPercent(percent);
   const nextPercent = allowDecrease ? normalized : Math.max(startupProgressPercent, normalized);
   startupProgressPercent = nextPercent;
+  if (launchProgressState.kind === "prepare") setLaunchProgress(nextPercent);
 
   if (startupProgressBar) {
     startupProgressBar.style.width = `${nextPercent.toFixed(1)}%`;
@@ -1815,6 +1476,7 @@ function updateLaunchButtonUi() {
   startLaunchButton.textContent = label;
   startLaunchButton.setAttribute("aria-label", label);
   startLaunchButton.setAttribute("aria-busy", busy ? "true" : "false");
+  renderLaunchProgress();
 }
 
 function isLauncherUpdateReadyToInstall() {
@@ -2005,6 +1667,7 @@ function applyLauncherState(nextState) {
   isLauncherRunning = Boolean(nextState?.launching);
 
   if (isLauncherRunning) {
+    if (launchProgressState.kind === "launch") setLaunchProgress(100, true);
     clearLaunchStartTimeout();
     extendLaunchLogCapture();
     setLaunchStatus("\uB9C8\uC778\uD06C\uB798\uD504\uD2B8 \uC2E4\uD589 \uC911...");
@@ -2028,6 +1691,8 @@ async function runPendingModpackUpdate() {
     return false;
   }
 
+  beginLaunchProgress("modpack");
+  payload.progressId = launchProgressState.id;
   isModpackUpdateApplyRunning = true;
   updateLaunchButtonUi();
   setLaunchStatus("모드팩 업데이트 중...");
@@ -2045,6 +1710,7 @@ async function runPendingModpackUpdate() {
       pending: false,
       latestVersion: asText(result?.version) || asText(modpackUpdateState?.latestVersion)
     };
+    setLaunchProgress(100, true);
     setLaunchStatus("모드팩 업데이트가 완료되었습니다. 게임을 시작할 수 있습니다.");
     return true;
   } catch (error) {
@@ -2141,10 +1807,13 @@ async function launchGame() {
     return;
   }
 
+  beginLaunchProgress("launch");
   const launcherReady = await ensureLatestLauncherBeforeLaunch();
   if (!launcherReady) {
     return;
   }
+  setLaunchProgress(5);
+  const progressId = launchProgressState.id;
 
   isLaunchRequestPending = true;
   extendLaunchLogCapture();
@@ -2153,7 +1822,7 @@ async function launchGame() {
   setLaunchStatus("\uB9C8\uC778\uD06C\uB798\uD504\uD2B8 \uC2E4\uD589 \uC911...");
 
   try {
-    const result = await window.launcherApi.launch(payload);
+    const result = await window.launcherApi.launch({ ...payload, progressId });
     if (!result?.ok) {
       if (result?.code === "modpack-update-required" || result?.modpackUpdate?.pending) {
         modpackUpdateState =
@@ -2173,6 +1842,7 @@ async function launchGame() {
       return;
     }
 
+    setLaunchProgress(100, true);
     applyResolvedJavaPath(result?.javaPath);
     extendLaunchLogCapture();
     setLaunchStatus("\uC2E4\uD589 \uC694\uCCAD \uC644\uB8CC. \uB9C8\uC778\uD06C\uB798\uD504\uD2B8 \uD504\uB85C\uC138\uC2A4 \uC2DC\uC791 \uB300\uAE30 \uC911...");
@@ -2208,19 +1878,20 @@ function applySettingsToInputs(settings) {
 function readSettingsFromInputs() {
   const textValues = {};
   for (const [key, input] of Object.entries(SETTINGS_TEXT_INPUTS)) {
-    textValues[key] = input?.value;
+    if (input) textValues[key] = input.value;
   }
 
   const booleanValues = {};
   for (const [key, input] of Object.entries(SETTINGS_BOOLEAN_INPUTS)) {
-    booleanValues[key] = input?.checked;
+    if (input) booleanValues[key] = input.checked;
   }
 
   return normalizeSettings(
     {
+      ...launcherSettings,
       ...textValues,
       ...booleanValues,
-      selectedProfile: settingsProfileSelect?.value,
+      selectedProfile: settingsProfileSelect?.value ?? launcherSettings.selectedProfile,
     },
     launcherDefaults
   );
@@ -2241,27 +1912,25 @@ function buildSettingsAccountCard(account, { placeholder = false } = {}) {
   if (!placeholder) {
     card.dataset.accountId = asText(account?.id);
     card.setAttribute("role", "button");
-    card.tabIndex = !account?.selected && !authState.loggingIn ? 0 : -1;
+    card.setAttribute("aria-pressed", account?.selected ? "true" : "false");
+    card.tabIndex = !authState.loggingIn ? 0 : -1;
   }
 
   const image = document.createElement("img");
   image.className = "settings-account-model-image";
   image.loading = "lazy";
-  image.src = DEFAULT_SKIN_IMAGE;
-  image.alt = "계정 모델";
+  image.dataset.skinVariant = "avatar";
+  image.src = DEFAULT_AVATAR_IMAGE;
+  image.alt = "계정 스킨";
 
   const meta = document.createElement("div");
   meta.className = "settings-account-meta";
 
   const nameField = document.createElement("div");
   nameField.className = "settings-account-field";
-  const nameLabel = document.createElement("span");
-  nameLabel.className = "settings-account-field-label";
-  nameLabel.textContent = "사용자 이름";
   const nameValue = document.createElement("span");
   nameValue.className = "settings-account-field-value";
   nameValue.textContent = placeholder ? (authState.loggingIn ? "Microsoft 로그인 진행 중..." : "로그인 안 됨") : asText(account?.profileName, "플레이어");
-  nameField.appendChild(nameLabel);
   nameField.appendChild(nameValue);
 
   meta.appendChild(nameField);
@@ -2270,20 +1939,18 @@ function buildSettingsAccountCard(account, { placeholder = false } = {}) {
   state.className = "settings-account-state";
   const selectedLabel = document.createElement("span");
   selectedLabel.className = "settings-account-selected";
-  selectedLabel.textContent = placeholder
-    ? authState.loggingIn
-      ? "연결 중..."
-      : "선택된 계정 없음"
-    : account?.selected
-      ? "선택된 계정"
-      : "클릭하여 선택";
-  state.appendChild(selectedLabel);
+  if (account?.selected) {
+    selectedLabel.textContent = "로그인됨";
+    state.appendChild(selectedLabel);
+  }
 
   if (!placeholder && account?.selected) {
     const logoutButton = document.createElement("button");
     logoutButton.type = "button";
     logoutButton.className = "settings-account-logout";
-    logoutButton.textContent = "로그아웃";
+    logoutButton.textContent = "\u21AA";
+    logoutButton.setAttribute("aria-label", "로그아웃");
+    logoutButton.title = "로그아웃";
     logoutButton.disabled = !authState.signedIn || authState.loggingIn;
     logoutButton.dataset.action = "logout";
     state.appendChild(logoutButton);
@@ -2326,6 +1993,8 @@ function selectSettingsTab(tabId) {
   for (const navItem of settingsNavItems) {
     const isActive = navItem.dataset.settingsTab === targetId;
     navItem.classList.toggle("active", isActive);
+    if (isActive) navItem.setAttribute("aria-current", "page");
+    else navItem.removeAttribute("aria-current");
   }
 
   for (const tab of settingsTabs) {
@@ -2334,7 +2003,7 @@ function selectSettingsTab(tabId) {
     tab.hidden = !isActive;
   }
 
-  if (targetId === "settingsTabAbout" || targetId === "settingsTabUpdate") {
+  if (targetId === "settingsTabAbout") {
     void refreshGitHubReleaseInfo();
   }
 }
@@ -2343,8 +2012,9 @@ function openSettingsScreen(tabId = selectedSettingsTab) {
   if (!settingsScreen || isModpackPreparing) {
     return;
   }
+  settingsReturnFocus = document.activeElement;
   setSettingsStatus("");
-  const projectTabs = ["settingsTabMinecraft", "settingsTabJava", "settingsTabLauncher"];
+  const projectTabs = ["settingsTabMinecraft", "settingsTabJava"];
   for (const item of settingsNavItems) {
     item.disabled = !hasActiveModpack && projectTabs.includes(item.dataset.settingsTab);
   }
@@ -2353,6 +2023,7 @@ function openSettingsScreen(tabId = selectedSettingsTab) {
   selectSettingsTab(tabId);
   switchScreen("settings");
   updateSettingsAccountUi();
+  settingsNavItems.find(item => item.classList.contains("active"))?.focus({ preventScroll: true });
 }
 
 function persistSettingsSnapshot() {
@@ -2368,6 +2039,10 @@ function persistSettingsSnapshot() {
 function closeSettingsScreen() {
   persistSettingsSnapshot();
   switchScreen(authState.signedIn ? "launch" : "login");
+  const target = settingsReturnFocus?.isConnected && !settingsReturnFocus.closest("[inert]")
+    ? settingsReturnFocus : authState.signedIn ? settingsButton : gateMicrosoftLoginButton;
+  target?.focus({ preventScroll: true });
+  settingsReturnFocus = null;
 }
 
 function fillProfileSelect(profiles, selectedProfile) {
@@ -2502,18 +2177,17 @@ function updateModpackControls() {
 async function prepareModpackForSession() {
   if (!isLauncherInitialized || !authState.signedIn || isModpackPreparing) return;
   if (!activeModpack) {
+    resetLaunchProgress();
     hasActiveModpack = false;
     setLaunchStatus("모드팩 설정을 확인해 주세요.");
     updateLaunchButtonUi();
     return;
   }
   const sessionRevision = authSessionRevision;
+  beginLaunchProgress("prepare");
   isModpackPreparing = true;
   hasActiveModpack = true;
   modpackUpdateState = null;
-  currentNewsItems = [];
-  renderNewsItems([], true);
-  renderSettingsAboutNewsItems();
   setPlayerCountText("확인 중...", false);
   setPlayerCountTooltip("");
   updateLaunchButtonUi();
@@ -2525,6 +2199,7 @@ async function prepareModpackForSession() {
     setLaunchStatus(activeModpack.name + " 실행 준비 중...");
     await ensureJavaPathAutoSelectedForProject();
     if (!authState.signedIn || sessionRevision !== authSessionRevision) return;
+    setLaunchProgress(25);
     await checkModpackUpdateOnStartup();
   } catch (error) {
     if (authState.signedIn && sessionRevision === authSessionRevision) {
@@ -2533,7 +2208,13 @@ async function prepareModpackForSession() {
   } finally {
     isModpackPreparing = false;
     if (authState.signedIn && sessionRevision === authSessionRevision && hasActiveModpack) {
-      startNewsPolling();
+      if (launchProgressState.kind === "prepare") {
+        if (updaterSnapshot?.enabled && updaterSnapshot.downloading) {
+          beginLaunchProgress("updater");
+          setLaunchProgress(Number(updaterSnapshot.progressPercent));
+        } else if (activeModpack.manifestConfigured && !launchStatusIsError) setLaunchProgress(100, true);
+        else launchProgressState.active = false;
+      }
       startPlayerCountPolling();
       startModpackUpdatePolling();
       if (currentScreen === "launch") startLaunchButton?.focus();
@@ -2583,8 +2264,8 @@ function updateAuthUi() {
   }
 
   if (!authState.signedIn) {
+    resetLaunchProgress();
     hasActiveModpack = false;
-    stopNewsPolling();
     stopPlayerCountPolling();
     stopModpackUpdatePolling();
     switchScreen("login");
@@ -2623,21 +2304,19 @@ function applyAuthState(nextState) {
   updateAuthUi();
 }
 
-function applyWindowState(nextState) {
-  if (!windowMaximizeButton) {
-    return;
-  }
-
-  const maximized = Boolean(nextState?.maximized);
-  windowMaximizeButton.textContent = maximized ? WINDOW_RESTORE_ICON : WINDOW_MAX_ICON;
-  windowMaximizeButton.setAttribute("aria-label", maximized ? "\uC6D0\uBCF5" : "\uCD5C\uB300\uD654");
-}
-
 function updateUpdaterUi(state) {
   const wasDownloaded = Boolean(updaterSnapshot?.downloaded);
+  const wasDownloading = Boolean(updaterSnapshot?.downloading);
   updaterSnapshot = state && typeof state === "object" ? { ...state } : null;
   updateSettingsAboutReleaseUi();
   updateLaunchButtonUi();
+  if (updaterSnapshot?.enabled && updaterSnapshot.downloading) {
+    if (!wasDownloading || launchProgressState.kind !== "updater") beginLaunchProgress("updater");
+    setLaunchProgress(Number(updaterSnapshot.progressPercent));
+  } else if (launchProgressState.kind === "updater") {
+    if (updaterSnapshot?.downloaded) setLaunchProgress(100, true);
+    else if (updaterSnapshot?.lastError) setLaunchStatus(updaterSnapshot.lastError, true);
+  }
   if (
     !wasDownloaded &&
     updaterSnapshot?.downloaded &&
@@ -2647,103 +2326,8 @@ function updateUpdaterUi(state) {
   ) {
     setLaunchStatus("런처 업데이트가 준비되었습니다. 적용 후 게임을 시작할 수 있습니다.");
   }
-  if (!settingsUpdateSummary || !settingsUpdateIndicator || !settingsUpdateChannel || !settingsUpdateVersion || !settingsUpdateActionButton) {
-    return;
-  }
-
-  const snapshot = updaterSnapshot || {};
-  const githubSnapshot = githubReleaseSnapshot && typeof githubReleaseSnapshot === "object" ? githubReleaseSnapshot : null;
-  const github = githubSnapshot && githubSnapshot.ok ? githubSnapshot : null;
-  const githubConfigured = isGitHubReleaseConfigured(githubSnapshot);
-  const githubRepositoryLabel = getGitHubRepositoryLabel(githubSnapshot);
-  const githubReleaseUrl = asText(githubSnapshot?.releaseUrl);
-  const currentVersion = asText(snapshot.currentVersion);
-  const githubVersion = normalizeGitHubTagToVersion(github?.tagName);
-  const latestVersion = asText(snapshot.latestVersion) || githubVersion;
-  const releaseName =
-    asText(snapshot.releaseName) ||
-    (github
-      ? getGitHubReleaseHeadline(github)
-      : githubRepositoryLabel
-        ? `GitHub ${githubRepositoryLabel}`
-        : githubConfigured
-          ? "GitHub Release"
-          : "");
-  const downloaded = Boolean(snapshot.downloaded);
-  const downloading = Boolean(snapshot.downloading);
-  const checking = Boolean(snapshot.checking);
-  const available = Boolean(snapshot.available);
-  const enabled = Boolean(snapshot.enabled);
-  const hasError = Boolean(asText(snapshot.lastError));
-  const progressPercent = Number(snapshot.progressPercent);
-  const hasGitHubReleasePage = Boolean(githubSnapshot?.configured && githubReleaseUrl);
-
-  let summaryText = "최신 버전을 사용하고 있습니다.";
-  let actionText = "업데이트 확인";
-  let actionDisabled = false;
-  let indicatorClass = "";
-  let channelText = releaseName || (githubConfigured ? "GitHub Release" : "Stable Release");
-  let versionText = `Version ${latestVersion || currentVersion || "-"}`;
-
-  if (!enabled) {
-    if (hasGitHubReleasePage) {
-      summaryText = "GitHub 릴리즈에서 최신 업데이트를 확인할 수 있습니다.";
-      actionText = "GitHub 릴리즈 열기";
-      actionDisabled = false;
-      indicatorClass = "";
-    } else {
-      summaryText = "업데이트 기능을 사용할 수 없습니다.";
-      actionText = "사용 불가";
-      actionDisabled = true;
-      indicatorClass = "is-warning";
-    }
-  } else if (snapshot.noPublishedRelease) {
-    summaryText = "아직 배포된 런처 업데이트가 없습니다. 현재 버전으로 이용할 수 있습니다.";
-    actionText = "업데이트 확인";
-  } else if (snapshot.unavailable) {
-    summaryText = "업데이트 배포에 접근할 수 없습니다. 현재 버전으로 이용할 수 있습니다.";
-    actionText = "다시 확인";
-    indicatorClass = "is-warning";
-  } else if (hasError) {
-    summaryText = "업데이트 확인 중 문제가 발생했습니다.";
-    actionText = "다시 확인";
-    indicatorClass = "is-error";
-  } else if (downloaded) {
-    summaryText = "업데이트 다운로드가 완료되었습니다.";
-    actionText = "업데이트 설치";
-    indicatorClass = "is-pending";
-  } else if (downloading || available) {
-    const progressText =
-      Number.isFinite(progressPercent) && progressPercent > 0 ? ` (${progressPercent.toFixed(1)}%)` : "";
-    summaryText = `업데이트를 다운로드 중입니다.${progressText}`;
-    actionText = "다운로드 중";
-    actionDisabled = true;
-    indicatorClass = "is-pending";
-  } else if (checking) {
-    summaryText = "업데이트를 확인하고 있습니다.";
-    actionText = "확인 중";
-    actionDisabled = true;
-    indicatorClass = "is-pending";
-  }
-
-  if (github && asText(github.publishedAt)) {
-    const publishedLabel = formatReleaseDateLabel(github.publishedAt);
-    if (publishedLabel !== "-") {
-      channelText = `${channelText} · ${publishedLabel}`;
-    }
-  }
-
-  settingsUpdateSummary.textContent = summaryText;
-  settingsUpdateChannel.textContent = channelText;
-  settingsUpdateVersion.textContent = versionText;
-  settingsUpdateActionButton.textContent = actionText;
-  settingsUpdateActionButton.disabled = actionDisabled || isSettingsUpdateActionPending;
-
-  settingsUpdateIndicator.classList.remove("is-pending", "is-warning", "is-error");
-  if (indicatorClass) {
-    settingsUpdateIndicator.classList.add(indicatorClass);
-  }
 }
+
 function applyLogStatus(payload) {
   const level = asText(payload?.level).toLowerCase();
   const message = asText(payload?.message);
@@ -2778,7 +2362,7 @@ function applyLogStatus(payload) {
   }
 
   if (level === "warn" && launchRelated) {
-    setLaunchStatus(displayMessage, true);
+    setLaunchStatus(displayMessage);
     return;
   }
 
@@ -2827,8 +2411,6 @@ async function runMicrosoftLogin() {
 switchScreen("login");
 updateLaunchButtonUi();
 updateSettingsAboutReleaseUi();
-renderSettingsAboutNewsItems();
-applyNewsPanelExpandedState(readStoredNewsPanelExpanded(), false);
 bindResolutionInputGuards();
 bindJavaMemoryControlEvents();
 
@@ -2855,10 +2437,6 @@ bindClick(discordButton, async (event) => {
 
 bindClick(settingsButton, () => {
   openSettingsScreen();
-});
-
-bindClick(newsPanelExpandButton, () => {
-  applyNewsPanelExpandedState(!isNewsPanelExpanded);
 });
 
 bindClick(accountModelPanel, () => {
@@ -2907,20 +2485,6 @@ for (const navItem of settingsNavItems) {
   });
 }
 
-bindClick(settingsPickMinecraftDirectoryButton, async () => {
-  const pickedDirectory = await window.launcherApi.pickDirectory();
-  if (!pickedDirectory) {
-    return;
-  }
-
-  if (settingsMinecraftDirectoryInput) {
-    settingsMinecraftDirectoryInput.value = pickedDirectory;
-  }
-
-  await refreshProfilesForDirectory(pickedDirectory, "");
-  setSettingsStatus("\uB9C8\uC778\uD06C\uB798\uD504\uD2B8 \uD3F4\uB354\uAC00 \uC5C5\uB370\uC774\uD2B8\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
-});
-
 bindClick(settingsAutoJavaPathButton, async () => {
   if (!window.launcherApi || typeof window.launcherApi.autoSelectJava !== "function") {
     setSettingsStatus("Java 자동 선택 기능을 사용할 수 없습니다.", true);
@@ -2928,7 +2492,6 @@ bindClick(settingsAutoJavaPathButton, async () => {
   }
 
   const minecraftDirectory =
-    asText(settingsMinecraftDirectoryInput?.value) ||
     asText(launcherSettings.minecraftDirectory) ||
     asText(launcherDefaults.minecraftDirectory);
   if (!minecraftDirectory) {
@@ -3054,6 +2617,7 @@ if (settingsAccountList) {
   });
 
   settingsAccountList.addEventListener("keydown", async (event) => {
+    if (event.target instanceof Element && event.target.closest("button")) return;
     if (event.key !== "Enter" && event.key !== " ") {
       return;
     }
@@ -3074,90 +2638,23 @@ if (settingsProfileSelect) {
   });
 }
 
-bindClick(settingsUpdateActionButton, async () => {
-  if (isSettingsUpdateActionPending) return;
-  isSettingsUpdateActionPending = true;
-  settingsUpdateActionButton.disabled = true;
-  try {
-    await handleSettingsUpdateAction();
-  } finally {
-    isSettingsUpdateActionPending = false;
-    updateUpdaterUi(updaterSnapshot);
-  }
-});
-
-async function handleSettingsUpdateAction() {
-  if (!window.launcherApi || typeof window.launcherApi.getUpdaterState !== "function") {
-    return;
-  }
-
-  const githubReleaseUrl = asText(githubReleaseSnapshot?.releaseUrl);
-  const state = updaterSnapshot || (await window.launcherApi.getUpdaterState().catch(() => null));
-  if (!state || !state.enabled) {
-    if (githubReleaseUrl) {
-      const openResult = await window.launcherApi.openExternal(githubReleaseUrl).catch((error) => ({
-        ok: false,
-        error: asText(error?.message) || "GitHub 릴리즈 페이지를 열 수 없습니다."
-      }));
-      if (openResult?.ok) {
-        setSettingsStatus("GitHub 릴리즈 페이지를 열었습니다.");
-      } else {
-        setSettingsStatus(asText(openResult?.error) || "GitHub 릴리즈 페이지를 열 수 없습니다.", true);
-      }
-      return;
-    }
-
-    setSettingsStatus("업데이트 기능을 사용할 수 없습니다.", true);
-    return;
-  }
-
-  if (state.downloaded) {
-    const installResult = await window.launcherApi.installUpdate().catch((error) => ({
-      ok: false,
-      error: asText(error?.message) || "업데이트 설치 요청에 실패했습니다."
-    }));
-    if (installResult?.ok) {
-      setSettingsStatus("업데이트 설치를 위해 런처를 다시 시작합니다.");
-    } else {
-      setSettingsStatus(asText(installResult?.error) || "업데이트 설치 요청에 실패했습니다.", true);
-    }
-    return;
-  }
-
-  const checkResult = await window.launcherApi.checkForUpdates().catch((error) => ({
-    ok: false,
-    error: asText(error?.message) || "업데이트 확인에 실패했습니다."
-  }));
-  if (!checkResult?.ok) {
-    setSettingsStatus(asText(checkResult?.error) || "업데이트 확인에 실패했습니다.", true);
-    return;
-  }
-  if (checkResult.downloaded) {
-    setSettingsStatus("업데이트 다운로드가 완료되었습니다. 런처를 다시 시작하면 적용됩니다.");
-    return;
-  }
-  if (checkResult.unavailable) {
-    setSettingsStatus(asText(checkResult.message));
-    return;
-  }
-  setSettingsStatus("런처가 최신 버전입니다.");
-}
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && currentScreen === "launch" && isNewsPanelExpanded) {
-    applyNewsPanelExpandedState(false);
-    return;
+  if (event.key === "Tab" && currentScreen === "settings") {
+    const focusable = Array.from(settingsScreen.querySelectorAll('button:not(:disabled), input:not(:disabled):not([type="hidden"]), select:not(:disabled), [tabindex="0"]'))
+      .filter(element => element.getClientRects().length && getComputedStyle(element).visibility !== "hidden");
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last?.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first?.focus();
+    }
   }
   if (event.key === "Escape" && currentScreen === "settings") {
     closeSettingsScreen();
   }
-});
-
-bindClick(windowMinimizeButton, () => {
-  window.launcherApi.minimizeWindow();
-});
-
-bindClick(windowMaximizeButton, () => {
-  window.launcherApi.toggleMaximizeWindow();
 });
 
 bindClick(windowCloseButton, () => {
@@ -3168,12 +2665,12 @@ window.launcherApi.onAuthState((payload) => {
   applyAuthState(payload);
 });
 
-window.launcherApi.onWindowState((payload) => {
-  applyWindowState(payload);
-});
-
 window.launcherApi.onState((payload) => {
   applyLauncherState(payload);
+});
+
+window.launcherApi.onProgress((payload) => {
+  applyOperationProgress(payload);
 });
 
 window.launcherApi.onUpdaterState((payload) => {
@@ -3187,7 +2684,6 @@ window.launcherApi.onLog((payload) => {
 });
 
 window.addEventListener("beforeunload", () => {
-  stopNewsPolling();
   stopPlayerCountPolling();
   stopModpackUpdatePolling();
 });
@@ -3201,15 +2697,13 @@ Promise.resolve()
         : Promise.resolve(null);
     return Promise.all([
       window.launcherApi.getAuthState(),
-      window.launcherApi.getWindowState(),
       initializeSettings(),
       window.launcherApi.getUpdaterState().catch(() => null),
       githubReleasePromise
     ]);
   })
-  .then(async ([state, windowState, _, updaterState, githubRelease]) => {
+  .then(async ([state, _, updaterState, githubRelease]) => {
     applyAuthState(state);
-    applyWindowState(windowState);
     applyGitHubReleaseUi(githubRelease);
     updateUpdaterUi(updaterState);
     setStartupProgress(STARTUP_SETTINGS_PROGRESS, "\uB7F0\uCC98 \uC124\uC815 \uBD88\uB7EC\uC624\uAE30 \uC644\uB8CC.");

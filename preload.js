@@ -6,7 +6,6 @@ contextBridge.exposeInMainWorld("launcherApi", {
   getAccountSkin: (uuid) => ipcRenderer.invoke("launcher:get-account-skin", { uuid }),
   getSystemProfile: () => ipcRenderer.invoke("launcher:get-system-profile"),
   getServerStatus: (payload) => ipcRenderer.invoke("launcher:get-server-status", payload),
-  getNews: (payload) => ipcRenderer.invoke("launcher:get-news", payload),
   getGitHubRelease: (payload) => ipcRenderer.invoke("launcher:get-github-release", payload),
   getUpdaterState: () => ipcRenderer.invoke("updater:get-state"),
   ensureLatestLauncherUpdate: () => ipcRenderer.invoke("updater:ensure-latest"),
@@ -37,6 +36,11 @@ contextBridge.exposeInMainWorld("launcherApi", {
     const listener = (_, payload) => handler(payload);
     ipcRenderer.on("launcher:state", listener);
     return () => ipcRenderer.removeListener("launcher:state", listener);
+  },
+  onProgress: (handler) => {
+    const listener = (_, payload) => handler(payload);
+    ipcRenderer.on("launcher:progress", listener);
+    return () => ipcRenderer.removeListener("launcher:progress", listener);
   },
   onAuthState: (handler) => {
     const listener = (_, payload) => handler(payload);

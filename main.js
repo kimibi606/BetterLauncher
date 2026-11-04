@@ -13,6 +13,7 @@ const { downloadDistributionFile } = require("./lib/distribution-download");
 const { normalizePathRenames, repairModpackPaths } = require("./lib/modpack-path-renames");
 const { normalizeResourcePackDefaults, repairResourcePackSettings } = require("./lib/resourcepack-settings");
 const { describeMicrosoftLoginFailure } = require("./lib/microsoft-login-errors");
+const { MAIN_WINDOW_GEOMETRY, configureWindowGeometry } = require("./lib/window-geometry");
 const { secureFetch } = require("./lib/secure-fetch");
 const { redactPrivateDiagnostics, sanitizeDiagnosticPayload } = require("./lib/log-security");
 const { normalizeSkinUuid, createAccountSkinService } = require("./lib/account-skin");
@@ -20,6 +21,7 @@ const { createNeoForgeRuntime, createNeoForgeClient, neoForgeProfileId } = requi
 const accountSkinService = createAccountSkinService();
 const neoForgeRuntime = createNeoForgeRuntime({ log: payload => sendLog(payload) });
 const projectContext = new AsyncLocalStorage();
+const operationProgressContext = new AsyncLocalStorage();
 
 const { app, BrowserWindow, dialog, ipcMain, screen, session, shell, safeStorage } = require("electron");
 const { autoUpdater } = require("electron-updater");
@@ -118,14 +120,6 @@ const ZIP_EOCD_MIN_SIZE = 22;
 const ZIP_EOCD_MAX_COMMENT_LENGTH = 0xffff;
 const ZIP_EOCD_SCAN_PADDING_BYTES = 1024;
 const SERVER_STATUS_TIMEOUT_MS = 7000;
-const NEWS_REFRESH_DEFAULT_MS = 15000;
-const NEWS_REFRESH_MIN_MS = 5000;
-const NEWS_REFRESH_MAX_MS = 30 * 60 * 1000;
-const NEWS_TIMEOUT_DEFAULT_MS = 7000;
-const NEWS_TIMEOUT_MIN_MS = 1000;
-const NEWS_TIMEOUT_MAX_MS = 60000;
-const NEWS_MAX_ITEMS_DEFAULT = 8;
-const NEWS_MAX_ITEMS_LIMIT = 20;
 const GITHUB_RELEASE_TIMEOUT_DEFAULT_MS = 7000;
 const GITHUB_RELEASE_TIMEOUT_MIN_MS = 1000;
 const GITHUB_RELEASE_TIMEOUT_MAX_MS = 60000;
@@ -1432,131 +1426,7 @@ function asIntegerInRange(value, fallback, min, max) {
   return Math.min(max, Math.max(min, parsed));
 }
 
-function normalizeNewsDateText(value) {
-  const text = asTrimmedText(value);
-  if (!text) {
-    return "";
-  }
-
-  const parsed = new Date(text);
-  if (Number.isNaN(parsed.getTime())) {
-    return text;
-  }
-  return parsed.toISOString().slice(0, 10);
-}
-
-function normalizeNewsTextValue(value) {
-  if (Array.isArray(value)) {
-    return value.map((line) => asTrimmedText(line)).filter(Boolean).join("\n");
-  }
-  return asTrimmedText(value);
-}
-
-function normalizeLauncherNewsItem(rawItem) {
-  if (typeof rawItem === "string") {
-    const text = normalizeNewsTextValue(rawItem);
-    if (!text) {
-      return null;
-    }
-    return {
-      type: "\uC548\uB0B4",
-      date: "",
-      text
-    };
-  }
-
-  if (!rawItem || typeof rawItem !== "object") {
-    return null;
-  }
-
-  const type = asTrimmedText(rawItem.type || rawItem.category || rawItem.tag || rawItem.kind) || "\uC548\uB0B4";
-  const primaryText =
-    normalizeNewsTextValue(rawItem.text) ||
-    normalizeNewsTextValue(rawItem.message) ||
-    normalizeNewsTextValue(rawItem.content) ||
-    normalizeNewsTextValue(rawItem.body) ||
-    normalizeNewsTextValue(rawItem.note);
-  const titleText = asTrimmedText(rawItem.title);
-  const summaryText =
-    normalizeNewsTextValue(rawItem.summary) ||
-    normalizeNewsTextValue(rawItem.description) ||
-    normalizeNewsTextValue(rawItem.details);
-  const text = primaryText || (titleText && summaryText ? `${titleText}\n${summaryText}` : titleText);
-  if (!text) {
-    return null;
-  }
-
-  const date = normalizeNewsDateText(
-    rawItem.date || rawItem.publishedAt || rawItem.updatedAt || rawItem.createdAt || rawItem.time || rawItem.timestamp
-  );
-
-  return {
-    type,
-    date,
-    text
-  };
-}
-
-function normalizeLauncherNewsItems(rawItems, maxItems = NEWS_MAX_ITEMS_DEFAULT) {
-  if (!Array.isArray(rawItems)) {
-    return [];
-  }
-
-  const limit = asIntegerInRange(maxItems, NEWS_MAX_ITEMS_DEFAULT, 1, NEWS_MAX_ITEMS_LIMIT);
-  const normalized = [];
-  const dedupe = new Set();
-  for (const rawItem of rawItems) {
-    const item = normalizeLauncherNewsItem(rawItem);
-    if (!item) {
-      continue;
-    }
-    const dedupeKey = `${item.type}|${item.date}|${item.text}`.toLowerCase();
-    if (dedupe.has(dedupeKey)) {
-      continue;
-    }
-    dedupe.add(dedupeKey);
-    normalized.push(item);
-    if (normalized.length >= limit) {
-      break;
-    }
-  }
-  return normalized;
-}
-
-function pickLauncherNewsItemsArray(payload, itemsPath = "") {
-  if (itemsPath) {
-    const fromPath = getObjectPathValue(payload, itemsPath);
-    if (Array.isArray(fromPath)) {
-      return fromPath;
-    }
-  }
-
-  if (Array.isArray(payload)) {
-    return payload;
-  }
-
-  if (!payload || typeof payload !== "object") {
-    return [];
-  }
-
-  const candidates = [
-    payload.items,
-    payload.news,
-    payload.updates,
-    payload.notes,
-    payload.data?.items,
-    payload.data?.news,
-    payload.result?.items
-  ];
-  for (const candidate of candidates) {
-    if (Array.isArray(candidate)) {
-      return candidate;
-    }
-  }
-  return [];
-}
-
-function resolveLauncherNewsSource(rawValue, configPath = "") {
+function resolveConfiguredSource(rawValue, configPath = "") {
   const value = asTrimmedText(rawValue);
   if (!value) {
     return null;
@@ -1595,75 +1465,6 @@ function appendRequestCacheBuster(url, key = "_ts") {
     const separator = String(url).includes("?") ? "&" : "?";
     return `${url}${separator}${encodeURIComponent(key)}=${Date.now()}`;
   }
-}
-
-function appendNewsCacheBuster(url) {
-  return appendRequestCacheBuster(url, "_newsTs");
-}
-
-function readLauncherNewsConfig() {
-  const config = readModpackConfig();
-  const configPath = asTrimmedText(config?.__configPath);
-  const newsConfig = config && config.news && typeof config.news === "object" ? config.news : {};
-
-  const envSource = asTrimmedText(
-    (process.env.BETTERLAUNCHER_NEWS_URL || process.env.BETTERMON_NEWS_URL) || (process.env.BETTERLAUNCHER_NEWS_SOURCE || process.env.BETTERMON_NEWS_SOURCE) || (process.env.BETTERLAUNCHER_NEWS_PATH || process.env.BETTERMON_NEWS_PATH)
-  );
-  const sourceRaw = asTrimmedText(
-    envSource ||
-      newsConfig.url ||
-      newsConfig.source ||
-      newsConfig.path ||
-      config?.newsUrl ||
-      config?.newsSource ||
-      config?.newsPath
-  );
-  const source = resolveLauncherNewsSource(sourceRaw, configPath);
-  const fallbackSourceRaw = asTrimmedText(
-    (process.env.BETTERLAUNCHER_NEWS_FALLBACK_URL || process.env.BETTERMON_NEWS_FALLBACK_URL) ||
-      (process.env.BETTERLAUNCHER_NEWS_FALLBACK_SOURCE || process.env.BETTERMON_NEWS_FALLBACK_SOURCE) ||
-      newsConfig.fallbackUrl ||
-      newsConfig.fallbackSource ||
-      newsConfig.publicUrl ||
-      config?.newsFallbackUrl ||
-      config?.newsPublicUrl
-  );
-  const fallbackSource = resolveLauncherNewsSource(fallbackSourceRaw, configPath);
-  const refreshMs = asIntegerInRange(
-    (process.env.BETTERLAUNCHER_NEWS_REFRESH_MS || process.env.BETTERMON_NEWS_REFRESH_MS) || newsConfig.refreshMs || config?.newsRefreshMs,
-    NEWS_REFRESH_DEFAULT_MS,
-    NEWS_REFRESH_MIN_MS,
-    NEWS_REFRESH_MAX_MS
-  );
-  const timeoutMs = asIntegerInRange(
-    (process.env.BETTERLAUNCHER_NEWS_TIMEOUT_MS || process.env.BETTERMON_NEWS_TIMEOUT_MS) || newsConfig.timeoutMs || config?.newsTimeoutMs,
-    NEWS_TIMEOUT_DEFAULT_MS,
-    NEWS_TIMEOUT_MIN_MS,
-    NEWS_TIMEOUT_MAX_MS
-  );
-  const requestedMaxItems = asIntegerInRange(
-    (process.env.BETTERLAUNCHER_NEWS_MAX_ITEMS || process.env.BETTERMON_NEWS_MAX_ITEMS) || newsConfig.maxItems || config?.newsMaxItems,
-    NEWS_MAX_ITEMS_DEFAULT,
-    1,
-    NEWS_MAX_ITEMS_LIMIT
-  );
-  const maxItems = Math.max(NEWS_MAX_ITEMS_DEFAULT, requestedMaxItems);
-  const itemsPath = asTrimmedText((process.env.BETTERLAUNCHER_NEWS_ITEMS_PATH || process.env.BETTERMON_NEWS_ITEMS_PATH) || newsConfig.itemsPath || config?.newsItemsPath);
-  const inlineItems = Array.isArray(newsConfig.items)
-    ? newsConfig.items
-    : Array.isArray(config?.newsItems)
-      ? config.newsItems
-      : [];
-
-  return {
-    source,
-    fallbackSource,
-    itemsPath,
-    inlineItems,
-    refreshMs,
-    timeoutMs,
-    maxItems
-  };
 }
 
 function readGitHubReleaseConfig() {
@@ -1826,8 +1627,7 @@ function readModpackConfig() {
   return {
     ...(project.legacy ? config : { __configPath: config.__configPath, github: config.github }),
     modpack: project.modpack,
-    serverStatus: project.serverStatus,
-    news: project.news
+    serverStatus: project.serverStatus
   };
 }
 
@@ -1856,7 +1656,14 @@ function registerProjectHandler(channel, callback) {
         const owner = state?.projectId || state?.id;
         if (owner && owner !== project.id) throw new Error(`This Minecraft directory belongs to another modpack project: ${owner}`);
       }
-      return await projectContext.run(project, () => callback(event, payload));
+      const progress = ["launcher:launch", "launcher:sync-modpack"].includes(channel) &&
+        typeof payload.progressId === "string" && /^[a-zA-Z0-9-]{1,80}$/.test(payload.progressId)
+        ? { id: payload.progressId, projectId: project.id, channel, percent: 0, active: true } : null;
+      try {
+        return await projectContext.run(project, () => operationProgressContext.run(progress, () => callback(event, payload)));
+      } finally {
+        if (progress) progress.active = false;
+      }
     } catch (error) {
       return { ok: false, error: String(error?.message || error) };
     }
@@ -1901,7 +1708,7 @@ async function fetchModpackManifestSource() {
     throw new Error('모드팩 배포 주소가 설정되지 않았습니다. modpack.config.json의 projects[].modpack.manifestUrl을 설정해 주세요.');
   }
   const config = readLauncherConfig();
-  const source = resolveLauncherNewsSource(manifestUrl, config?.__configPath || path.join(__dirname, MODPACK_CONFIG_FILE));
+  const source = resolveConfiguredSource(manifestUrl, config?.__configPath || path.join(__dirname, MODPACK_CONFIG_FILE));
   if (!source) throw new Error('Invalid modpack manifest URL: ' + manifestUrl);
   // Some CDN edges retain removed/updated JSON despite cache-control headers.
   // Fetch a fresh manifest while retaining the stable source identity and URL
@@ -2020,89 +1827,6 @@ function parseModpackManifest(manifestSource, preset) {
     ...baseManifest,
     version: asTrimmedText(parsedDistribution.version || json.version) || manifestDigest.slice(0, 12),
     distribution: parsedDistribution
-  };
-}
-
-async function readLauncherNewsPayload(source, timeoutMs = NEWS_TIMEOUT_DEFAULT_MS, options = {}) {
-  if (!source || !source.kind || !source.value) {
-    throw new Error("News source is not configured.");
-  }
-
-  if (source.kind === "http") {
-    const forceRefresh = Boolean(options?.force || options?.forceRefresh);
-    const requestUrl = appendNewsCacheBuster(source.value);
-    const response = await fetchWithTimeout(
-      requestUrl,
-      {
-        headers: buildHttpHeaders(source.value, {
-          "Cache-Control": forceRefresh ? "no-store, no-cache, max-age=0" : "no-cache",
-          Pragma: "no-cache",
-          ...(forceRefresh ? { Expires: "0" } : {})
-        })
-      },
-      timeoutMs
-    );
-    if (!response.ok) {
-      throw new Error(`Failed to load launcher news (${response.status}).`);
-    }
-    const raw = await response.text();
-    try {
-      return JSON.parse(raw);
-    } catch {
-      throw new Error("Launcher news JSON is invalid.");
-    }
-  }
-
-  const raw = await fs.promises.readFile(source.value, "utf8");
-  try {
-    return JSON.parse(raw);
-  } catch {
-    throw new Error("Launcher news JSON is invalid.");
-  }
-}
-
-async function getLauncherNewsSnapshot(options = {}) {
-  const config = readLauncherNewsConfig();
-  const forceRefresh = Boolean(options?.force || options?.forceRefresh);
-  const hasSource = Boolean(config?.source?.value);
-  const hasFallbackSource = Boolean(config?.fallbackSource?.value);
-  const fallbackItems = normalizeLauncherNewsItems(config.inlineItems, config.maxItems);
-  let sourceType = hasSource ? config.source.kind : "inline";
-  let errorMessage = "";
-  let items = fallbackItems;
-
-  if (hasSource) {
-    try {
-      const payload = await readLauncherNewsPayload(config.source, config.timeoutMs, { forceRefresh });
-      const pickedItems = pickLauncherNewsItemsArray(payload, config.itemsPath);
-      items = normalizeLauncherNewsItems(pickedItems, config.maxItems);
-      sourceType = config.source.kind;
-    } catch (error) {
-      const primaryError = String(error?.message || error);
-      sourceType = config.source.kind;
-      if (hasFallbackSource) {
-        try {
-          const payload = await readLauncherNewsPayload(config.fallbackSource, config.timeoutMs, { forceRefresh });
-          const pickedItems = pickLauncherNewsItemsArray(payload, config.itemsPath);
-          items = normalizeLauncherNewsItems(pickedItems, config.maxItems);
-          sourceType = config.fallbackSource.kind;
-        } catch (fallbackError) {
-          errorMessage = `${primaryError}; fallback: ${String(fallbackError?.message || fallbackError)}`;
-        }
-      } else {
-        errorMessage = primaryError;
-      }
-    }
-  }
-
-  return {
-    ok: !errorMessage || items.length > 0,
-    hasSource,
-    source: sourceType,
-    updatedAt: new Date().toISOString(),
-    refreshMs: config.refreshMs,
-    items,
-    error: errorMessage
   };
 }
 
@@ -3747,6 +3471,7 @@ async function applyDistributionFiles(modpackRoot, files) {
   let skippedCount = 0;
 
   for (let index = 0; index < files.length; index += 1) {
+    reportModpackProgress(index, files.length);
     const fileEntry = files[index];
     const targetPath = resolveModpackTargetPath(modpackRoot, fileEntry.path);
     const tempPath = `${targetPath}.download`;
@@ -3761,6 +3486,7 @@ async function applyDistributionFiles(modpackRoot, files) {
     const targetEntryType = await getPathEntryType(targetPath);
     if (targetEntryType !== "missing" && isUserPreservedModpackPath(fileEntry.path)) {
       skippedCount += 1;
+      reportModpackProgress(index + 1, files.length);
       continue;
     }
     if (expectedHash && targetEntryType === "file") {
@@ -3768,6 +3494,7 @@ async function applyDistributionFiles(modpackRoot, files) {
         const currentHash = await computeFileDigest(targetPath, expectedAlgorithm);
         if (currentHash === expectedHash) {
           skippedCount += 1;
+          reportModpackProgress(index + 1, files.length);
           continue;
         }
       } catch (error) {
@@ -3803,6 +3530,7 @@ async function applyDistributionFiles(modpackRoot, files) {
       }
       await fs.promises.rename(tempPath, targetPath);
       updatedCount += 1;
+      reportModpackProgress(index + 1, files.length);
     } finally {
       if (fs.existsSync(tempPath)) {
         await fs.promises.rm(tempPath, { force: true });
@@ -4971,6 +4699,34 @@ function sendLog(payload) {
 
 function sendState(launching) {
   sendToRenderer("launcher:state", { launching });
+}
+
+function sendOperationProgress(percent, context = operationProgressContext.getStore()) {
+  if (!context?.active || !Number.isFinite(percent)) return;
+  context.percent = Math.max(context.percent, Math.min(100, Math.max(0, percent)));
+  sendToRenderer("launcher:progress", { id: context.id, projectId: context.projectId, percent: context.percent });
+}
+
+function reportModpackProgress(completed, total) {
+  const context = operationProgressContext.getStore();
+  if (!context || total <= 0) return;
+  const ratio = Math.max(0, Math.min(1, completed / total));
+  sendOperationProgress(context.channel === "launcher:launch" ? 30 + ratio * 25 : ratio * 95, context);
+}
+
+function reportMinecraftProgress(event, context) {
+  // These ranges follow the launcher's client, native, library and asset stages.
+  // Reserve the last percent for a successfully created game process.
+  const ranges = {
+    "version-jar": [65, 70], natives: [70, 75], classes: [75, 85],
+    "classes-custom": [75, 85], "classes-maven-custom": [75, 85],
+    "asset-json": [85, 86], assets: [86, 98], "assets-copy": [98, 99]
+  };
+  const range = ranges[event?.type];
+  const current = Number(event?.task);
+  const total = Number(event?.total);
+  if (!range || !Number.isFinite(current) || !Number.isFinite(total) || total <= 0) return;
+  sendOperationProgress(range[0] + Math.max(0, Math.min(1, current / total)) * (range[1] - range[0]), context);
 }
 
 function sendMicrosoftAuthState() {
@@ -7202,10 +6958,7 @@ function createWindow() {
   let windowShapeLastAppliedAt = 0;
 
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 720,
-    minWidth: 860,
-    minHeight: 660,
+    ...MAIN_WINDOW_GEOMETRY,
     icon: APP_ICON_PATH,
     frame: false,
     thickFrame: false,
@@ -7227,6 +6980,7 @@ function createWindow() {
       devTools: !app.isPackaged
     }
   });
+  configureWindowGeometry(mainWindow);
   mainWindow.setAutoHideMenuBar(true);
   mainWindow.setMenuBarVisibility(false);
   mainWindow.removeMenu();
@@ -7392,22 +7146,6 @@ registerProjectHandler("launcher:get-server-status", async () => {
   }
 });
 
-registerProjectHandler("launcher:get-news", async (_event, payload = {}) => {
-  try {
-    return await getLauncherNewsSnapshot(payload);
-  } catch (error) {
-    return {
-      ok: false,
-      hasSource: false,
-      source: "",
-      updatedAt: new Date().toISOString(),
-      refreshMs: NEWS_REFRESH_DEFAULT_MS,
-      items: [],
-      error: String(error?.message || error)
-    };
-  }
-});
-
 handleLauncherIpc("launcher:get-github-release", async (_event, payload = {}) => {
   try {
     return await getLatestGitHubReleaseSnapshot(payload);
@@ -7561,6 +7299,7 @@ registerProjectHandler("launcher:load-profiles", async (_, payload) => {
 });
 
 registerProjectHandler("launcher:sync-modpack", async (_, payload) => {
+  sendOperationProgress(0);
   const result = await runModpackSyncFromPayload(payload, { skipIfSessionSynced: false });
   if (!result.ok) {
     sendLog({ level: "error", message: `Modpack sync failed: ${result.error}` });
@@ -7569,6 +7308,7 @@ registerProjectHandler("launcher:sync-modpack", async (_, payload) => {
       error: `Modpack update failed: ${result.error}`
     };
   }
+  sendOperationProgress(100);
   return result;
 });
 
@@ -7628,6 +7368,7 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
       };
     }
 
+    sendOperationProgress(5);
     let resolvedJavaPath = "";
     try {
       resolvedJavaPath = await ensureJavaRuntimeInDirectory(minecraftDirectory, requestedJavaPath);
@@ -7635,6 +7376,7 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
       return { ok: false, error: `Java runtime preparation failed: ${String(error?.message || error)}` };
     }
 
+    sendOperationProgress(15);
     let version;
     try {
       version = await resolveLaunchVersionId(minecraftDirectory, requestedVersion, resolvedJavaPath);
@@ -7648,6 +7390,7 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
       ? { number: launchVersionNumber, type: versionType, custom: version }
       : { number: launchVersionNumber, type: versionType };
 
+    sendOperationProgress(25);
     let authorization;
     let launchName = username || "Player";
 
@@ -7670,6 +7413,7 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
       };
     }
 
+    sendOperationProgress(30);
     const modpackUpdateCheck = await runModpackUpdateCheckFromPayload({
       launcherPreset,
       minecraftDirectory,
@@ -7702,6 +7446,7 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
       return { ok: false, error: `Modpack update failed: ${modpackResult.error}` };
     }
 
+    sendOperationProgress(55);
     sendLog({
       level: "info",
       message: "Running launch integrity check..."
@@ -7805,7 +7550,10 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
       }
     });
     launcher.on("data", (line) => sendLog({ level: "game", message: String(line).trim() }));
+    sendOperationProgress(65);
+    const progressContext = operationProgressContext.getStore();
     launcher.on("progress", (event) => {
+      reportMinecraftProgress(event, progressContext);
       const type = asTrimmedText(event?.type);
       if (type) {
         minecraftDownloadState.type = type;
@@ -7941,6 +7689,7 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
       }
 
       isLaunching = true;
+      sendOperationProgress(100);
       sendState(true);
       const pidSuffix = Number.isFinite(launchPid) && launchPid > 0 ? ` (PID ${launchPid})` : "";
       sendLog({

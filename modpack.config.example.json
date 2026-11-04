@@ -14,9 +14,6 @@
       },
       "modpack": {
         "manifestUrl": "https://YOUR_PROJECT.pages.dev/skyblock/latest.json"
-      },
-      "news": {
-        "items": []
       }
     }
   ],

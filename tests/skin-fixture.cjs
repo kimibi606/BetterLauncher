@@ -17,12 +17,12 @@ function chunk(type, data) {
   result.writeUInt32BE(crc32(Buffer.concat([label, data])), data.length + 8);
   return result;
 }
-function skinPng({ height = 64, color = [48, 152, 172], opaqueHat = false } = {}) {
+function skinPng({ height = 64, color = [48, 152, 172], faceColor = [188, 137, 106], opaqueHat = false } = {}) {
   const rows = Buffer.alloc((64 * 4 + 1) * height);
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < 64; x++) {
       const offset = y * 257 + 1 + x * 4;
-      const rgb = opaqueHat && x >= 32 && y < 16 ? [0, 0, 0] : y < 16 ? [188, 137, 106] : color;
+      const rgb = opaqueHat && x >= 32 && y < 16 ? [0, 0, 0] : y < 16 ? faceColor : color;
       rows.set(rgb, offset);
       rows[offset + 3] = height === 64 && x >= 56 && y < 8 ? 0 : 255;
     }

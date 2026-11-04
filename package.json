@@ -1,11 +1,11 @@
 {
   "name": "betterlauncher",
-  "version": "0.4.21",
+  "version": "0.4.22",
   "description": "Single-modpack Minecraft launcher with independent modpack distribution.",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "check": "node --check main.js && node --check preload.js && node --check src/renderer.js && node --check src/skin-model.js && node --check src/skin-model-fallback.js && node --check lib/account-skin.js && node --check lib/neoforge-runtime.js && node --check lib/zip-entry-names.js && node --check lib/modpack-path-renames.js && node --check lib/resourcepack-settings.js && node --check lib/microsoft-login-errors.js && node --check scripts/import-modpack-zip.js && node --check scripts/build-launcher.js && node --check vendor/request/index.js && node --check lib/secure-fetch.js && node --check lib/log-security.js && node --check vendor/request/network-security.js && node --check lib/projects.js && node --check lib/distribution-download.js && node --check scripts/publish-modpack-distribution.js && node --check scripts/build-modpack-distribution.js && node scripts/validate-release.js && node scripts/sync-skin-renderer.js --check",
+    "check": "node --check main.js && node --check preload.js && node --check src/renderer.js && node --check src/skin-model.js && node --check src/skin-model-fallback.js && node --check lib/window-geometry.js && node --check lib/account-skin.js && node --check lib/neoforge-runtime.js && node --check lib/zip-entry-names.js && node --check lib/modpack-path-renames.js && node --check lib/resourcepack-settings.js && node --check lib/microsoft-login-errors.js && node --check scripts/import-modpack-zip.js && node --check scripts/build-launcher.js && node --check vendor/request/index.js && node --check lib/secure-fetch.js && node --check lib/log-security.js && node --check vendor/request/network-security.js && node --check lib/projects.js && node --check lib/distribution-download.js && node --check scripts/publish-modpack-distribution.js && node --check scripts/build-modpack-distribution.js && node scripts/validate-release.js && node scripts/sync-skin-renderer.js --check",
     "dist": "node scripts/build-launcher.js",
     "dist:win": "node scripts/build-launcher.js",
     "dist:dir": "node scripts/build-launcher.js --dir",
@@ -17,7 +17,8 @@
     "modpack:build": "node scripts/build-modpack-distribution.js",
     "modpack:deploy": "node scripts/deploy-modpacks.js",
     "dist:private": "node scripts/build-launcher.js",
-    "vendor:skin": "node scripts/sync-skin-renderer.js"
+    "vendor:skin": "node scripts/sync-skin-renderer.js",
+    "test:window": "electron tests/window-geometry.cjs"
   },
   "keywords": [
     "minecraft",
@@ -30,13 +31,13 @@
     "electron-updater": "^6.8.9",
     "minecraft-launcher-core": "^3.18.2",
     "request": "file:vendor/request",
-    "undici": "7.29.1"
+    "undici": "7.30.1"
   },
   "devDependencies": {
-    "electron": "^43.7.9",
-    "electron-builder": "^26.17.0",
+    "electron": "^43.8.7",
+    "electron-builder": "^26.18.0",
     "skinview3d": "3.4.2",
-    "wrangler": "4.59.2"
+    "wrangler": "4.157.0"
   },
   "overrides": {
     "minecraft-launcher-core": {
@@ -45,10 +46,9 @@
       "adm-zip": "0.6.1"
     },
     "@electron/get": "5.0.0",
-    "miniflare": {
-      "sharp": "0.35.5",
-      "undici": "7.29.1",
-      "ws": "8.21.0"
+    "minimatch": "11.0.4",
+    "node-gyp": {
+      "undici": "6.29.1"
     }
   },
   "build": {

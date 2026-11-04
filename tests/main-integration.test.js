@@ -65,8 +65,8 @@ async function setup(t, safeStorage, { cacheManifests = false } = {}) {
   });
   const base = `http://127.0.0.1:${server.address().port}`;
   const config = { defaultProject: "alpha", projects: [
-    { id: "alpha", name: "Alpha", minecraftVersion: "1.20.1", javaMajor: 17, modpack: { manifestUrl: `${base}/alpha/latest.json` }, serverStatus: { host: "alpha.test" }, news: { items: ["Alpha news"] } },
-    { id: "beta", name: "Beta", minecraftVersion: "1.21.1", javaMajor: 21, modpack: { manifestUrl: `${base}/beta/latest.json` }, news: { items: ["Beta news"] } }
+    { id: "alpha", name: "Alpha", minecraftVersion: "1.20.1", javaMajor: 17, modpack: { manifestUrl: `${base}/alpha/latest.json` }, serverStatus: { host: "alpha.test" } },
+    { id: "beta", name: "Beta", minecraftVersion: "1.21.1", javaMajor: 21, modpack: { manifestUrl: `${base}/beta/latest.json` } }
   ] };
   await fs.promises.writeFile(path.join(root, "modpack.config.json"), JSON.stringify(config));
   for (const project of config.projects) {
@@ -101,11 +101,58 @@ test("two HTTP modpacks install concurrently with separate state, chunks and run
   assert.match(forbidden.error, /another modpack project/);
 });
 
-test("project context isolates server/news configuration and exact Fabric versions", async (t) => {
+test("overall progress stays isolated per operation and never completes failed installs", async (t) => {
+  const { handlers, webContents, context } = await setup(t);
+  const messages = [];
+  webContents.send = (channel, payload) => { if (channel === "launcher:progress") messages.push(payload); };
+  const payloads = await Promise.all(["alpha", "beta"].map(async projectId => {
+    const defaults = await handlers.get("launcher:get-defaults")({}, { projectId });
+    return { projectId, minecraftDirectory: defaults.minecraftDirectory, progressId: `${projectId}-install` };
+  }));
+  const results = await Promise.all(payloads.map(payload => handlers.get("launcher:sync-modpack")({}, payload)));
+  assert.ok(results.every(result => result.ok));
+  for (const payload of payloads) {
+    const updates = messages.filter(message => message.id === payload.progressId);
+    assert.equal(updates[0].percent, 0);
+    assert.equal(updates.at(-1).percent, 100);
+    assert.ok(updates.every((update, index) => update.projectId === payload.projectId &&
+      Number.isFinite(update.percent) && update.percent >= (updates[index - 1]?.percent || 0)));
+    assert.ok(updates.every(update => Object.keys(update).sort().join(",") === "id,percent,projectId"));
+  }
+  messages.length = 0;
+  vm.runInContext("runModpackSyncFromPayload = async () => ({ ok: false, error: 'Fixture failure' });", context);
+  assert.equal((await handlers.get("launcher:sync-modpack")({}, payloads[0])).ok, false);
+  assert.deepEqual(messages.map(message => message.percent), [0]);
+  messages.length = 0;
+  await handlers.get("launcher:sync-modpack")({}, { ...payloads[0], progressId: "https://private.example/token" });
+  assert.equal(messages.length, 0, "untrusted operation identifiers must not be emitted");
+});
+
+test("Minecraft subtask progress does not regress or reach 100 before the game starts", async (t) => {
+  const { context, webContents } = await setup(t);
+  const messages = [];
+  webContents.send = (channel, payload) => { if (channel === "launcher:progress") messages.push(payload); };
+  vm.runInContext(`
+    const fixtureProgress = { id: 'launch-fixture', projectId: 'alpha', channel: 'launcher:launch', percent: 0, active: true };
+    reportMinecraftProgress({ type: 'version-jar', task: 1, total: 2 }, fixtureProgress);
+    reportMinecraftProgress({ type: 'classes', task: 1, total: 2 }, fixtureProgress);
+    reportMinecraftProgress({ type: 'assets', task: 1, total: 4 }, fixtureProgress);
+    reportMinecraftProgress({ type: 'classes', task: 0, total: 20 }, fixtureProgress);
+    reportMinecraftProgress({ type: 'assets-copy', task: 10, total: 10 }, fixtureProgress);
+    reportMinecraftProgress({ type: 'assets', task: 1, total: 0 }, fixtureProgress);
+    reportMinecraftProgress({ type: 'unknown', task: 1, total: 2 }, fixtureProgress);
+    fixtureProgress.active = false;
+    sendOperationProgress(100, fixtureProgress);
+  `, context);
+  assert.deepEqual(messages.map(message => message.percent), [67.5, 80, 89, 89, 99]);
+});
+
+test("project context isolates server configuration and exact Fabric versions", async (t) => {
   const { handlers, api, config } = await setup(t);
-  const news = await Promise.all(config.projects.map((project) => handlers.get("launcher:get-news")({}, { projectId: project.id })));
-  assert.equal(news[0].items[0].text, "Alpha news");
-  assert.equal(news[1].items[0].text, "Beta news");
+  assert.equal(handlers.has("launcher:get-news"), false);
+  api.projectContext.run(config.projects[0], () => {
+    assert.equal(api.readServerStatusConfig().host, "alpha.test");
+  });
   api.projectContext.run(config.projects[1], () => {
     assert.equal(api.readServerStatusConfig().host, "");
     assert.equal(api.isProjectFabricVersionId("fabric-loader-0.16.0-1.21.1"), true);
