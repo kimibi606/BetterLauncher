@@ -101,6 +101,40 @@ test("two HTTP modpacks install concurrently with separate state, chunks and run
   assert.match(forbidden.error, /another modpack project/);
 });
 
+test("a configured instance revision installs fresh and protects previous Minecraft data", async (t) => {
+  const { root, config, handlers, appPaths } = await setup(t);
+  const previous = (await handlers.get("launcher:get-defaults")({}, { projectId: "alpha" })).minecraftDirectory;
+  const vanilla = path.join(appPaths.appData, ".minecraft");
+  for (const directory of [previous, vanilla]) {
+    await fs.promises.mkdir(path.join(directory, "saves"), { recursive: true });
+    await fs.promises.writeFile(path.join(directory, "saves", "world.txt"), "previous world");
+    await fs.promises.writeFile(path.join(directory, "options.txt"), "previous options");
+  }
+  config.projects[0].instanceRevision = 1;
+  await fs.promises.writeFile(path.join(root, "modpack.config.json"), JSON.stringify(config));
+  const defaults = await handlers.get("launcher:get-defaults")({}, { projectId: "alpha" });
+  assert.equal(defaults.instanceRevision, 1);
+  assert.equal(defaults.minecraftDirectory, path.join(appPaths.userData, "instances", "alpha.rev-1"));
+
+  const sync = (minecraftDirectory, gameDirectory) => handlers.get("launcher:sync-modpack")({}, {
+    projectId: "alpha", minecraftDirectory, gameDirectory
+  });
+  for (const directory of [previous, vanilla]) {
+    assert.equal((await sync(directory)).ok, false);
+    assert.equal((await sync(defaults.minecraftDirectory, directory)).ok, false);
+  }
+  assert.equal((await sync(defaults.minecraftDirectory)).ok, true);
+  assert.equal(await fs.promises.readFile(path.join(defaults.minecraftDirectory, "mods", "shared-name.jar"), "utf8"), "Alpha".repeat(5));
+  for (const directory of [previous, vanilla]) {
+    assert.equal(await fs.promises.readFile(path.join(directory, "saves", "world.txt"), "utf8"), "previous world");
+    assert.equal(await fs.promises.readFile(path.join(directory, "options.txt"), "utf8"), "previous options");
+  }
+  assert.equal(fs.existsSync(path.join(defaults.minecraftDirectory, "saves")), false);
+  await fs.promises.writeFile(path.join(defaults.minecraftDirectory, "options.txt"), "new options");
+  assert.equal((await sync(defaults.minecraftDirectory)).ok, true);
+  assert.equal(await fs.promises.readFile(path.join(defaults.minecraftDirectory, "options.txt"), "utf8"), "new options");
+});
+
 test("overall progress stays isolated per operation and never completes failed installs", async (t) => {
   const { handlers, webContents, context } = await setup(t);
   const messages = [];

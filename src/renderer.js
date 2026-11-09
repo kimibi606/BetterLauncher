@@ -2151,10 +2151,18 @@ async function initializeSettings() {
 
   launcherSettings = readStoredSettings();
   const systemMinecraftDirectory = asText(defaults?.systemMinecraftDirectory);
-  if (isSameDirectoryPath(launcherSettings.minecraftDirectory, systemMinecraftDirectory)) {
+  const usingOldInstance = defaults.instanceRevision > 0 &&
+    !isSameDirectoryPath(launcherSettings.minecraftDirectory, launcherDefaults.minecraftDirectory);
+  if (usingOldInstance || isSameDirectoryPath(launcherSettings.minecraftDirectory, systemMinecraftDirectory)) {
+    if (usingOldInstance) {
+      const oldDirectory = normalizeDirectoryForCompare(launcherSettings.minecraftDirectory);
+      if (oldDirectory && normalizeDirectoryForCompare(launcherSettings.javaPath).startsWith(oldDirectory + "/")) {
+        launcherSettings.javaPath = launcherDefaults.javaPath;
+      }
+      launcherSettings.dataDirectory = launcherDefaults.dataDirectory;
+    }
     launcherSettings.minecraftDirectory = asText(launcherDefaults.minecraftDirectory);
     launcherSettings.selectedProfile = "";
-    writeStoredSettings(launcherSettings);
   }
 
   applySettingsToInputs(launcherSettings);

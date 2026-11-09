@@ -359,8 +359,12 @@ function configureLauncherUserDataPath() {
   }
 }
 
+function getLauncherProjectDirectory(project) {
+  return getProjectDirectory(app.getPath("userData"), project.id, project.instanceRevision);
+}
+
 function getDefaultMinecraftDir() {
-  return getProjectDirectory(app.getPath("userData"), getCurrentProject().id);
+  return getLauncherProjectDirectory(getCurrentProject());
 }
 
 function migrateLegacyUserDataIfNeeded() {
@@ -1642,19 +1646,35 @@ function getWindowsJavaRuntimeUrl() {
 function registerProjectHandler(channel, callback) {
   handleLauncherIpc(channel, async (event, payload = {}) => {
     try {
-      const project = resolveProject(readLauncherConfig() || {}, payload?.projectId);
+      const config = readLauncherConfig() || {};
+      const project = resolveProject(config, payload?.projectId);
+      const configuredRoot = getLauncherProjectDirectory(project);
       for (const directory of [payload?.minecraftDirectory, payload?.gameDirectory].filter(Boolean)) {
         const root = normalizePathForCompare(directory);
-        for (const other of readProjects(readLauncherConfig() || {})) {
+        if (project.instanceRevision) {
+          if (root !== normalizePathForCompare(configuredRoot)) {
+            throw new Error("This modpack must use its current launcher-managed Minecraft directory.");
+          }
+          const userData = app.getPath("userData");
+          resolveModpackTargetPath(userData, path.relative(userData, configuredRoot).split(path.sep).join("/"));
+        }
+        for (const other of readProjects(config)) {
           if (other.id === project.id) continue;
-          const otherRoot = normalizePathForCompare(getProjectDirectory(app.getPath("userData"), other.id));
-          if (root === otherRoot || root.startsWith(otherRoot + path.sep)) {
-            throw new Error(`This Minecraft directory belongs to another modpack project: ${other.id}`);
+          for (const otherDirectory of [getLauncherProjectDirectory(other), getProjectDirectory(app.getPath("userData"), other.id)]) {
+            const otherRoot = normalizePathForCompare(otherDirectory);
+            if (root === otherRoot || root.startsWith(otherRoot + path.sep)) {
+              throw new Error(`This Minecraft directory belongs to another modpack project: ${other.id}`);
+            }
           }
         }
         const state = readModpackState(directory);
         const owner = state?.projectId || state?.id;
         if (owner && owner !== project.id) throw new Error(`This Minecraft directory belongs to another modpack project: ${owner}`);
+      }
+      if (project.instanceRevision && (payload.minecraftDirectory || payload.gameDirectory)) {
+        payload = { ...payload,
+          minecraftDirectory: payload.minecraftDirectory ? configuredRoot : payload.minecraftDirectory,
+          gameDirectory: payload.gameDirectory ? configuredRoot : payload.gameDirectory };
       }
       const progress = ["launcher:launch", "launcher:sync-modpack"].includes(channel) &&
         typeof payload.progressId === "string" && /^[a-zA-Z0-9-]{1,80}$/.test(payload.progressId)
@@ -7092,7 +7112,7 @@ handleLauncherIpc("launcher:get-defaults", (_event, payload = {}) => {
         id: project.id, name: project.name, description: project.description || "",
         minecraftVersion: project.minecraftVersion, modLoader: project.modLoader, javaMajor: project.javaMajor,
         manifestConfigured: Boolean(asTrimmedText(project.modpack.manifestUrl) || asTrimmedText(process.env.BETTERLAUNCHER_MODPACK_MANIFEST_URL)),
-        minecraftDirectory: getProjectDirectory(app.getPath("userData"), project.id),
+        minecraftDirectory: getLauncherProjectDirectory(project),
         discordUrl: project.discordUrl || ""
       })),
       javaMajor: project?.javaMajor || 21,
@@ -7100,7 +7120,8 @@ handleLauncherIpc("launcher:get-defaults", (_event, payload = {}) => {
       version: project?.minecraftVersion || "",
       modLoader: project?.modLoader || "",
       versionType: "release",
-      minecraftDirectory: project ? getProjectDirectory(app.getPath("userData"), project.id) : "",
+      minecraftDirectory: project ? getLauncherProjectDirectory(project) : "",
+      instanceRevision: project?.instanceRevision || 0,
       systemMinecraftDirectory: getSystemMinecraftDir(),
       javaPath: "",
       jvmArgs: DEFAULT_JVM_ARGS,

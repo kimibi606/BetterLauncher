@@ -19,6 +19,7 @@ let catalog = fixtures;
 let signedIn = true;
 let failDefaults = false;
 let defaultProjectId = "alpha";
+let instanceRevision = 0;
 let pendingUpdate = false;
 let blockUpdate = false;
 let releaseUpdate;
@@ -58,7 +59,8 @@ handle("launcher:get-defaults", ({ projectId }) => {
   defaultsRequests.push(projectId);
   if (failDefaults) return { ok: false, error: "모드팩 설정 읽기 실패 테스트" };
   const project = catalog.find((entry) => entry.id === projectId) || catalog.find((entry) => entry.id === defaultProjectId) || catalog[0];
-  return { projectId: project?.id || "", projects: catalog, minecraftDirectory: project ? path.join(output, "instances", project.id) : "", javaPath: "", ramMin: 6144, ramMax: 6144, jvmArgs: "-XX:+UseZGC" };
+  const instanceName = instanceRevision ? `${project?.id}.rev-${instanceRevision}` : project?.id;
+  return { projectId: project?.id || "", projects: catalog, instanceRevision, minecraftDirectory: project ? path.join(output, "instances", instanceName) : "", javaPath: "", ramMin: 6144, ramMax: 6144, jvmArgs: "-XX:+UseZGC" };
 });
 handle("launcher:get-auth-state", auth);
 handle("launcher:microsoft-select-account", (accountId) => {
@@ -502,6 +504,18 @@ app.whenReady().then(async () => {
   assert.equal(await js(win, "currentScreen === 'launch' && activeProjectId === 'alpha' && hasActiveModpack"), true);
   assert.equal(await js(win, "launcherSettings.gameWidth === 1600 && !('bgmVolume' in launcherSettings) && !('bgmMuted' in launcherSettings) && !('autoConnect' in launcherSettings)"), true);
   assert.ok(calls.some((entry) => entry.type === "check" && entry.projectId === "alpha"));
+  await js(win, "const oldInstanceSettings = { ...launcherSettings, javaPath: launcherSettings.minecraftDirectory + '/runtime/bin/javaw.exe' }; localStorage.setItem('betterlauncher.project.alpha.settings.v1', JSON.stringify(oldInstanceSettings));");
+  instanceRevision = 1;
+  calls.length = 0;
+  await new Promise((resolve) => { win.webContents.once("did-finish-load", resolve); win.reload(); });
+  await waitFor(win, "startupOverlayDismissed && startupOverlay.hidden");
+  const revisedDirectory = path.join(output, "instances", "alpha.rev-1");
+  assert.equal(await js(win, "launcherSettings.minecraftDirectory"), revisedDirectory);
+  assert.equal(await js(win, "launcherSettings.dataDirectory"), revisedDirectory);
+  assert.equal(await js(win, "launcherSettings.gameWidth"), 1600);
+  assert.ok(calls.some(entry => entry.type === "java" && entry.minecraftDirectory === revisedDirectory));
+  assert.ok(calls.some(entry => entry.type === "check" && entry.minecraftDirectory === revisedDirectory));
+  instanceRevision = 0;
   win.setSize(860, 660);
   await screenshot(win, "single-modpack-small");
   assert.equal(await js(win, "document.documentElement.scrollWidth <= innerWidth && startLaunchButton.getBoundingClientRect().right <= innerWidth"), true);
