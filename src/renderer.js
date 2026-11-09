@@ -1693,12 +1693,14 @@ async function runPendingModpackUpdate() {
 
   beginLaunchProgress("modpack");
   payload.progressId = launchProgressState.id;
+  const session = authSessionRevision;
   isModpackUpdateApplyRunning = true;
   updateLaunchButtonUi();
   setLaunchStatus("모드팩 업데이트 중...");
 
   try {
     const result = await window.launcherApi.syncModpack(payload);
+    if (session !== authSessionRevision || payload.projectId !== activeProjectId) return false;
     if (!result?.ok) {
       const message = localizeStatusMessage(result?.error || "Modpack update failed.");
       setLaunchStatus(message, true);
@@ -1803,8 +1805,7 @@ async function launchGame() {
   }
 
   if (modpackUpdateState?.pending) {
-    await runPendingModpackUpdate();
-    return;
+    if (!(await runPendingModpackUpdate())) return;
   }
 
   beginLaunchProgress("launch");
@@ -1824,13 +1825,6 @@ async function launchGame() {
   try {
     const result = await window.launcherApi.launch({ ...payload, progressId });
     if (!result?.ok) {
-      if (result?.code === "modpack-update-required" || result?.modpackUpdate?.pending) {
-        modpackUpdateState =
-          result?.modpackUpdate && typeof result.modpackUpdate === "object"
-            ? { ...result.modpackUpdate, pending: true }
-            : { ok: true, pending: true };
-        updateLaunchButtonUi();
-      }
       if (result?.code === "auth-session-expired") {
         applyAuthState({
           ...authState,

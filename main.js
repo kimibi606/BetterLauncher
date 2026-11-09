@@ -7444,16 +7444,6 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
       sendLog({ level: "error", message: `Modpack update check failed: ${modpackUpdateCheck.error}` });
       return { ok: false, error: `Modpack update check failed: ${modpackUpdateCheck.error}` };
     }
-    if (modpackUpdateCheck.pending) {
-      sendLog({ level: "warn", message: "Modpack update is required before launch." });
-      return {
-        ok: false,
-        code: "modpack-update-required",
-        error: "Modpack update is required before launch.",
-        modpackUpdate: modpackUpdateCheck
-      };
-    }
-
     const modpackResult = await runModpackSyncFromPayload(
       {
         launcherPreset,

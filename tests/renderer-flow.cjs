@@ -423,9 +423,17 @@ app.whenReady().then(async () => {
   await js(win, "refreshModpackUpdateStatus({ forceRefresh: true })");
   assert.equal(await js(win, "startLaunchButton.textContent"), "업데이트");
   assert.equal(await js(win, "launchProgress.hidden"), true, "an available update is not an active update");
+  const updateStart = calls.length;
+  blockLaunch = true;
+  releaseLaunch = null;
   await js(win, "startLaunchButton.click()");
-  await waitFor(win, "!isModpackUpdateApplyRunning && !modpackUpdateState.pending");
-  assert.equal(calls.find((entry) => entry.type === "sync").projectId, "alpha");
+  await waitFor(win, "isLaunchRequestPending && !isModpackUpdateApplyRunning && !modpackUpdateState.pending");
+  while (!releaseLaunch) await delay(20);
+  const updateAndLaunch = calls.slice(updateStart).filter(({ type }) => type === "sync" || type === "launch");
+  assert.deepEqual(updateAndLaunch.map(({ type, projectId }) => [type, projectId]), [["sync", "alpha"], ["launch", "alpha"]]);
+  releaseLaunch();
+  blockLaunch = false;
+  await waitFor(win, "!isLaunchRequestPending");
   assert.equal(await js(win, "startLaunchButton.textContent"), "게임 시작");
   assert.equal(await js(win, "launchProgress.hidden"), true);
 
