@@ -60,7 +60,7 @@ handle("launcher:get-defaults", ({ projectId }) => {
   if (failDefaults) return { ok: false, error: "모드팩 설정 읽기 실패 테스트" };
   const project = catalog.find((entry) => entry.id === projectId) || catalog.find((entry) => entry.id === defaultProjectId) || catalog[0];
   const instanceName = instanceRevision ? `${project?.id}.rev-${instanceRevision}` : project?.id;
-  return { projectId: project?.id || "", projects: catalog, instanceRevision, minecraftDirectory: project ? path.join(output, "instances", instanceName) : "", javaPath: "", ramMin: 6144, ramMax: 6144, jvmArgs: "-XX:+UseZGC" };
+  return { projectId: project?.id || "", projects: catalog, instanceRevision, minecraftDirectory: project ? path.join(output, "instances", instanceName) : "", javaPath: "", ramMin: 6144, ramMax: 6144, jvmArgs: "" };
 });
 handle("launcher:get-auth-state", auth);
 handle("launcher:microsoft-select-account", (accountId) => {
@@ -505,12 +505,13 @@ app.whenReady().then(async () => {
   await waitFor(win, "currentScreen === 'launch' && hasActiveModpack && !isModpackPreparing");
 
   // Preserve existing game settings while ignoring the removed remembered-pack preference.
-  await js(win, "localStorage.setItem('betterlauncher.selected-project.v1', 'beta'); localStorage.setItem('betterlauncher.project.alpha.settings.v1', JSON.stringify({ ...launcherSettings, gameWidth: 1600, bgmVolume: 80, bgmMuted: false, autoConnect: false }))");
+  await js(win, "localStorage.setItem('betterlauncher.selected-project.v1', 'beta'); localStorage.setItem('betterlauncher.project.alpha.settings.v1', JSON.stringify({ ...launcherSettings, jvmArgs: '-XX:+UseZGC', gameWidth: 1600, bgmVolume: 80, bgmMuted: false, autoConnect: false }))");
   calls.length = 0;
   await new Promise((resolve) => { win.webContents.once("did-finish-load", resolve); win.reload(); });
   await waitFor(win, "startupOverlayDismissed && startupOverlay.hidden");
   assert.equal(await js(win, "currentScreen === 'launch' && activeProjectId === 'alpha' && hasActiveModpack"), true);
   assert.equal(await js(win, "launcherSettings.gameWidth === 1600 && !('bgmVolume' in launcherSettings) && !('bgmMuted' in launcherSettings) && !('autoConnect' in launcherSettings)"), true);
+  assert.equal(await js(win, "buildLaunchPayload().jvmArgs"), "");
   assert.ok(calls.some((entry) => entry.type === "check" && entry.projectId === "alpha"));
   await js(win, "const oldInstanceSettings = { ...launcherSettings, javaPath: launcherSettings.minecraftDirectory + '/runtime/bin/javaw.exe' }; localStorage.setItem('betterlauncher.project.alpha.settings.v1', JSON.stringify(oldInstanceSettings));");
   instanceRevision = 1;

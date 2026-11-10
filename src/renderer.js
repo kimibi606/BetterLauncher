@@ -10,7 +10,6 @@ const STARTUP_MODPACK_PROGRESS_DONE = 88;
 const STARTUP_FINALIZING_PROGRESS = 96;
 const STARTUP_COMPLETE_PROGRESS = 100;
 const LAUNCH_LOG_CAPTURE_MS = 45000;
-const LAUNCH_START_TIMEOUT_MS = 20000;
 const PLAYER_COUNT_REFRESH_MS = 15000;
 const MODPACK_UPDATE_REFRESH_MS = 60000;
 const JAVA_RAM_MIN_MB = 6144;
@@ -20,7 +19,6 @@ const LEGACY_SETTINGS_STORAGE_KEY = "bettermon.launcher.settings.v1";
 const LOGIN_WAITING_ENTER_DELAY_MS = 220;
 const LOGIN_GATE_ENTER_DELAY_MS = 180;
 const MODPACK_PROGRESS_PATTERN = /\[Modpack\s+(\d+)\s*\/\s*(\d+)\]\s*(.*)/i;
-const DEFAULT_JVM_ARGS = "-XX:+UseZGC";
 
 const DEFAULT_SETTINGS = {
   gameWidth: 1280,
@@ -30,7 +28,7 @@ const DEFAULT_SETTINGS = {
   minecraftDirectory: "",
   selectedProfile: "",
   javaPath: "",
-  jvmArgs: DEFAULT_JVM_ARGS,
+  jvmArgs: "",
   ramMin: JAVA_RAM_MIN_MB,
   ramMax: JAVA_RAM_MIN_MB,
   dataDirectory: "",
@@ -147,7 +145,6 @@ let isLauncherUpdateInstallRunning = false;
 let startupProgressPercent = 0;
 let startupOverlayDismissed = false;
 let launchLogCaptureUntil = 0;
-let launchStartTimeoutId = null;
 let playerCountPollTimer = null;
 let isPlayerCountRequestPending = false;
 let modpackUpdatePollTimer = null;
@@ -1022,7 +1019,6 @@ function isSameDirectoryPath(left, right) {
 function normalizeSettings(raw, defaults = DEFAULT_SETTINGS) {
   const source = raw && typeof raw === "object" ? raw : {};
   const unifiedRamMb = asNumber(source.ramMax ?? source.ramMin, defaults.ramMax, JAVA_RAM_MIN_MB, 32768);
-  const normalizedJvmArgs = asText(source.jvmArgs);
   const normalized = {
     gameWidth: asNumber(source.gameWidth, defaults.gameWidth, 320, 7680),
     gameHeight: asNumber(source.gameHeight, defaults.gameHeight, 240, 4320),
@@ -1031,7 +1027,7 @@ function normalizeSettings(raw, defaults = DEFAULT_SETTINGS) {
     minecraftDirectory: asText(source.minecraftDirectory, defaults.minecraftDirectory),
     selectedProfile: "",
     javaPath: asText(source.javaPath, defaults.javaPath),
-    jvmArgs: normalizedJvmArgs || asText(defaults.jvmArgs),
+    jvmArgs: asText(source.jvmArgs),
     ramMin: unifiedRamMb,
     ramMax: unifiedRamMb,
     dataDirectory: asText(source.dataDirectory, defaults.dataDirectory),
@@ -1141,7 +1137,11 @@ function readStoredSettings() {
     }
 
     const parsed = JSON.parse(raw);
-    return normalizeSettings(parsed, launcherDefaults);
+    const legacyJvmArgs = asText(parsed?.jvmArgs);
+    return normalizeSettings({
+      ...parsed,
+      jvmArgs: parsed?.customJvmArgs ?? (legacyJvmArgs === "-XX:+UseZGC" ? "" : legacyJvmArgs)
+    }, launcherDefaults);
   } catch {
     return normalizeSettings({}, launcherDefaults);
   }
@@ -1150,7 +1150,8 @@ function readStoredSettings() {
 function writeStoredSettings(settings) {
   try {
     if (!activeProjectId) return;
-    localStorage.setItem(`betterlauncher.project.${activeProjectId}.settings.v1`, JSON.stringify(settings));
+    const { jvmArgs, ...rest } = settings;
+    localStorage.setItem(`betterlauncher.project.${activeProjectId}.settings.v1`, JSON.stringify({ ...rest, customJvmArgs: jvmArgs }));
   } catch {
     // ignore storage failures
   }
@@ -1220,30 +1221,9 @@ function applyOperationProgress(payload) {
   setLaunchProgress(payload.percent, payload.percent >= 100);
 }
 
-function clearLaunchStartTimeout() {
-  if (launchStartTimeoutId === null) {
-    return;
-  }
-  window.clearTimeout(launchStartTimeoutId);
-  launchStartTimeoutId = null;
-}
-
 function extendLaunchLogCapture(durationMs = LAUNCH_LOG_CAPTURE_MS) {
   const nextUntil = Date.now() + Math.max(0, Number(durationMs) || 0);
   launchLogCaptureUntil = Math.max(launchLogCaptureUntil, nextUntil);
-}
-
-function startLaunchStartTimeoutWatch() {
-  clearLaunchStartTimeout();
-  launchStartTimeoutId = window.setTimeout(() => {
-    launchStartTimeoutId = null;
-    if (!isLauncherRunning) {
-      setLaunchStatus(
-        "\uB9C8\uC778\uD06C\uB798\uD504\uD2B8 \uD504\uB85C\uC138\uC2A4\uAC00 \uC2DC\uC791\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4. Java \uACBD\uB85C\uC640 \uB7F0\uCC98 \uB85C\uADF8\uB97C \uD655\uC778\uD574 \uC8FC\uC138\uC694.",
-        true
-      );
-    }
-  }, LAUNCH_START_TIMEOUT_MS);
 }
 
 function clampPercent(value) {
@@ -1519,7 +1499,7 @@ function buildLaunchPayload() {
     minecraftDirectory,
     gameDirectory: "",
     javaPath,
-    jvmArgs: asText(launcherSettings.jvmArgs) || asText(launcherDefaults.jvmArgs),
+    jvmArgs: asText(launcherSettings.jvmArgs),
     ramMin: Number(launcherSettings.ramMin) || DEFAULT_SETTINGS.ramMin,
     ramMax: Number(launcherSettings.ramMax) || DEFAULT_SETTINGS.ramMax
   };
@@ -1668,11 +1648,9 @@ function applyLauncherState(nextState) {
 
   if (isLauncherRunning) {
     if (launchProgressState.kind === "launch") setLaunchProgress(100, true);
-    clearLaunchStartTimeout();
     extendLaunchLogCapture();
     setLaunchStatus("\uB9C8\uC778\uD06C\uB798\uD504\uD2B8 \uC2E4\uD589 \uC911...");
   } else if (wasRunning) {
-    clearLaunchStartTimeout();
     setLaunchStatus("\uB9C8\uC778\uD06C\uB798\uD504\uD2B8\uAC00 \uC885\uB8CC\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
   }
 
@@ -1818,7 +1796,6 @@ async function launchGame() {
 
   isLaunchRequestPending = true;
   extendLaunchLogCapture();
-  clearLaunchStartTimeout();
   updateLaunchButtonUi();
   setLaunchStatus("\uB9C8\uC778\uD06C\uB798\uD504\uD2B8 \uC2E4\uD589 \uC911...");
 
@@ -1839,8 +1816,6 @@ async function launchGame() {
     setLaunchProgress(100, true);
     applyResolvedJavaPath(result?.javaPath);
     extendLaunchLogCapture();
-    setLaunchStatus("\uC2E4\uD589 \uC694\uCCAD \uC644\uB8CC. \uB9C8\uC778\uD06C\uB798\uD504\uD2B8 \uD504\uB85C\uC138\uC2A4 \uC2DC\uC791 \uB300\uAE30 \uC911...");
-    startLaunchStartTimeoutWatch();
   } catch (error) {
     const message = localizeStatusMessage(
       asText(error?.message) || "\uC2E4\uD589 \uC694\uCCAD \uC804\uC1A1\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4."
@@ -2132,7 +2107,6 @@ async function initializeSettings() {
         ...DEFAULT_SETTINGS,
         minecraftDirectory: asText(defaults?.minecraftDirectory),
         javaPath: asText(defaults?.javaPath),
-        jvmArgs: asText(defaults?.jvmArgs) || DEFAULT_SETTINGS.jvmArgs,
         ramMin: Number(defaults?.ramMin) || DEFAULT_SETTINGS.ramMin,
         ramMax: Number(defaults?.ramMax) || DEFAULT_SETTINGS.ramMax,
         dataDirectory: asText(defaults?.minecraftDirectory)

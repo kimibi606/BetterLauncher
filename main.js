@@ -106,7 +106,6 @@ const LEGACY_SESSION_DATA_ENTRY_NAMES = [
   "Preferences",
   "SharedStorage"
 ];
-const DEFAULT_JVM_ARGS = "-XX:+UseZGC";
 const APP_UPDATE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
 const APP_ICON_PATH = path.join(
   __dirname,
@@ -7124,7 +7123,7 @@ handleLauncherIpc("launcher:get-defaults", (_event, payload = {}) => {
       instanceRevision: project?.instanceRevision || 0,
       systemMinecraftDirectory: getSystemMinecraftDir(),
       javaPath: "",
-      jvmArgs: DEFAULT_JVM_ARGS,
+      jvmArgs: "",
       ramMin: 6144,
       ramMax: 6144
     };
@@ -7560,7 +7559,6 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
         sendLog({ level: "debug", message });
       }
     });
-    launcher.on("data", (line) => sendLog({ level: "game", message: String(line).trim() }));
     sendOperationProgress(65);
     const progressContext = operationProgressContext.getStore();
     launcher.on("progress", (event) => {
@@ -7628,8 +7626,12 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
       minecraftDownloadState.activeFile = "";
     });
     launcher.on("close", (code) => {
+      const processStarted = isLaunching;
       isLaunching = false;
       sendState(false);
+      if (processStarted && code !== 0) {
+        dialog.showErrorBox("Minecraft 실행 오류", `Minecraft가 비정상 종료되었습니다.\n종료 코드: ${code ?? "없음"}\n게임 폴더의 logs/latest.log를 확인해 주세요.`);
+      }
       sendLog({ level: "info", message: `Minecraft closed (code: ${String(code)}).` });
     });
     launcher.on("error", (error) => {
@@ -7689,6 +7691,7 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
       }
 
       const launchPid = Number(launchProcess?.pid);
+      launchProcess.on("error", (error) => launcher.emit("error", error));
       if (!Number.isFinite(launchPid) || launchPid <= 0) {
         const message = launchFailureDetail
           ? `Minecraft process was not created (no PID). ${launchFailureDetail}`
