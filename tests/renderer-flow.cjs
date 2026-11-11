@@ -102,6 +102,7 @@ handle("launcher:check-modpack-update", async (payload) => {
   return { ok: true, pending: pendingUpdate };
 });
 handle("launcher:sync-modpack", (payload) => { calls.push({ type: "sync", ...payload }); pendingUpdate = false; return { ok: true, version: "1.0.1" }; });
+handle("launcher:reinstall-modpack", (payload) => { calls.push({ type: "reinstall", ...payload }); return { ok: true, version: "1.0.1" }; });
 handle("launcher:get-news", (payload) => { removedFeatureRequests.push({ type: "news", ...payload }); return { ok: true, items: [], configured: false }; });
 handle("launcher:get-server-status", (payload) => {
   calls.push({ type: "server", ...payload });
@@ -300,6 +301,9 @@ app.whenReady().then(async () => {
 
   await js(win, "settingsButton.click()");
   assert.equal(await js(win, "settingsGameWidthInput.value === '1440' && settingsFullscreenInput.checked"), true);
+  await js(win, "selectSettingsTab('settingsTabMinecraft'); settingsReinstallModpack.click()");
+  await waitFor(win, "settingsStatus.textContent.includes('최신 모드팩을 재설치했습니다')");
+  assert.equal(calls.find(({ type }) => type === "reinstall").minecraftDirectory, originalDirectories[0]);
   await js(win, "settingsGameWidthInput.value = '1280'; settingsFullscreenInput.checked = false; selectSettingsTab('settingsTabAccount')");
   extraAccount = { id: "2".repeat(32), uuid: "2".repeat(32), profileName: "SecondPlayer" };
   win.webContents.send("launcher:auth-state", auth());

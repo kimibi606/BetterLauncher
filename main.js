@@ -128,6 +128,7 @@ const EXTERNAL_OPEN_URL_MAX_LENGTH = 2048;
 let mainWindow;
 let isLaunching = false;
 let isLaunchRequestInProgress = false;
+let isModpackReinstalling = false;
 let isMicrosoftLoggingIn = false;
 let microsoftLoginStage = "";
 let lastMicrosoftLoginFailure = null;
@@ -1675,7 +1676,7 @@ function registerProjectHandler(channel, callback) {
           minecraftDirectory: payload.minecraftDirectory ? configuredRoot : payload.minecraftDirectory,
           gameDirectory: payload.gameDirectory ? configuredRoot : payload.gameDirectory };
       }
-      const progress = ["launcher:launch", "launcher:sync-modpack"].includes(channel) &&
+      const progress = ["launcher:launch", "launcher:sync-modpack", "launcher:reinstall-modpack"].includes(channel) &&
         typeof payload.progressId === "string" && /^[a-zA-Z0-9-]{1,80}$/.test(payload.progressId)
         ? { id: payload.progressId, projectId: project.id, channel, percent: 0, active: true } : null;
       try {
@@ -7089,6 +7090,9 @@ function createWindow() {
   mainWindow.on("enter-full-screen", () => {
     scheduleRoundedShapeUpdate();
   });
+  mainWindow.on("close", (event) => {
+    if (isModpackReinstalling) event.preventDefault();
+  });
   mainWindow.on("leave-full-screen", () => {
     scheduleRoundedShapeUpdate();
   });
@@ -7203,6 +7207,7 @@ handleLauncherIpc("updater:check", () => {
 });
 
 handleLauncherIpc("updater:install", () => {
+  if (isModpackReinstalling) return { ok: false, error: "모드팩 재설치가 끝난 뒤 런처를 업데이트해 주세요." };
   if (!updaterState.enabled) {
     return { ok: false, error: "Auto updater is disabled in development mode." };
   }
@@ -7299,7 +7304,10 @@ handleLauncherIpc("launcher:pick-java", async () => {
 });
 
 registerProjectHandler("launcher:auto-select-java", async (_, payload) => {
-  const result = await autoSelectJavaFromPayload(payload);
+  const directory = asTrimmedText(payload?.minecraftDirectory);
+  const result = directory
+    ? await runModpackOperationExclusive(directory, () => autoSelectJavaFromPayload(payload))
+    : await autoSelectJavaFromPayload(payload);
   if (!result.ok) {
     sendLog({ level: "error", message: `Java auto selection failed: ${result.error}` });
     return {
@@ -7332,6 +7340,62 @@ registerProjectHandler("launcher:sync-modpack", async (_, payload) => {
   return result;
 });
 
+registerProjectHandler("launcher:reinstall-modpack", async (_, payload) => {
+  if (isLaunching || isLaunchRequestInProgress || isModpackReinstalling) {
+    return { ok: false, error: "게임 실행 또는 모드팩 재설치가 끝난 뒤 다시 시도해 주세요." };
+  }
+  const userData = app.getPath("userData");
+  const root = getLauncherProjectDirectory(getCurrentProject());
+  const relativeRoot = path.relative(userData, root).split(path.sep).join("/");
+  if (!payload.minecraftDirectory || payload.gameDirectory ||
+      normalizePathForCompare(payload.minecraftDirectory) !== normalizePathForCompare(root)) {
+    return { ok: false, error: "런처에서 관리하는 모드팩 폴더만 재설치할 수 있습니다." };
+  }
+  resolveModpackTargetPath(userData, relativeRoot);
+
+  isModpackReinstalling = true;
+  try {
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      title: "모드팩 재설치",
+      message: "모드팩 폴더의 모든 파일을 삭제하고 최신 모드팩을 설치할까요?",
+      detail: "이 폴더에 있는 월드, 스크린샷, 게임 설정도 삭제되며 복구할 수 없습니다.",
+      buttons: ["취소", "재설치"],
+      defaultId: 0,
+      cancelId: 0
+    });
+    if (response !== 1) return { ok: false, canceled: true };
+    return await runModpackOperationExclusive(root, async () => {
+      resolveModpackTargetPath(userData, relativeRoot);
+      const parent = path.dirname(root);
+      await fs.promises.mkdir(parent, { recursive: true });
+      const staging = await fs.promises.mkdtemp(path.join(parent, ".reinstall-"));
+      const launcherPreset = detectLauncherPreset().preset;
+      const sessionKey = getSessionModpackKey(launcherPreset, staging);
+      const installedKey = getSessionModpackKey(launcherPreset, root);
+      try {
+        sendOperationProgress(0);
+        const result = await synchronizeModpackManifest({ launcherPreset, modpackRoot: staging, sessionKey });
+        if (!result?.ok) throw new Error("최신 모드팩을 내려받지 못했습니다.");
+
+        resolveModpackTargetPath(userData, relativeRoot);
+        resolveModpackTargetPath(userData, path.relative(userData, staging).split(path.sep).join("/"));
+        modpackSessionSyncedKeys.delete(installedKey);
+        modpackArchiveSessionCache.delete(installedKey);
+        await fs.promises.rm(root, { recursive: true, force: true, maxRetries: 3 });
+        await fs.promises.rename(staging, root);
+        sendOperationProgress(100);
+        return result;
+      } finally {
+        modpackSessionSyncedKeys.delete(sessionKey);
+        await fs.promises.rm(staging, { recursive: true, force: true, maxRetries: 3 });
+      }
+    });
+  } finally {
+    isModpackReinstalling = false;
+  }
+});
+
 registerProjectHandler("launcher:check-modpack-update", async (_, payload) => {
   const result = await runModpackUpdateCheckFromPayload(payload);
   if (!result.ok) {
@@ -7341,7 +7405,10 @@ registerProjectHandler("launcher:check-modpack-update", async (_, payload) => {
 });
 
 registerProjectHandler("launcher:prepare-runtime", async (_, payload) => {
-  const result = await prepareRuntimeFromPayload(payload);
+  const directory = asTrimmedText(payload?.minecraftDirectory || payload);
+  const result = directory
+    ? await runModpackOperationExclusive(directory, () => prepareRuntimeFromPayload(payload))
+    : await prepareRuntimeFromPayload(payload);
   if (!result.ok) {
     sendLog({ level: "error", message: `Runtime preparation failed: ${result.error}` });
     return {
@@ -7353,6 +7420,7 @@ registerProjectHandler("launcher:prepare-runtime", async (_, payload) => {
 });
 
 registerProjectHandler("launcher:launch", async (_, payload) => {
+  if (isModpackReinstalling) return { ok: false, error: "모드팩 재설치가 끝난 뒤 게임을 실행해 주세요." };
   if (isLaunching || isLaunchRequestInProgress) {
     return { ok: false, error: "Launcher is already starting Minecraft." };
   }

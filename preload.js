@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld("launcherApi", {
   prepareRuntime: (payload) => ipcRenderer.invoke("launcher:prepare-runtime", payload),
   checkModpackUpdate: (payload) => ipcRenderer.invoke("launcher:check-modpack-update", payload),
   syncModpack: (payload) => ipcRenderer.invoke("launcher:sync-modpack", payload),
+  reinstallModpack: (payload) => ipcRenderer.invoke("launcher:reinstall-modpack", payload),
   launch: (payload) => ipcRenderer.invoke("launcher:launch", payload),
   onLog: (handler) => {
     const listener = (_, payload) => handler(payload);

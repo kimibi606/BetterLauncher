@@ -1,6 +1,6 @@
 {
   "name": "betterlauncher",
-  "version": "0.4.25",
+  "version": "0.4.26",
   "description": "Single-modpack Minecraft launcher with independent modpack distribution.",
   "main": "main.js",
   "scripts": {

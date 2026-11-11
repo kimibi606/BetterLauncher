@@ -59,7 +59,7 @@ function main() {
     { name: "junction-directory", junction: true, unsafe: true, noUninstall: true },
     { name: "stale-display-current-files", currentFiles: true, noUninstall: true, retainExe: true },
     { name: "leftover-registry", result: 6 },
-    { name: "backup-already-exists", result: 5, fallback: true, backupExists: true, retainExe: true },
+    { name: "backup-already-exists", result: 5, fallback: true, backupExists: true },
     { name: "locked-legacy-exe", result: 5, fallback: true, locked: true, retainExe: true },
     { name: "dual-registry-views", dualViews: true, view: 32 },
     { name: "protected-legacy-directory", protected: true, unsafe: true, noUninstall: true, retainExe: true },
@@ -139,7 +139,10 @@ function main() {
           assert.match(events, /\/KEEP_APP_DATA/); assert.match(events, /--updated/);
           assert.ok(events.includes(scenario.machine ? "/allusers" : "/currentuser"));
         }
-        if (scenario.fallback && !scenario.retainExe) assert.ok(fs.existsSync(path.join(target, exe + ".exe.betterlauncher-backup")));
+        if (scenario.fallback && !scenario.backupExists) {
+          assert.equal(fs.existsSync(path.join(target, exe + ".exe.betterlauncher-backup")), false);
+          assert.equal(fs.existsSync(path.join(target, `Uninstall ${exe}.exe.betterlauncher-backup`)), false);
+        }
         if (scenario.fallback || scenario.currentFiles || scenario.unsafe) {
           if (!scenario.missingAsar) assert.equal(fs.readFileSync(path.join(target, "resources/app.asar"), "utf8"), "fixture-asar");
         }

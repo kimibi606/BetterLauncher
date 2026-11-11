@@ -21,7 +21,7 @@ function fixture(t) {
   return { root, pack, defaults, addPack, options: path.join(root, "options.txt") };
 }
 
-test("initial selection waits for packs, preserves other settings and backs up original bytes", async t => {
+test("initial selection waits for packs and preserves other settings", async t => {
   const { root, defaults, addPack, options } = fixture(t);
   const original = "fov:83\r\nresourcePacks:[]\r\nincompatibleResourcePacks:[]\r\nlang:ko_kr\r\n";
   fs.writeFileSync(options, original);
@@ -32,9 +32,7 @@ test("initial selection waits for packs, preserves other settings and backs up o
   const result = fs.readFileSync(options, "utf8");
   assert.ok(result.includes("resourcePacks:" + JSON.stringify(defaults.resourcePacks) + "\r\n"));
   assert.ok(result.includes("fov:83\r\n") && result.includes("lang:ko_kr\r\n"));
-  const backup = fs.readdirSync(path.join(root, ".betterlauncher/backups"));
-  assert.equal(backup.length, 1);
-  assert.equal(fs.readFileSync(path.join(root, ".betterlauncher/backups", backup[0]), "utf8"), original);
+  assert.equal(fs.existsSync(path.join(root, ".betterlauncher/backups")), false);
   fs.writeFileSync(options, "resourcePacks:[]\nincompatibleResourcePacks:[]\nfov:99\n");
   assert.equal((await repairResourcePackSettings(root, { defaults })).changed, false);
   assert.match(fs.readFileSync(options, "utf8"), /^resourcePacks:\[\]/);

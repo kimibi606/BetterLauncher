@@ -107,15 +107,12 @@ FunctionEnd
   !endif
 !macroend
 
-Function BL_PreserveLegacyBinaries
-  ; Retire only exact old binary names, preserving every resource/user file.
-  ; A locked file or existing backup is retained rather than forcing deletion.
+Function BL_RemoveLegacyBinaries
+  ; Remove only exact old binary names. Locked files stay in place.
   IfFileExists "$blLegacyDirectory\BetterLauncher.exe" 0 +2
     Return
-  IfFileExists "$blLegacyDirectory\$blLegacyExeName.exe.betterlauncher-backup" +2 0
-    Rename "$blLegacyDirectory\$blLegacyExeName.exe" "$blLegacyDirectory\$blLegacyExeName.exe.betterlauncher-backup"
-  IfFileExists "$blLegacyDirectory\Uninstall $blLegacyExeName.exe.betterlauncher-backup" +2 0
-    Rename "$blLegacyDirectory\Uninstall $blLegacyExeName.exe" "$blLegacyDirectory\Uninstall $blLegacyExeName.exe.betterlauncher-backup"
+  Delete "$blLegacyDirectory\$blLegacyExeName.exe"
+  Delete "$blLegacyDirectory\Uninstall $blLegacyExeName.exe"
   ClearErrors
 FunctionEnd
 
@@ -190,7 +187,7 @@ FunctionEnd
           ExecWait '$\"$PLUGINSDIR\bettermon-uninstaller.exe$\" /S /KEEP_APP_DATA --updated /${MODE} _?=$blLegacyDirectory' $blLegacyExitCode
         ${EndIf}
       ${EndIf}
-      Call BL_PreserveLegacyBinaries
+      Call BL_RemoveLegacyBinaries
     ${Else}
       ; Do not execute or modify files at an untrusted/stale path.
       !insertmacro BL_UseSafeDestination

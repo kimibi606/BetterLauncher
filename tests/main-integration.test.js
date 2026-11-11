@@ -19,12 +19,13 @@ const nodeRequire = createRequire(mainPath);
 
 function loadMain(root, safeStorage) {
   const handlers = new Map();
+  const dialog = { showMessageBox: async () => ({ response: 1 }) };
   const updater = new EventEmitter();
   updater.setFeedURL = feed => { updater.feed = feed; };
   const appPaths = { appData: root, userData: path.join(root, ".betterlauncher"), sessionData: path.join(root, "session") };
   const app = { getVersion: () => "0.3.14", getName: () => "BetterLauncher", getPath: (name) => appPaths[name], setPath: (name, value) => { appPaths[name] = value; }, requestSingleInstanceLock: () => false, on() {}, quit() {}, isPackaged: false };
   const context = vm.createContext({
-    require: (name) => name === "electron" ? { app, safeStorage, ipcMain: { handle: (channel, fn) => handlers.set(channel, fn), on() {} } }
+    require: (name) => name === "electron" ? { app, dialog, safeStorage, ipcMain: { handle: (channel, fn) => handlers.set(channel, fn), on() {} } }
       : name === "electron-updater" ? { autoUpdater: updater } : nodeRequire(name),
     __dirname: path.dirname(mainPath), process: { ...process, cwd: () => root },
     console, Buffer, URL, AbortSignal, fetch, setTimeout, clearTimeout, setInterval, clearInterval
@@ -37,7 +38,7 @@ function loadMain(root, safeStorage) {
   const trustedEvent = { sender: webContents, senderFrame: mainFrame };
   const authenticatedHandlers = new Map([...handlers].map(([channel, callback]) => [channel,
     (event, payload) => callback(Object.keys(event || {}).length ? event : trustedEvent, payload)]));
-  return { handlers: authenticatedHandlers, api: context.testApi, appPaths, webContents, context, updater };
+  return { handlers: authenticatedHandlers, api: context.testApi, appPaths, webContents, context, updater, dialog };
 }
 
 async function setup(t, safeStorage, { cacheManifests = false } = {}) {
@@ -133,6 +134,49 @@ test("a configured instance revision installs fresh and protects previous Minecr
   await fs.promises.writeFile(path.join(defaults.minecraftDirectory, "options.txt"), "new options");
   assert.equal((await sync(defaults.minecraftDirectory)).ok, true);
   assert.equal(await fs.promises.readFile(path.join(defaults.minecraftDirectory, "options.txt"), "utf8"), "new options");
+});
+
+test("clean reinstall replaces the whole managed directory only after a successful download", async (t) => {
+  const { root, output, config, handlers, dialog, context } = await setup(t);
+  const { minecraftDirectory } = await handlers.get("launcher:get-defaults")({}, {});
+  const payload = { projectId: "alpha", minecraftDirectory };
+  const reinstall = (extra = {}) => handlers.get("launcher:reinstall-modpack")({}, { ...payload, ...extra });
+  assert.equal((await handlers.get("launcher:sync-modpack")({}, payload)).ok, true);
+  const stale = path.join(minecraftDirectory, "mods", "stale.jar");
+  const world = path.join(minecraftDirectory, "saves", "world.txt");
+  fs.writeFileSync(stale, "old mod");
+  fs.mkdirSync(path.dirname(world));
+  fs.writeFileSync(world, "old world");
+  fs.writeFileSync(path.join(minecraftDirectory, "options.txt"), "fov:70");
+  assert.equal((await reinstall({ minecraftDirectory: root })).ok, false);
+
+  vm.runInContext("isLaunching = true;", context);
+  assert.equal((await reinstall()).ok, false);
+  vm.runInContext("isLaunching = false;", context);
+  dialog.showMessageBox = async () => ({ response: 0 });
+  assert.equal((await reinstall()).canceled, true);
+  dialog.showMessageBox = async () => ({ response: 1 });
+
+  const source = path.join(root, "alpha-source");
+  fs.writeFileSync(path.join(source, "mods", "shared-name.jar"), "latest content");
+  const built = await buildDistribution({ source, output, project: "alpha", version: "2" }, config);
+  const file = built.manifest.files[0];
+  const asset = path.join(path.dirname(built.manifestPath), file.url);
+  const contents = fs.readFileSync(asset);
+  fs.writeFileSync(asset, "corrupted");
+  assert.equal((await reinstall()).ok, false);
+  assert.equal(fs.readFileSync(stale, "utf8"), "old mod");
+  assert.equal(fs.readFileSync(world, "utf8"), "old world");
+
+  fs.writeFileSync(asset, contents);
+  const result = await reinstall();
+  assert.equal(result.ok, true, result.error);
+  assert.equal(result.version, "2");
+  assert.equal(fs.readFileSync(path.join(minecraftDirectory, "mods", "shared-name.jar"), "utf8"), "latest content");
+  for (const oldPath of [stale, world, path.join(minecraftDirectory, "options.txt")]) {
+    assert.equal(fs.existsSync(oldPath), false);
+  }
+  assert.deepEqual(fs.readdirSync(path.dirname(minecraftDirectory)), [path.basename(minecraftDirectory)]);
 });
 
 test("overall progress stays isolated per operation and never completes failed installs", async (t) => {

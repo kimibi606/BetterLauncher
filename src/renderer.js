@@ -72,6 +72,7 @@ let launchProgressState = { id: "", kind: "idle", percent: 0, active: false, fai
 const settingsCloseButton = document.getElementById("settingsCloseButton");
 const settingsDoneButton = document.getElementById("settingsDoneButton");
 const settingsStatus = document.getElementById("settingsStatus");
+const settingsReinstallModpack = document.getElementById("settingsReinstallModpack");
 const settingsMicrosoftAddButton = document.getElementById("settingsMicrosoftAdd");
 const settingsAccountList = document.getElementById("settingsAccountList");
 const settingsGameWidthInput = document.getElementById("settingsGameWidth");
@@ -1190,6 +1191,11 @@ function renderLaunchProgress() {
     isLauncherUpdateInstallRunning || isLauncherUpdateDownloadInProgress();
   launchProgress.hidden = !authState.signedIn || !inProgress || isLauncherUpdateGateRunning;
   const percent = Math.floor(launchProgressState.percent);
+  if (settingsReinstallModpack) {
+    settingsReinstallModpack.textContent = isModpackUpdateApplyRunning && launchProgressState.kind === "reinstall"
+      ? `재설치 중… ${percent}%`
+      : "재설치";
+  }
   launchProgress.textContent = `${percent}%`;
   launchProgress.setAttribute("aria-valuenow", String(percent));
   launchProgress.classList.toggle("is-error", launchProgressState.failed);
@@ -1452,6 +1458,10 @@ function updateLaunchButtonUi() {
     label = "업데이트";
   }
   const project = activeModpack;
+  if (settingsReinstallModpack) {
+    settingsReinstallModpack.disabled = busy || isModpackUpdateCheckRunning ||
+      !authState.signedIn || !hasActiveModpack || !project?.manifestConfigured;
+  }
   startLaunchButton.disabled = busy || (!hasLauncherUpdateReady && (!authState.signedIn || !hasActiveModpack || !project?.manifestConfigured));
   startLaunchButton.textContent = label;
   startLaunchButton.setAttribute("aria-label", label);
@@ -2445,6 +2455,29 @@ bindClick(settingsCloseButton, () => {
 
 bindClick(settingsDoneButton, async () => {
   await saveSettings(true);
+});
+
+bindClick(settingsReinstallModpack, async () => {
+  if (settingsReinstallModpack.disabled) return;
+  const payload = buildModpackSyncPayload();
+  const session = authSessionRevision;
+  beginLaunchProgress("reinstall");
+  isModpackUpdateApplyRunning = true;
+  updateLaunchButtonUi();
+  setSettingsStatus("");
+  try {
+    const result = await window.launcherApi.reinstallModpack({ ...payload, progressId: launchProgressState.id });
+    if (session !== authSessionRevision || payload.projectId !== activeProjectId || result?.canceled) return;
+    if (!result?.ok) throw new Error(result?.error || "모드팩 재설치에 실패했습니다.");
+    modpackUpdateState = { ok: true, pending: false, latestVersion: asText(result.version) };
+    setSettingsStatus("최신 모드팩을 재설치했습니다. 게임을 시작할 수 있습니다.");
+  } catch (error) {
+    if (session === authSessionRevision) setSettingsStatus(localizeStatusMessage(error.message), true);
+  } finally {
+    isModpackUpdateApplyRunning = false;
+    if (launchProgressState.kind === "reinstall") resetLaunchProgress();
+    updateLaunchButtonUi();
+  }
 });
 
 if (settingsScreen) {
