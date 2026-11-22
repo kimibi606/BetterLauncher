@@ -2,8 +2,7 @@ const fs = require("fs");
 const crypto = require("crypto");
 const os = require("os");
 const path = require("path");
-const net = require("net");
-const { spawn } = require("child_process");
+const { execFile, spawn } = require("child_process");
 const { Readable } = require("stream");
 const { pipeline } = require("stream/promises");
 const { fileURLToPath, pathToFileURL } = require("url");
@@ -13,7 +12,8 @@ const { downloadDistributionFile } = require("./lib/distribution-download");
 const { normalizePathRenames, repairModpackPaths } = require("./lib/modpack-path-renames");
 const { normalizeResourcePackDefaults, repairResourcePackSettings } = require("./lib/resourcepack-settings");
 const { describeMicrosoftLoginFailure } = require("./lib/microsoft-login-errors");
-const { MAIN_WINDOW_GEOMETRY, configureWindowGeometry } = require("./lib/window-geometry");
+const { getWindowGeometry, configureWindowGeometry } = require("./lib/window-geometry");
+const { decodeZipEntryName } = require("./lib/zip-entry-names");
 const { secureFetch } = require("./lib/secure-fetch");
 const { redactPrivateDiagnostics, sanitizeDiagnosticPayload } = require("./lib/log-security");
 const { normalizeSkinUuid, createAccountSkinService } = require("./lib/account-skin");
@@ -26,6 +26,7 @@ const operationProgressContext = new AsyncLocalStorage();
 const { app, BrowserWindow, dialog, ipcMain, screen, session, shell, safeStorage } = require("electron");
 const { autoUpdater } = require("electron-updater");
 const { Client } = require("minecraft-launcher-core");
+const Zip = require("adm-zip");
 
 const MICROSOFT_AUTH_CACHE_FILE = "microsoft_auth.json";
 const MICROSOFT_AUTH_CACHE_ENVELOPE_FORMAT = "safe-storage-v1";
@@ -54,6 +55,7 @@ const WINDOWS_TICKS_PER_SECOND = 10000000n;
 const MINECRAFT_ENTITLEMENTS_URL = "https://api.minecraftservices.com/entitlements/mcstore";
 const MINECRAFT_PROFILE_URL = "https://api.minecraftservices.com/minecraft/profile";
 const MODPACK_CONFIG_FILE = "modpack.config.json";
+const MODPACK_PRESET = "default";
 const MODPACK_STATE_DIRECTORY = ".betterlauncher";
 const LEGACY_MODPACK_STATE_DIRECTORY = ".bettermon";
 const MODPACK_STATE_FILE = "modpack-state.json";
@@ -82,8 +84,10 @@ const NETWORK_RETRY_DELAYS_MS = [800, 2000, 4000];
 const NETWORK_RETRYABLE_HTTP_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 const NETWORK_API_TIMEOUT_MS = 30000;
 const NETWORK_DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
-const LAUNCHER_USER_DATA_DIRECTORY = ".betterlauncher";
-const LEGACY_USER_DATA_DIRECTORY_CANDIDATES = [".bettermonlauncher", "bettermon-launcher", "BetterMon Launcher"];
+const LAUNCHER_USER_DATA_DIRECTORY = "BetterLauncher";
+const PREVIOUS_LAUNCHER_DATA_DIRECTORY = ".betterlauncher";
+const LEGACY_USER_DATA_DIRECTORY_CANDIDATES = [PREVIOUS_LAUNCHER_DATA_DIRECTORY, ".bettermonlauncher", "bettermon-launcher", "BetterMon Launcher"];
+const LAUNCHER_MIGRATION_MARKER = "launcher-data-migrated.json";
 const LAUNCHER_RUNTIME_DIRECTORY = "runtime";
 const LAUNCHER_SESSION_DIRECTORY = "session";
 const LAUNCHER_STATE_DIRECTORY = "state";
@@ -118,7 +122,6 @@ const ZIP_END_OF_CENTRAL_DIRECTORY_SIGNATURE = Buffer.from([0x50, 0x4b, 0x05, 0x
 const ZIP_EOCD_MIN_SIZE = 22;
 const ZIP_EOCD_MAX_COMMENT_LENGTH = 0xffff;
 const ZIP_EOCD_SCAN_PADDING_BYTES = 1024;
-const SERVER_STATUS_TIMEOUT_MS = 7000;
 const GITHUB_RELEASE_TIMEOUT_DEFAULT_MS = 7000;
 const GITHUB_RELEASE_TIMEOUT_MIN_MS = 1000;
 const GITHUB_RELEASE_TIMEOUT_MAX_MS = 60000;
@@ -245,18 +248,12 @@ function getSystemMinecraftDir() {
   return path.join(os.homedir(), ".minecraft");
 }
 
-function getLauncherUserDataPath() {
+function getLauncherRootPath() {
   try {
     return path.join(app.getPath("appData"), LAUNCHER_USER_DATA_DIRECTORY);
   } catch {
     return path.join(process.cwd(), LAUNCHER_USER_DATA_DIRECTORY);
   }
-}
-
-function getLauncherSessionDataPath(userDataPath = "") {
-  const resolvedUserDataPath =
-    typeof userDataPath === "string" && userDataPath.trim() ? userDataPath : getLauncherUserDataPath();
-  return path.join(resolvedUserDataPath, LAUNCHER_RUNTIME_DIRECTORY, LAUNCHER_SESSION_DIRECTORY);
 }
 
 function getLauncherStateRootPath() {
@@ -345,59 +342,67 @@ function movePathWithFallback(sourcePath, targetPath) {
 }
 
 function configureLauncherUserDataPath() {
-  const userDataPath = getLauncherUserDataPath();
-  try {
-    app.setPath("userData", userDataPath);
-  } catch {
-    // ignore path override failures
-  }
-
-  try {
-    app.setPath("sessionData", getLauncherSessionDataPath(userDataPath));
-  } catch {
-    // ignore path override failures
-  }
+  const userDataPath = resolveModpackTargetPath(getLauncherRootPath(), "data");
+  const sessionDataPath = resolveModpackTargetPath(userDataPath, `${LAUNCHER_RUNTIME_DIRECTORY}/${LAUNCHER_SESSION_DIRECTORY}`);
+  fs.mkdirSync(sessionDataPath, { recursive: true });
+  app.setPath("userData", userDataPath);
+  app.setPath("sessionData", sessionDataPath);
 }
 
 function getLauncherProjectDirectory(project) {
-  return getProjectDirectory(app.getPath("userData"), project.id, project.instanceRevision);
+  const fallback = getProjectDirectory(getLauncherRootPath(), project.id, project.instanceRevision);
+  try {
+    const location = readJsonFile(getProjectLocationFile(fallback)).directory;
+    if (path.isAbsolute(location) && path.basename(location) === path.basename(fallback)) return location;
+  } catch { /* A project without a saved location uses the default. */ }
+  return fallback;
 }
 
-function getDefaultMinecraftDir() {
-  return getLauncherProjectDirectory(getCurrentProject());
+function getProjectLocationFile(directory) {
+  return resolveModpackTargetPath(app.getPath("userData"), `state/locations/${path.basename(directory)}.json`);
+}
+
+function resolveGameDirectory(directory) {
+  const root = path.parse(directory).root;
+  return resolveModpackTargetPath(root, path.relative(root, directory).split(path.sep).join("/"));
 }
 
 function migrateLegacyUserDataIfNeeded() {
   const targetUserDataPath = app.getPath("userData");
-  const markerPath = path.join(targetUserDataPath, "state", "legacy-data-migrated.json");
+  const markerPath = path.join(getLauncherStateRootPath(), LAUNCHER_MIGRATION_MARKER);
   if (!targetUserDataPath || fs.existsSync(markerPath)) {
     return;
   }
 
   const appDataPath = app.getPath("appData");
-  const normalizedTarget = normalizePathForCompare(targetUserDataPath);
   for (const legacyDirectoryName of LEGACY_USER_DATA_DIRECTORY_CANDIDATES) {
     const legacyPath = path.join(appDataPath, legacyDirectoryName);
-    if (normalizePathForCompare(legacyPath) === normalizedTarget) {
-      continue;
-    }
-    if (!fs.existsSync(legacyPath)) {
-      continue;
-    }
+    const currentLayout = legacyDirectoryName === PREVIOUS_LAUNCHER_DATA_DIRECTORY;
 
     try {
-      fs.mkdirSync(path.dirname(targetUserDataPath), { recursive: true });
-      fs.mkdirSync(targetUserDataPath, { recursive: true });
-      for (const entry of fs.readdirSync(legacyPath, { withFileTypes: true })) {
-        if (["minecraft", "instances"].includes(entry.name.toLowerCase())) continue;
-        const source = path.join(legacyPath, entry.name);
-        const target = path.join(targetUserDataPath, entry.name);
-        if (entry.isDirectory()) copyDirectoryRecursiveSync(source, target);
-        else if (entry.isFile()) {
-          try { fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL); }
-          catch (error) { if (error.code !== "EEXIST") throw error; }
-        }
+      if (!fs.lstatSync(legacyPath, { throwIfNoEntry: false })?.isDirectory()) continue;
+      const entries = currentLayout
+        ? [LAUNCHER_STATE_DIRECTORY, "updater", MICROSOFT_AUTH_CACHE_FILE, "Local Storage",
+          `${LAUNCHER_RUNTIME_DIRECTORY}/${LAUNCHER_SESSION_DIRECTORY}/Local Storage`, "instances"]
+        : fs.readdirSync(legacyPath).filter(name => !["minecraft", "instances"].includes(name.toLowerCase()));
+      let copied = false;
+      for (const entry of entries) {
+        const source = resolveModpackTargetPath(legacyPath, entry);
+        if (!fs.existsSync(source)) continue;
+        const root = entry === "instances" ? getLauncherRootPath() : targetUserDataPath;
+        const target = resolveModpackTargetPath(root, entry);
+        const isStorage = path.basename(entry) === "Local Storage";
+        if (isStorage && fs.existsSync(target)) continue;
+        fs.cpSync(source, target, {
+          recursive: true,
+          force: false,
+          filter: (from, to) => !(isStorage && path.basename(from) === "LOCK") &&
+            !fs.lstatSync(from).isSymbolicLink() && !fs.lstatSync(to, { throwIfNoEntry: false })?.isSymbolicLink()
+        });
+        copied = true;
       }
+      if (!copied) continue;
+
       fs.mkdirSync(path.dirname(markerPath), { recursive: true });
       let markerHandle;
       try {
@@ -418,6 +423,7 @@ function migrateLegacyUserDataIfNeeded() {
         level: "warn",
         message: `Failed to migrate legacy launcher data: ${String(error?.message || error)}`
       });
+      if (currentLayout) return;
     }
   }
 }
@@ -525,12 +531,17 @@ function createRequestTimeoutSignal(timeoutMs) {
 }
 
 async function writeJsonFileAtomic(filePath, value, options = {}) {
+  await writeFileAtomic(filePath, JSON.stringify(value, null, 2), options);
+}
+
+async function writeFileAtomic(filePath, value, options = {}) {
   const targetPath = path.resolve(filePath);
   const tempPath = `${targetPath}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
   await fs.promises.mkdir(path.dirname(targetPath), { recursive: true });
   try {
-    await fs.promises.writeFile(tempPath, JSON.stringify(value, null, 2), {
+    await fs.promises.writeFile(tempPath, value, {
       encoding: "utf8",
+      flag: "wx",
       ...options
     });
     await fs.promises.rename(tempPath, targetPath);
@@ -609,8 +620,8 @@ function parseJvmCustomArgs(rawValue) {
   return sanitized;
 }
 
-function detectLauncherPreset() {
-  const cpuInfo = Array.isArray(os.cpus()) ? os.cpus() : [];
+function getSystemProfile() {
+  const cpuInfo = os.cpus();
   const logicalCores = cpuInfo.length;
   const totalMemoryGb = Number((os.totalmem() / (1024 ** 3)).toFixed(1));
   const cpuModel = asTrimmedText(cpuInfo[0]?.model) || "Unknown CPU";
@@ -618,12 +629,13 @@ function detectLauncherPreset() {
   return {
     logicalCores,
     totalMemoryGb,
+    javaMemoryLimitMb: getJavaMemoryLimitMb(),
     cpuModel
   };
 }
 
-function normalizeLauncherPreset() {
-  return "default";
+function getJavaMemoryLimitMb(totalBytes = os.totalmem()) {
+  return Math.max(512, Math.min(32768, Math.floor(totalBytes * 0.75 / (512 * 1024 ** 2)) * 512));
 }
 
 function isHttpUrl(value) {
@@ -694,63 +706,6 @@ function normalizeExternalOpenUrl(rawUrl, { allowHttpLoopback = true } = {}) {
 function asNonNegativeInteger(value, fallback = 0) {
   const parsed = Number.parseInt(String(value), 10);
   if (!Number.isFinite(parsed) || parsed < 0) {
-    return fallback;
-  }
-  return parsed;
-}
-
-function asNullableNonNegativeInteger(value) {
-  const parsed = Number.parseInt(String(value), 10);
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    return null;
-  }
-  return parsed;
-}
-
-function extractPlayerNamesFromPlayersPayload(playersPayload) {
-  if (!playersPayload || typeof playersPayload !== "object") {
-    return [];
-  }
-
-  const sources = [playersPayload.list, playersPayload.sample, playersPayload.names];
-  const names = [];
-  const dedupe = new Set();
-
-  for (const source of sources) {
-    if (!Array.isArray(source)) {
-      continue;
-    }
-
-    for (const item of source) {
-      const candidate =
-        typeof item === "string"
-          ? asTrimmedText(item)
-          : asTrimmedText(
-              item?.name_clean || item?.name || item?.username || item?.nick || item?.nickname || item?.id
-            );
-      if (!candidate) {
-        continue;
-      }
-
-      const key = candidate.toLowerCase();
-      if (dedupe.has(key)) {
-        continue;
-      }
-      dedupe.add(key);
-      names.push(candidate);
-
-      if (names.length >= 40) {
-        return names;
-      }
-    }
-  }
-
-  return names;
-}
-
-function asPortNumber(value, fallback = 25565) {
-  const parsed = Number.parseInt(String(value), 10);
-  if (!Number.isFinite(parsed) || parsed < 1 || parsed > 65535) {
     return fallback;
   }
   return parsed;
@@ -905,30 +860,20 @@ function computeSha256FromText(text) {
   return crypto.createHash("sha256").update(String(text || ""), "utf8").digest("hex");
 }
 
-function getSessionModpackKey(preset, modpackRoot) {
-  const normalizedRoot = path.resolve(modpackRoot);
-  const normalizedPreset = normalizeLauncherPreset(preset, "high");
-  if (process.platform === "win32") {
-    return `${getCurrentProject().id}|${normalizedPreset}|${normalizedRoot.toLowerCase()}`;
-  }
-  return `${getCurrentProject().id}|${normalizedPreset}|${normalizedRoot}`;
+function getSessionModpackKey(modpackRoot) {
+  return `${getCurrentProject().id}|${normalizePathForCompare(modpackRoot)}`;
 }
 
-function getModpackArchiveCacheKey(preset, modpackRoot) {
-  return getSessionModpackKey(preset, modpackRoot);
+function getModpackArchiveCachePath(modpackRoot) {
+  return resolveModpackTargetPath(modpackRoot, `${MODPACK_STATE_DIRECTORY}/downloads/modpack_${MODPACK_PRESET}.zip`);
 }
 
-function getModpackArchiveCachePath(modpackRoot, preset) {
-  const normalizedPreset = normalizeLauncherPreset(preset, "high");
-  return resolveModpackTargetPath(modpackRoot, `${MODPACK_STATE_DIRECTORY}/downloads/modpack_${normalizedPreset}.zip`);
+function readModpackArchiveSessionCache(modpackRoot) {
+  return modpackArchiveSessionCache.get(getSessionModpackKey(modpackRoot)) || null;
 }
 
-function readModpackArchiveSessionCache(preset, modpackRoot) {
-  return modpackArchiveSessionCache.get(getModpackArchiveCacheKey(preset, modpackRoot)) || null;
-}
-
-function writeModpackArchiveSessionCache(preset, modpackRoot, archiveSource, metadata = {}) {
-  modpackArchiveSessionCache.set(getModpackArchiveCacheKey(preset, modpackRoot), {
+function writeModpackArchiveSessionCache(modpackRoot, archiveSource, metadata = {}) {
+  modpackArchiveSessionCache.set(getSessionModpackKey(modpackRoot), {
     sourceKind: asTrimmedText(archiveSource?.kind),
     sourceKey: asTrimmedText(archiveSource?.signatureKey),
     archiveHash: normalizeSha256(metadata?.archiveHash),
@@ -1058,29 +1003,15 @@ async function writeModpackState(modpackRoot, state) {
   await writeJsonFileAtomic(statePath, { ...state, projectId: getCurrentProject().id });
 }
 
-async function computeFileSha256(filePath) {
-  return new Promise((resolve, reject) => {
-    const hash = crypto.createHash("sha256");
-    const stream = fs.createReadStream(filePath);
-    stream.on("error", reject);
-    stream.on("data", (chunk) => hash.update(chunk));
-    stream.on("end", () => resolve(hash.digest("hex")));
-  });
-}
-
-async function computeFileDigest(filePath, algorithm) {
+async function computeFileDigest(filePath, algorithm = "sha256") {
   const normalizedAlgorithm = asTrimmedText(algorithm).toLowerCase();
   if (normalizedAlgorithm !== "sha256" && normalizedAlgorithm !== "sha1" && normalizedAlgorithm !== "md5") {
     throw new Error(`Unsupported hash algorithm: ${algorithm}`);
   }
 
-  return new Promise((resolve, reject) => {
-    const hash = crypto.createHash(normalizedAlgorithm);
-    const stream = fs.createReadStream(filePath);
-    stream.on("error", reject);
-    stream.on("data", (chunk) => hash.update(chunk));
-    stream.on("end", () => resolve(hash.digest("hex")));
-  });
+  const hash = crypto.createHash(normalizedAlgorithm);
+  for await (const chunk of fs.createReadStream(filePath)) hash.update(chunk);
+  return hash.digest("hex");
 }
 
 async function getPathEntryType(targetPath) {
@@ -1630,8 +1561,7 @@ function readModpackConfig() {
   const project = getCurrentProject();
   return {
     ...(project.legacy ? config : { __configPath: config.__configPath, github: config.github }),
-    modpack: project.modpack,
-    serverStatus: project.serverStatus
+    modpack: project.modpack
   };
 }
 
@@ -1639,8 +1569,9 @@ function getProjectMinecraftVersion() { return getCurrentProject().minecraftVers
 function getProjectModLoader() { return getCurrentProject().modLoader; }
 function getProjectJavaMajor() { return getCurrentProject().javaMajor; }
 function getProjectJavaLabel() { return 'Java ' + getProjectJavaMajor(); }
-function getWindowsJavaRuntimeUrl() {
-  return 'https://api.adoptium.net/v3/binary/latest/' + getProjectJavaMajor() + '/ga/windows/x64/jre/hotspot/normal/eclipse';
+function getWindowsJavaRuntimeArchitectures(arch = process.arch, release = os.release()) {
+  if (arch !== "arm64") return ["x64"];
+  return Number(release.split(".")[2]) >= 22000 ? ["aarch64", "x64"] : ["aarch64"];
 }
 
 function registerProjectHandler(channel, callback) {
@@ -1655,12 +1586,11 @@ function registerProjectHandler(channel, callback) {
           if (root !== normalizePathForCompare(configuredRoot)) {
             throw new Error("This modpack must use its current launcher-managed Minecraft directory.");
           }
-          const userData = app.getPath("userData");
-          resolveModpackTargetPath(userData, path.relative(userData, configuredRoot).split(path.sep).join("/"));
+          resolveGameDirectory(configuredRoot);
         }
         for (const other of readProjects(config)) {
           if (other.id === project.id) continue;
-          for (const otherDirectory of [getLauncherProjectDirectory(other), getProjectDirectory(app.getPath("userData"), other.id)]) {
+          for (const otherDirectory of [getLauncherProjectDirectory(other), getProjectDirectory(getLauncherRootPath(), other.id)]) {
             const otherRoot = normalizePathForCompare(otherDirectory);
             if (root === otherRoot || root.startsWith(otherRoot + path.sep)) {
               throw new Error(`This Minecraft directory belongs to another modpack project: ${other.id}`);
@@ -1784,7 +1714,7 @@ function computeModpackSourceDigest(text) {
     (defaults ? "\nresource-pack-defaults:" + JSON.stringify(defaults) : ""));
 }
 
-function parseModpackManifest(manifestSource, preset) {
+function parseModpackManifest(manifestSource) {
   const json = manifestSource?.json;
   if (!json || typeof json !== "object") {
     throw new Error("Invalid modpack manifest JSON.");
@@ -1833,7 +1763,7 @@ function parseModpackManifest(manifestSource, preset) {
     };
   }
 
-  const parsedDistribution = parseDistributionIndex(json, preset, {
+  const parsedDistribution = parseDistributionIndex(json, {
     defaultBaseUrl: getDistributionSourceBaseUrl({
       kind: manifestSource.sourceKind,
       value: manifestSource.manifestLocation
@@ -1850,140 +1780,8 @@ function parseModpackManifest(manifestSource, preset) {
   };
 }
 
-function getObjectPathValue(source, dottedPath) {
-  if (!dottedPath) {
-    return source;
-  }
-
-  const segments = String(dottedPath)
-    .split(".")
-    .map((segment) => segment.trim())
-    .filter(Boolean);
-  let current = source;
-  for (const segment of segments) {
-    if (current === null || current === undefined) {
-      return undefined;
-    }
-
-    if (Array.isArray(current) && /^\d+$/.test(segment)) {
-      current = current[Number.parseInt(segment, 10)];
-      continue;
-    }
-
-    if (typeof current !== "object") {
-      return undefined;
-    }
-
-    current = current[segment];
-  }
-  return current;
-}
-
-function inferBooleanStatus(value, expectedOnlineValue = "") {
-  if (typeof value === "boolean") {
-    return value;
-  }
-  if (typeof value === "number") {
-    if (value === 1) {
-      return true;
-    }
-    if (value === 0) {
-      return false;
-    }
-    return null;
-  }
-
-  const normalized = asTrimmedText(value).toLowerCase();
-  if (!normalized) {
-    return null;
-  }
-
-  if (expectedOnlineValue && normalized === expectedOnlineValue) {
-    return true;
-  }
-  if (["online", "up", "ok", "running", "alive", "true", "1", "yes", "on", "normal"].includes(normalized)) {
-    return true;
-  }
-  if (["offline", "down", "error", "stopped", "false", "0", "no", "off", "maintenance"].includes(normalized)) {
-    return false;
-  }
-  return null;
-}
-
-function formatStatusDisplayValue(value) {
-  if (value === null || value === undefined) {
-    return "-";
-  }
-  if (typeof value === "boolean") {
-    return value ? "\uC628\uB77C\uC778" : "\uC624\uD504\uB77C\uC778";
-  }
-  if (typeof value === "number") {
-    return String(value);
-  }
-  const text = asTrimmedText(value);
-  if (text) {
-    return text;
-  }
-
-  if (typeof value === "object") {
-    const statusLikeValue =
-      asTrimmedText(value.status) ||
-      asTrimmedText(value.state) ||
-      asTrimmedText(value.message) ||
-      asTrimmedText(value.result);
-    if (statusLikeValue) {
-      return statusLikeValue;
-    }
-    try {
-      const serialized = JSON.stringify(value);
-      if (!serialized) {
-        return "-";
-      }
-      return serialized.length > 120 ? `${serialized.slice(0, 117)}...` : serialized;
-    } catch {
-      return "-";
-    }
-  }
-
-  return "-";
-}
-
-function readServerStatusConfig() {
-  const config = readModpackConfig();
-  const serverStatusConfig =
-    config && config.serverStatus && typeof config.serverStatus === "object" ? config.serverStatus : {};
-
-  const envMolangUrl = asTrimmedText((process.env.BETTERLAUNCHER_MOLANG_STATUS_URL || process.env.BETTERMON_MOLANG_STATUS_URL));
-  const envMolangField = asTrimmedText((process.env.BETTERLAUNCHER_MOLANG_FIELD || process.env.BETTERMON_MOLANG_FIELD));
-  const envMolangOnlineField = asTrimmedText((process.env.BETTERLAUNCHER_MOLANG_ONLINE_FIELD || process.env.BETTERMON_MOLANG_ONLINE_FIELD));
-  const envMolangOnlineValue = asTrimmedText((process.env.BETTERLAUNCHER_MOLANG_ONLINE_VALUE || process.env.BETTERMON_MOLANG_ONLINE_VALUE)).toLowerCase();
-
-  const { host, port } = getProjectServer(getCurrentProject());
-  const molangUrl = asTrimmedText(
-    envMolangUrl || serverStatusConfig.molangUrl || serverStatusConfig.molangStatusUrl || config?.molangStatusUrl
-  );
-  const molangField = asTrimmedText(envMolangField || serverStatusConfig.molangField || config?.molangField);
-  const molangOnlineField = asTrimmedText(
-    envMolangOnlineField || serverStatusConfig.molangOnlineField || config?.molangOnlineField
-  );
-  const molangOnlineValue = asTrimmedText(
-    envMolangOnlineValue || serverStatusConfig.molangOnlineValue || config?.molangOnlineValue
-  ).toLowerCase();
-
-  return {
-    host,
-    port,
-    molangUrl,
-    molangField,
-    molangOnlineField,
-    molangOnlineValue
-  };
-}
-
 function buildAutoConnectTarget() {
-  const config = readServerStatusConfig();
-  const host = asTrimmedText(config.host);
-  const port = asPortNumber(config.port, 25565);
+  const { host, port } = getProjectServer(getCurrentProject());
   if (!host) {
     return {
       ok: false,
@@ -2002,293 +1800,12 @@ function buildAutoConnectTarget() {
   };
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = SERVER_STATUS_TIMEOUT_MS) {
+async function fetchWithTimeout(url, options, timeoutMs) {
   return secureFetch(url, {
     cache: "no-store",
     ...options,
     signal: createRequestTimeoutSignal(timeoutMs)
   }, { allowHttpLoopback: !app.isPackaged });
-}
-
-function writeMinecraftVarInt(value) {
-  const bytes = [];
-  let current = Number(value) >>> 0;
-  do {
-    let temp = current & 0x7f;
-    current >>>= 7;
-    if (current !== 0) {
-      temp |= 0x80;
-    }
-    bytes.push(temp);
-  } while (current !== 0);
-  return Buffer.from(bytes);
-}
-
-function readMinecraftVarInt(buffer, offset = 0) {
-  let value = 0;
-  let position = 0;
-
-  for (let index = offset; index < buffer.length; index += 1) {
-    const current = buffer[index];
-    value |= (current & 0x7f) << (7 * position);
-    position += 1;
-
-    if ((current & 0x80) !== 0x80) {
-      return {
-        value,
-        size: index - offset + 1
-      };
-    }
-
-    if (position > 5) {
-      throw new Error("Minecraft status response contained an invalid VarInt.");
-    }
-  }
-
-  return null;
-}
-
-function writeMinecraftString(value) {
-  const content = Buffer.from(asTrimmedText(value), "utf8");
-  return Buffer.concat([writeMinecraftVarInt(content.length), content]);
-}
-
-function buildMinecraftStatusPacket(packetId, payload = Buffer.alloc(0)) {
-  const body = Buffer.concat([writeMinecraftVarInt(packetId), payload]);
-  return Buffer.concat([writeMinecraftVarInt(body.length), body]);
-}
-
-function buildMinecraftStatusHandshake(host, port) {
-  const payload = Buffer.concat([
-    writeMinecraftVarInt(767),
-    writeMinecraftString(host),
-    Buffer.from([(port >> 8) & 0xff, port & 0xff]),
-    writeMinecraftVarInt(1)
-  ]);
-  return buildMinecraftStatusPacket(0, payload);
-}
-
-function parseMinecraftStatusResponse(buffer) {
-  const packetLength = readMinecraftVarInt(buffer, 0);
-  if (!packetLength || buffer.length < packetLength.size + packetLength.value) {
-    return null;
-  }
-
-  let offset = packetLength.size;
-  const packetId = readMinecraftVarInt(buffer, offset);
-  if (!packetId) {
-    return null;
-  }
-  offset += packetId.size;
-
-  if (packetId.value !== 0) {
-    throw new Error(`Unexpected Minecraft status packet id: ${packetId.value}`);
-  }
-
-  const jsonLength = readMinecraftVarInt(buffer, offset);
-  if (!jsonLength) {
-    return null;
-  }
-  offset += jsonLength.size;
-
-  const jsonEnd = offset + jsonLength.value;
-  if (buffer.length < jsonEnd) {
-    return null;
-  }
-
-  return JSON.parse(buffer.subarray(offset, jsonEnd).toString("utf8"));
-}
-
-function normalizeDirectMinecraftPlayerNames(playersPayload) {
-  const sample = Array.isArray(playersPayload?.sample) ? playersPayload.sample : [];
-  return extractPlayerNamesFromPlayersPayload({
-    sample: sample.map((entry) => ({
-      name: entry?.name,
-      id: entry?.id
-    }))
-  });
-}
-
-async function queryMinecraftServerStatusDirect(host, port) {
-  const target = `${host}:${port}`;
-  return new Promise((resolve) => {
-    const socket = net.createConnection({ host, port });
-    const chunks = [];
-    let finished = false;
-
-    const finish = (result) => {
-      if (finished) {
-        return;
-      }
-      finished = true;
-      clearTimeout(timeout);
-      socket.destroy();
-      resolve(result);
-    };
-
-    const timeout = setTimeout(() => {
-      finish({
-        address: target,
-        online: null,
-        playersOnline: null,
-        playersMax: null,
-        playerNames: [],
-        error: "Minecraft status ping timed out.",
-        source: "direct"
-      });
-    }, SERVER_STATUS_TIMEOUT_MS);
-
-    socket.on("connect", () => {
-      socket.write(buildMinecraftStatusHandshake(host, port));
-      socket.write(buildMinecraftStatusPacket(0));
-    });
-
-    socket.on("data", (chunk) => {
-      chunks.push(chunk);
-      const buffer = Buffer.concat(chunks);
-      try {
-        const parsed = parseMinecraftStatusResponse(buffer);
-        if (!parsed) {
-          return;
-        }
-        finish({
-          address: target,
-          online: true,
-          playersOnline: asNullableNonNegativeInteger(parsed?.players?.online),
-          playersMax: asNullableNonNegativeInteger(parsed?.players?.max),
-          playerNames: normalizeDirectMinecraftPlayerNames(parsed?.players),
-          error: "",
-          source: "direct"
-        });
-      } catch (error) {
-        finish({
-          address: target,
-          online: null,
-          playersOnline: null,
-          playersMax: null,
-          playerNames: [],
-          error: String(error?.message || error),
-          source: "direct"
-        });
-      }
-    });
-
-    socket.on("error", (error) => {
-      finish({
-        address: target,
-        online: null,
-        playersOnline: null,
-        playersMax: null,
-        playerNames: [],
-        error: String(error?.message || error),
-        source: "direct"
-      });
-    });
-  });
-}
-
-async function queryMinecraftServerStatus(host, port) {
-  // Private server targets must never be sent to a third-party status service.
-  return queryMinecraftServerStatusDirect(host, port);
-}
-
-async function queryMolangStatus(config) {
-  const configuredUrl = asTrimmedText(config?.molangUrl);
-  const molangUrl = configuredUrl || "https://api.minecraftservices.com/health";
-  const expectedOnlineValue = configuredUrl ? asTrimmedText(config?.molangOnlineValue).toLowerCase() : "up";
-  
-  try {
-    const response = await fetchWithTimeout(molangUrl);
-    if (!response.ok) {
-      throw new Error(`Failed to query MOJANG status (${response.status}).`);
-    };
-
-    const contentType = asTrimmedText(response.headers.get("content-type")).toLowerCase();
-    const rawBody = await response.text();
-    const parsedBody = contentType.includes("application/json")
-      ? JSON.parse(rawBody)
-      : (() => {
-          try {
-            return JSON.parse(rawBody);
-          } catch {
-            return rawBody;
-          }
-        })();
-
-    let displayValue = parsedBody;
-    if (parsedBody && typeof parsedBody === "object") {
-      const requestedFieldPath = asTrimmedText(config?.molangField);
-      const requestedPathValue = requestedFieldPath ? getObjectPathValue(parsedBody, requestedFieldPath) : undefined;
-      const statusValue = getObjectPathValue(parsedBody, "status");
-      const stateValue = getObjectPathValue(parsedBody, "state");
-      const resultValue = getObjectPathValue(parsedBody, "result");
-      displayValue =
-        requestedPathValue !== undefined
-          ? requestedPathValue
-          : statusValue !== undefined
-            ? statusValue
-            : stateValue !== undefined
-              ? stateValue
-              : resultValue !== undefined
-                ? resultValue
-                : parsedBody;
-    }
-
-    const onlineFieldPath = asTrimmedText(config?.molangOnlineField);
-    const onlineFieldValue = onlineFieldPath ? getObjectPathValue(parsedBody, onlineFieldPath) : undefined;
-    const onlineValueCandidate = onlineFieldValue !== undefined ? onlineFieldValue : displayValue;
-    const online = inferBooleanStatus(onlineValueCandidate, expectedOnlineValue);
-    const normalizedStatusText = asTrimmedText(formatStatusDisplayValue(displayValue)).toLowerCase() === "up"
-      ? "\uC815\uC0C1"
-      : formatStatusDisplayValue(displayValue);
-
-    return {
-      configured: true,
-      online,
-      statusText: normalizedStatusText || "\uD655\uC778 \uC911...",
-      error: "",
-      source: configuredUrl ? "custom" : "minecraftservices-health"
-    };
-  } catch (error) {
-    return {
-      configured: true,
-      online: null,
-      statusText: "\uD655\uC778 \uC2E4\uD328",
-      error: String(error?.message || error),
-      source: configuredUrl ? "custom" : "minecraftservices-health"
-    };
-  }
-}
-
-async function getLauncherServerStatusSnapshot() {
-  const config = readServerStatusConfig();
-  const hasServerTarget = Boolean(config.host);
-  const hasAnyConfig = hasServerTarget;
-
-  const serverStatus = hasServerTarget
-    ? await queryMinecraftServerStatus(config.host, config.port)
-      : {
-        address: "",
-        online: null,
-        playersOnline: null,
-        playersMax: null,
-        playerNames: [],
-        error: "Minecraft server host is not configured."
-      };
-  return {
-    ok: true,
-    configured: hasAnyConfig,
-    hasServerTarget,
-    updatedAt: new Date().toISOString(),
-    // The renderer only needs counts and valid player names, never connection
-    // targets, DNS/socket errors, player UUIDs or arbitrary server payloads.
-    server: {
-      online: serverStatus.online,
-      playersOnline: serverStatus.playersOnline,
-      playersMax: serverStatus.playersMax,
-      playerNames: (serverStatus.playerNames || []).filter(name => /^[A-Za-z0-9_]{1,16}$/.test(name)).slice(0, 40)
-    }
-  };
 }
 
 function getSignatureSafePath(value) {
@@ -2621,8 +2138,7 @@ function hasDistributionPayload(source) {
   );
 }
 
-function parseDistributionIndex(distributionJson, preset, options = {}) {
-  const normalizedPreset = normalizeLauncherPreset(preset, "high");
+function parseDistributionIndex(distributionJson, options = {}) {
   if (!distributionJson || typeof distributionJson !== "object") {
     throw new Error("Invalid modpack distribution format.");
   }
@@ -2630,10 +2146,10 @@ function parseDistributionIndex(distributionJson, preset, options = {}) {
   let source = null;
   let sourceKey = "";
   if (distributionJson.presets && typeof distributionJson.presets === "object") {
-    const presetSection = distributionJson.presets[normalizedPreset];
+    const presetSection = distributionJson.presets[MODPACK_PRESET];
     if (hasDistributionPayload(presetSection)) {
       source = presetSection;
-      sourceKey = `presets.${normalizedPreset}`;
+      sourceKey = `presets.${MODPACK_PRESET}`;
     }
   }
 
@@ -2643,11 +2159,11 @@ function parseDistributionIndex(distributionJson, preset, options = {}) {
       if (!id) {
         return false;
       }
-      return id === normalizedPreset || id.includes(normalizedPreset);
+      return id === MODPACK_PRESET || id.includes(MODPACK_PRESET);
     });
     if (matchedServer && typeof matchedServer === "object") {
       source = matchedServer;
-      sourceKey = `servers.${asTrimmedText(matchedServer.id || matchedServer.name || normalizedPreset)}`;
+      sourceKey = `servers.${asTrimmedText(matchedServer.id || matchedServer.name || MODPACK_PRESET)}`;
     }
   }
 
@@ -2919,7 +2435,7 @@ async function verifyDistributionModpackIntegrity(modpackRoot, state) {
   };
 }
 
-async function verifyArchiveModpackIntegrity(modpackRoot, launcherPreset, state) {
+async function verifyArchiveModpackIntegrity(modpackRoot, state) {
   const expectedArchiveSha256 = normalizeSha256(state?.archiveSha256);
   if (!expectedArchiveSha256) {
     return {
@@ -2930,7 +2446,7 @@ async function verifyArchiveModpackIntegrity(modpackRoot, launcherPreset, state)
     };
   }
 
-  const archiveCachePath = path.join(modpackRoot, MODPACK_STATE_DIRECTORY, "downloads", `modpack_${launcherPreset}.zip`);
+  const archiveCachePath = path.join(modpackRoot, MODPACK_STATE_DIRECTORY, "downloads", `modpack_${MODPACK_PRESET}.zip`);
   if (!fs.existsSync(archiveCachePath)) {
     return {
       ok: true,
@@ -2940,7 +2456,7 @@ async function verifyArchiveModpackIntegrity(modpackRoot, launcherPreset, state)
     };
   }
 
-  const actualArchiveSha256 = await computeFileSha256(archiveCachePath);
+  const actualArchiveSha256 = await computeFileDigest(archiveCachePath);
   if (actualArchiveSha256 !== expectedArchiveSha256) {
     return {
       ok: false,
@@ -2957,9 +2473,12 @@ async function verifyArchiveModpackIntegrity(modpackRoot, launcherPreset, state)
   };
 }
 
-async function verifyManifestArchiveModpackIntegrity(state) {
+async function verifyManifestArchiveModpackIntegrity(modpackRoot, state) {
   const expectedArchiveSha1 = normalizeSha1(state?.archiveSha1);
-  const archiveCachePath = asTrimmedText(state?.archiveCachePath);
+  const storedArchive = asTrimmedText(state?.archiveCachePath);
+  const archiveCachePath = storedArchive && isHttpUrl(state?.archiveSource)
+    ? resolveModpackTargetPath(modpackRoot, `${MODPACK_STATE_DIRECTORY}/downloads/${path.basename(storedArchive)}`)
+    : storedArchive;
   if (!expectedArchiveSha1 || !archiveCachePath) {
     return {
       ok: true,
@@ -2996,7 +2515,6 @@ async function verifyManifestArchiveModpackIntegrity(state) {
 }
 
 async function ensureModpackArchiveCached({
-  launcherPreset,
   modpackRoot,
   archiveSource,
   expectedSha256 = "",
@@ -3004,12 +2522,11 @@ async function ensureModpackArchiveCached({
   knownLocalFingerprint = "",
   downloadLogMessage = ""
 }) {
-  const normalizedPreset = normalizeLauncherPreset(launcherPreset, "high");
   const archiveSourceKey = asTrimmedText(archiveSource?.signatureKey);
 
   if (archiveSource.kind === "http") {
-    const cacheArchivePath = getModpackArchiveCachePath(modpackRoot, normalizedPreset);
-    const cacheEntry = readModpackArchiveSessionCache(normalizedPreset, modpackRoot);
+    const cacheArchivePath = getModpackArchiveCachePath(modpackRoot);
+    const cacheEntry = readModpackArchiveSessionCache(modpackRoot);
     let remoteFingerprint = asTrimmedText(knownRemoteFingerprint);
 
     if (!remoteFingerprint) {
@@ -3029,7 +2546,7 @@ async function ensureModpackArchiveCached({
     if (canReuseSessionCache) {
       let archiveHash = normalizeSha256(cacheEntry.archiveHash);
       if (expectedSha256 && !archiveHash) {
-        archiveHash = await computeFileSha256(cacheArchivePath);
+        archiveHash = await computeFileDigest(cacheArchivePath);
       }
       if (!expectedSha256 || archiveHash === expectedSha256) {
         return {
@@ -3055,7 +2572,7 @@ async function ensureModpackArchiveCached({
     let archiveHash = "";
     try {
       downloadInfo = await downloadFile(archiveSource.value, tempArchivePath);
-      archiveHash = await computeFileSha256(tempArchivePath);
+      archiveHash = await computeFileDigest(tempArchivePath);
       if (expectedSha256 && archiveHash !== expectedSha256) {
         throw new Error("Modpack archive SHA256 mismatch.");
       }
@@ -3071,7 +2588,7 @@ async function ensureModpackArchiveCached({
       }
     }
 
-    writeModpackArchiveSessionCache(normalizedPreset, modpackRoot, archiveSource, {
+    writeModpackArchiveSessionCache(modpackRoot, archiveSource, {
       archiveHash,
       remoteFingerprint,
       cachePath: cacheArchivePath
@@ -3093,12 +2610,12 @@ async function ensureModpackArchiveCached({
   }
 
   const localFingerprint = asTrimmedText(knownLocalFingerprint) || (await getLocalFileFingerprint(archivePath));
-  const archiveHash = await computeFileSha256(archivePath);
+  const archiveHash = await computeFileDigest(archivePath);
   if (expectedSha256 && archiveHash !== expectedSha256) {
     throw new Error("Modpack archive SHA256 mismatch.");
   }
 
-  writeModpackArchiveSessionCache(normalizedPreset, modpackRoot, archiveSource, {
+  writeModpackArchiveSessionCache(modpackRoot, archiveSource, {
     archiveHash,
     localFingerprint,
     cachePath: archivePath
@@ -3115,7 +2632,6 @@ async function ensureModpackArchiveCached({
 }
 
 async function verifyLaunchIntegrity(options) {
-  const launcherPreset = normalizeLauncherPreset(options?.launcherPreset, detectLauncherPreset().preset);
   const modpackRoot = asTrimmedText(options?.gameDirectory) || asTrimmedText(options?.minecraftDirectory);
   if (!modpackRoot) {
     return {
@@ -3141,10 +2657,10 @@ async function verifyLaunchIntegrity(options) {
     return verifyDistributionModpackIntegrity(modpackRoot, state);
   }
   if (sourceType === "archive") {
-    return verifyArchiveModpackIntegrity(modpackRoot, launcherPreset, state);
+    return verifyArchiveModpackIntegrity(modpackRoot, state);
   }
   if (sourceType === "manifest-archive" || sourceType === "github-archive") {
-    return verifyManifestArchiveModpackIntegrity(state);
+    return verifyManifestArchiveModpackIntegrity(modpackRoot, state);
   }
 
   return {
@@ -3486,7 +3002,7 @@ async function removeDistributionEntries(modpackRoot, entries) {
   return removedCount;
 }
 
-async function applyDistributionFiles(modpackRoot, files) {
+async function applyDistributionFiles(modpackRoot, files, forcePatch = false) {
   let updatedCount = 0;
   let skippedCount = 0;
 
@@ -3509,7 +3025,7 @@ async function applyDistributionFiles(modpackRoot, files) {
       reportModpackProgress(index + 1, files.length);
       continue;
     }
-    if (expectedHash && targetEntryType === "file") {
+    if (!forcePatch && expectedHash && targetEntryType === "file") {
       try {
         const currentHash = await computeFileDigest(targetPath, expectedAlgorithm);
         if (currentHash === expectedHash) {
@@ -3669,7 +3185,7 @@ async function ensureManifestArchiveCached(modpackRoot, manifest) {
   }
 }
 
-async function synchronizeModpackManifest({ launcherPreset, modpackRoot, sessionKey }) {
+async function synchronizeModpackManifest({ modpackRoot, sessionKey }) {
   sendLog({
     level: "info",
     message: "Checking modpack manifest..."
@@ -3680,7 +3196,7 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
     return null;
   }
 
-  const manifest = parseModpackManifest(manifestSource, launcherPreset);
+  const manifest = parseModpackManifest(manifestSource);
   if (manifest.minecraftVersion && manifest.minecraftVersion !== getProjectMinecraftVersion()) {
     throw new Error(
       `Modpack Minecraft version does not match launcher version: ${manifest.minecraftVersion} != ${getProjectMinecraftVersion()}`
@@ -3713,15 +3229,15 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
         message: `Applying modpack manifest files (${parsedDistribution.files.length})...`
       });
     }
-    const applyResult = await applyDistributionFiles(modpackRoot, parsedDistribution.files);
+    const applyResult = await applyDistributionFiles(modpackRoot, parsedDistribution.files, previousState?.forcePatch);
     const selection = await repairResourcePackSettings(modpackRoot, {
       defaults: parsedDistribution.resourcePackDefaults, pathRenames: parsedDistribution.pathRenames
     });
     const unchanged = applyResult.updatedCount === 0 && removedCount === 0 && renamedCount === 0 && !selection.changed;
-    const signature = `distribution:${launcherPreset}:manifest:${manifest.sourceKey}:${manifest.manifestDigest}`;
+    const signature = `distribution:${MODPACK_PRESET}:manifest:${manifest.sourceKey}:${manifest.manifestDigest}`;
     await writeModpackState(modpackRoot, {
       signature,
-      preset: launcherPreset,
+      preset: MODPACK_PRESET,
       sourceType: "distribution",
       id: manifest.id,
       version: manifest.version,
@@ -3765,7 +3281,7 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
     };
   }
 
-  if (normalizeSha1(previousState?.archiveSha1) === manifest.archive.sha1) {
+  if (!previousState?.forcePatch && normalizeSha1(previousState?.archiveSha1) === manifest.archive.sha1) {
     await writeModpackState(modpackRoot, {
       ...previousState,
       version: manifest.version,
@@ -3852,7 +3368,7 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
   const signature = `manifest-archive:${manifest.sourceKey}:${manifest.archive.sha1}`;
   await writeModpackState(modpackRoot, {
     signature,
-    preset: launcherPreset,
+    preset: MODPACK_PRESET,
     sourceType: "manifest-archive",
     id: manifest.id,
     version: manifest.version,
@@ -3890,7 +3406,7 @@ async function synchronizeModpackManifest({ launcherPreset, modpackRoot, session
   };
 }
 
-async function synchronizeModpackDistribution({ launcherPreset, modpackRoot, sessionKey, distributionSource }) {
+async function synchronizeModpackDistribution({ modpackRoot, sessionKey, distributionSource }) {
   sendLog({
     level: "info",
     message: "Checking modpack distribution..."
@@ -3904,13 +3420,13 @@ async function synchronizeModpackDistribution({ launcherPreset, modpackRoot, ses
     throw new Error(`Invalid modpack distribution JSON: ${String(error?.message || error)}`);
   }
 
-  const parsedDistribution = parseDistributionIndex(distributionJson, launcherPreset, {
+  const parsedDistribution = parseDistributionIndex(distributionJson, {
     defaultBaseUrl: getDistributionSourceBaseUrl(distributionSource)
   });
   const distributionSourceKey = asTrimmedText(distributionSource?.signatureKey);
   const distributionDigest = computeModpackSourceDigest(distributionText);
   const version = asTrimmedText(parsedDistribution.version) || distributionDigest.slice(0, 12);
-  const signature = `distribution:${launcherPreset}:${distributionSource.kind}:${distributionSourceKey}:${distributionDigest}`;
+  const signature = `distribution:${MODPACK_PRESET}:${distributionSource.kind}:${distributionSourceKey}:${distributionDigest}`;
   const renamedCount = await repairModpackPaths(modpackRoot, parsedDistribution.pathRenames);
   const previousState = readModpackState(modpackRoot);
   const previousManagedFiles = normalizeStateManagedFiles(previousState?.managedFiles);
@@ -3936,7 +3452,7 @@ async function synchronizeModpackDistribution({ launcherPreset, modpackRoot, ses
       message: `Applying modpack distribution files (${parsedDistribution.files.length})...`
     });
   }
-  const applyResult = await applyDistributionFiles(modpackRoot, parsedDistribution.files);
+  const applyResult = await applyDistributionFiles(modpackRoot, parsedDistribution.files, previousState?.forcePatch);
   const selection = await repairResourcePackSettings(modpackRoot, {
     defaults: parsedDistribution.resourcePackDefaults, pathRenames: parsedDistribution.pathRenames
   });
@@ -3944,7 +3460,7 @@ async function synchronizeModpackDistribution({ launcherPreset, modpackRoot, ses
 
   await writeModpackState(modpackRoot, {
     signature,
-    preset: launcherPreset,
+    preset: MODPACK_PRESET,
     sourceType: "distribution",
     distributionSource: distributionSource.value,
     distributionSourceKey,
@@ -3983,7 +3499,6 @@ async function synchronizeModpackDistribution({ launcherPreset, modpackRoot, ses
 }
 
 async function applyArchiveToModpack({
-  launcherPreset,
   modpackRoot,
   archiveSource,
   expectedSha256 = "",
@@ -3991,7 +3506,6 @@ async function applyArchiveToModpack({
   knownLocalFingerprint = ""
 }) {
   const cacheResult = await ensureModpackArchiveCached({
-    launcherPreset,
     modpackRoot,
     archiveSource,
     expectedSha256,
@@ -4059,17 +3573,18 @@ async function applyArchiveToModpack({
   };
 }
 
-async function synchronizeModpackArchive({ launcherPreset, modpackRoot, sessionKey, archiveSource }) {
+async function synchronizeModpackArchive({ modpackRoot, sessionKey, archiveSource }) {
   sendLog({
     level: "info",
     message: "Checking modpack archive..."
   });
 
-  const expectedSha256 = getModpackArchiveSha256(launcherPreset);
+  const expectedSha256 = getModpackArchiveSha256();
   const archiveSourceKey = asTrimmedText(archiveSource?.signatureKey);
   const state = readModpackState(modpackRoot);
   const stateMatchesSource =
     Boolean(state) &&
+    !state.forcePatch &&
     asTrimmedText(state?.sourceType) === "archive" &&
     asTrimmedText(state?.archiveSourceKey) === archiveSourceKey;
   const expectedShaMatchesState = !expectedSha256 || asTrimmedText(state?.archiveSha256) === expectedSha256;
@@ -4110,7 +3625,6 @@ async function synchronizeModpackArchive({ launcherPreset, modpackRoot, sessionK
   }
 
   const result = await applyArchiveToModpack({
-    launcherPreset,
     modpackRoot,
     archiveSource,
     expectedSha256,
@@ -4118,11 +3632,11 @@ async function synchronizeModpackArchive({ launcherPreset, modpackRoot, sessionK
     knownLocalFingerprint: localFingerprint
   });
   const version = result.archiveHash.slice(0, 12);
-  const signature = `archive:${launcherPreset}:${archiveSource.kind}:${archiveSourceKey}:${result.archiveHash}`;
+  const signature = `archive:${MODPACK_PRESET}:${archiveSource.kind}:${archiveSourceKey}:${result.archiveHash}`;
 
   await writeModpackState(modpackRoot, {
     signature,
-    preset: launcherPreset,
+    preset: MODPACK_PRESET,
     sourceType: "archive",
     archiveSource: archiveSource.value,
     archiveSourceKey,
@@ -4167,12 +3681,11 @@ function isModpackTransientRemoteFailure(message) {
 }
 
 async function synchronizeModpack(options) {
-  const launcherPreset = normalizeLauncherPreset(options?.launcherPreset, detectLauncherPreset().preset);
   const modpackRoot = asTrimmedText(options?.gameDirectory) || asTrimmedText(options?.minecraftDirectory);
   if (!modpackRoot) {
     throw new Error("Modpack target directory is missing.");
   }
-  const sessionKey = getSessionModpackKey(launcherPreset, modpackRoot);
+  const sessionKey = getSessionModpackKey(modpackRoot);
   if (Boolean(options?.skipIfSessionSynced) && modpackSessionSyncedKeys.has(sessionKey)) {
     const existingState = readModpackState(modpackRoot);
     return {
@@ -4185,7 +3698,7 @@ async function synchronizeModpack(options) {
 
   const sourceFailures = [];
   try {
-    const manifestResult = await synchronizeModpackManifest({ launcherPreset, modpackRoot, sessionKey });
+    const manifestResult = await synchronizeModpackManifest({ modpackRoot, sessionKey });
     if (manifestResult) {
       return manifestResult;
     }
@@ -4193,19 +3706,19 @@ async function synchronizeModpack(options) {
     sourceFailures.push(formatModpackSourceFailure("manifest", error));
   }
 
-  const distributionSource = getModpackDistributionSource(launcherPreset);
+  const distributionSource = getModpackDistributionSource();
   if (distributionSource) {
     try {
-      return await synchronizeModpackDistribution({ launcherPreset, modpackRoot, sessionKey, distributionSource });
+      return await synchronizeModpackDistribution({ modpackRoot, sessionKey, distributionSource });
     } catch (error) {
       sourceFailures.push(formatModpackSourceFailure("distribution", error));
     }
   }
 
-  const archiveSource = getModpackArchiveSource(launcherPreset);
+  const archiveSource = getModpackArchiveSource();
   if (archiveSource) {
     try {
-      return await synchronizeModpackArchive({ launcherPreset, modpackRoot, sessionKey, archiveSource });
+      return await synchronizeModpackArchive({ modpackRoot, sessionKey, archiveSource });
     } catch (error) {
       sourceFailures.push(formatModpackSourceFailure("archive", error));
     }
@@ -4236,7 +3749,6 @@ async function synchronizeModpack(options) {
 }
 
 async function checkModpackUpdate(options) {
-  const launcherPreset = normalizeLauncherPreset(options?.launcherPreset, detectLauncherPreset().preset);
   const modpackRoot = asTrimmedText(options?.gameDirectory) || asTrimmedText(options?.minecraftDirectory);
   if (!modpackRoot) {
     throw new Error("Modpack target directory is missing.");
@@ -4260,7 +3772,7 @@ async function checkModpackUpdate(options) {
         ok: true,
         supported: true,
         pending: false,
-        preset: launcherPreset,
+        preset: MODPACK_PRESET,
         reason: "manifest-unavailable-using-existing-state",
         currentVersion: asTrimmedText(previousState?.version),
         latestVersion: asTrimmedText(previousState?.version),
@@ -4279,7 +3791,7 @@ async function checkModpackUpdate(options) {
     };
   }
 
-  const manifest = parseModpackManifest(manifestSource, launcherPreset);
+  const manifest = parseModpackManifest(manifestSource);
   if (manifest.minecraftVersion && manifest.minecraftVersion !== getProjectMinecraftVersion()) {
     throw new Error(
       `Modpack Minecraft version does not match launcher version: ${manifest.minecraftVersion} != ${getProjectMinecraftVersion()}`
@@ -4290,13 +3802,13 @@ async function checkModpackUpdate(options) {
     const currentDistributionDigest = asTrimmedText(previousState?.distributionDigest || previousState?.manifestDigest);
     const latestDistributionDigest = manifest.manifestDigest;
     const pending =
-      asTrimmedText(previousState?.sourceType).toLowerCase() !== "distribution" ||
+      previousState?.forcePatch === true || asTrimmedText(previousState?.sourceType).toLowerCase() !== "distribution" ||
       currentDistributionDigest !== latestDistributionDigest;
     return {
       ok: true,
       supported: true,
       pending,
-      preset: launcherPreset,
+      preset: MODPACK_PRESET,
       currentVersion: asTrimmedText(previousState?.version),
       latestVersion: manifest.version,
       currentDistributionDigest,
@@ -4307,13 +3819,13 @@ async function checkModpackUpdate(options) {
 
   const currentArchiveSha1 = normalizeSha1(previousState?.archiveSha1);
   const latestArchiveSha1 = manifest.archive.sha1;
-  const pending = currentArchiveSha1 !== latestArchiveSha1;
+  const pending = previousState?.forcePatch === true || currentArchiveSha1 !== latestArchiveSha1;
 
   return {
     ok: true,
     supported: true,
     pending,
-    preset: launcherPreset,
+    preset: MODPACK_PRESET,
     currentVersion: asTrimmedText(previousState?.version),
     latestVersion: manifest.version,
     currentArchiveSha1,
@@ -4324,7 +3836,6 @@ async function checkModpackUpdate(options) {
 async function runModpackSyncFromPayload(payload, options = {}) {
   const minecraftDirectory = asTrimmedText(payload?.minecraftDirectory);
   const gameDirectory = asTrimmedText(payload?.gameDirectory);
-  const launcherPreset = normalizeLauncherPreset(payload?.launcherPreset, detectLauncherPreset().preset);
 
   if (!minecraftDirectory && !gameDirectory) {
     return { ok: false, error: "Minecraft directory is required." };
@@ -4334,7 +3845,6 @@ async function runModpackSyncFromPayload(payload, options = {}) {
   try {
     return await runModpackOperationExclusive(modpackRoot, async () => {
       const result = await synchronizeModpack({
-        launcherPreset,
         minecraftDirectory,
         gameDirectory,
         skipIfSessionSynced: Boolean(options?.skipIfSessionSynced)
@@ -4349,7 +3859,6 @@ async function runModpackSyncFromPayload(payload, options = {}) {
 async function runModpackUpdateCheckFromPayload(payload) {
   const minecraftDirectory = asTrimmedText(payload?.minecraftDirectory);
   const gameDirectory = asTrimmedText(payload?.gameDirectory);
-  const launcherPreset = normalizeLauncherPreset(payload?.launcherPreset, detectLauncherPreset().preset);
 
   if (!minecraftDirectory && !gameDirectory) {
     return { ok: false, error: "Minecraft directory is required." };
@@ -4359,7 +3868,6 @@ async function runModpackUpdateCheckFromPayload(payload) {
   try {
     return await runModpackOperationExclusive(modpackRoot, async () => {
       const result = await checkModpackUpdate({
-        launcherPreset,
         minecraftDirectory,
         gameDirectory
       });
@@ -4724,6 +4232,9 @@ function sendState(launching) {
 function sendOperationProgress(percent, context = operationProgressContext.getStore()) {
   if (!context?.active || !Number.isFinite(percent)) return;
   context.percent = Math.max(context.percent, Math.min(100, Math.max(0, percent)));
+  const visiblePercent = Math.floor(context.percent);
+  if (visiblePercent === context.reportedPercent) return;
+  context.reportedPercent = visiblePercent;
   sendToRenderer("launcher:progress", { id: context.id, projectId: context.projectId, percent: context.percent });
 }
 
@@ -5032,6 +4543,7 @@ function schedulePeriodicUpdateChecks() {
   }
 
   updaterPeriodicTimer = setInterval(() => {
+    if (!isMainWindowAlive() || !mainWindow.isVisible() || mainWindow.isMinimized() || isLaunching || isLaunchRequestInProgress) return;
     if (updaterState.checking || updaterState.downloading || updaterState.downloaded) {
       return;
     }
@@ -5165,6 +4677,7 @@ function setupAutoUpdater() {
 
   sendUpdaterState();
   setTimeout(() => {
+    if (updaterState.lastCheckedAt) return;
     checkForAppUpdates().catch((error) => {
       reportUpdaterFailure(error);
     });
@@ -6536,11 +6049,11 @@ function readRegisteredProfiles(minecraftDirectory) {
 
 function getBundledRuntimeRoot(minecraftDirectory) {
   getModpackStatePath(minecraftDirectory);
-  return path.join(minecraftDirectory, MODPACK_STATE_DIRECTORY, "runtime");
+  return resolveModpackTargetPath(minecraftDirectory, `${MODPACK_STATE_DIRECTORY}/runtime`);
 }
 
 function getBundledJavaHome(minecraftDirectory) {
-  return path.join(getBundledRuntimeRoot(minecraftDirectory), "java");
+  return resolveModpackTargetPath(getBundledRuntimeRoot(minecraftDirectory), "java");
 }
 
 function getBundledJavaExecutableCandidates(minecraftDirectory) {
@@ -6570,41 +6083,15 @@ function parseJavaMajorVersion(rawVersionOutput) {
 }
 
 async function detectJavaMajorVersion(javaExecutable) {
+  if (process.platform === "win32" && path.basename(javaExecutable).toLowerCase() === "javaw.exe") {
+    const consoleJava = path.join(path.dirname(javaExecutable), "java.exe");
+    if (fs.existsSync(consoleJava)) javaExecutable = consoleJava;
+  }
   return new Promise((resolve) => {
-    const child = spawn(javaExecutable, ["-version"], { windowsHide: true });
-    let output = "";
-    let finished = false;
-
-    const finalize = (major) => {
-      if (finished) {
-        return;
-      }
-      finished = true;
-      resolve(major);
-    };
-
-    const timeout = setTimeout(() => {
-      try {
-        child.kill();
-      } catch {
-        // ignore kill failures
-      }
-      finalize(0);
-    }, 5000);
-
-    child.stdout.on("data", (chunk) => {
-      output += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      output += chunk.toString();
-    });
-    child.on("error", () => {
-      clearTimeout(timeout);
-      finalize(0);
-    });
-    child.on("close", () => {
-      clearTimeout(timeout);
-      finalize(parseJavaMajorVersion(output));
+    execFile(javaExecutable, ["-XshowSettings:properties", "-version"], { windowsHide: true, timeout: 5000 }, (error, stdout, stderr) => {
+      const output = stdout + "\n" + stderr;
+      resolve(error || (process.platform === "win32" && /\bos\.arch\s*=\s*(?:x86|i[3-6]86)\b/i.test(output))
+        ? 0 : parseJavaMajorVersion(output));
     });
   });
 }
@@ -6706,79 +6193,69 @@ async function findJavaHomeInDirectory(rootDirectory) {
   return "";
 }
 
+async function extractJavaRuntimeArchive(archivePath, destination) {
+  await validateZipArchiveForExtraction(archivePath);
+  const paths = new Set();
+  let totalBytes = 0;
+  for (const entry of new Zip(archivePath).getEntries()) {
+    const relative = normalizeRelativeModpackPath(decodeZipEntryName(entry).replace(/[\\/]$/, ""));
+    const key = relative.toLowerCase();
+    totalBytes += entry.header.size;
+    if (paths.has(key) || ((entry.header.attr >>> 16) & 0xf000) === 0xa000 || totalBytes > 512 * 1024 ** 2) {
+      throw new Error("Unsafe Java runtime ZIP entry.");
+    }
+    paths.add(key);
+    const target = resolveModpackTargetPath(destination, relative);
+    if (entry.isDirectory) {
+      await fs.promises.mkdir(target, { recursive: true });
+    } else {
+      const data = entry.getData();
+      if (data.length !== entry.header.size) throw new Error("Java runtime ZIP entry size mismatch.");
+      await fs.promises.mkdir(path.dirname(target), { recursive: true });
+      await fs.promises.writeFile(target, data, { flag: "wx" });
+    }
+  }
+}
+
+async function downloadWindowsJavaRuntime(destination) {
+  const major = getProjectJavaMajor();
+  for (const arch of getWindowsJavaRuntimeArchitectures()) {
+    try {
+      const url = "https://api.adoptium.net/v3/binary/latest/" + major + "/ga/windows/" + arch + "/jre/hotspot/normal/eclipse";
+      await downloadFile(url, destination, { maxBytes: 256 * 1024 ** 2 });
+      return;
+    } catch (error) {
+      if (arch !== "aarch64" || error?.status !== 404) throw error;
+    }
+  }
+  throw new Error("이 Windows 환경용 Java " + major + "를 자동으로 내려받을 수 없습니다. 설정에서 호환되는 64비트 Java를 선택해 주세요.");
+}
+
 async function installBundledWindowsJavaRuntime(minecraftDirectory) {
   const runtimeRoot = getBundledRuntimeRoot(minecraftDirectory);
-  const downloadDirectory = path.join(runtimeRoot, "downloads");
-  const archivePath = path.join(downloadDirectory, `temurin-jre-${getProjectJavaMajor()}-windows-x64.zip`);
-  const tempArchivePath = `${archivePath}.download`;
-  const extractionDirectory = path.join(runtimeRoot, "java_extract");
   const javaHomeTarget = getBundledJavaHome(minecraftDirectory);
-
-  sendLog({
-    level: "info",
-    message: `Installing Java ${getProjectJavaMajor()} runtime for launcher instance...`
-  });
-  sendLog({
-    level: "progress",
-    message: "Downloading Java runtime..."
-  });
-
+  await fs.promises.mkdir(runtimeRoot, { recursive: true });
+  const staging = await fs.promises.mkdtemp(path.join(runtimeRoot, "java-"));
   try {
-    await downloadFile(getWindowsJavaRuntimeUrl(), tempArchivePath);
-    await fs.promises.mkdir(path.dirname(archivePath), { recursive: true });
-    if (fs.existsSync(archivePath)) {
-      await fs.promises.rm(archivePath, { force: true });
+    const archivePath = path.join(staging, "runtime.zip");
+    const extractionDirectory = path.join(staging, "unpacked");
+    sendLog({ level: "progress", message: "Downloading Java runtime..." });
+    await downloadWindowsJavaRuntime(archivePath);
+    sendLog({ level: "progress", message: "Extracting Java runtime..." });
+    await extractJavaRuntimeArchive(archivePath, extractionDirectory);
+    const extractedJavaHome = await findJavaHomeInDirectory(extractionDirectory);
+    const javaExecutable = extractedJavaHome && path.join(extractedJavaHome, "bin", "java.exe");
+    if (!javaExecutable || !isProjectJavaMajorVersion(await detectJavaMajorVersion(javaExecutable))) {
+      throw new Error("Downloaded Java runtime cannot run " + getProjectJavaLabel() + " on this Windows installation.");
     }
-    await fs.promises.rename(tempArchivePath, archivePath);
+    await fs.promises.rm(javaHomeTarget, { recursive: true, force: true });
+    await fs.promises.rename(extractedJavaHome, javaHomeTarget);
+    const installedJava = path.join(javaHomeTarget, "bin", "java.exe");
+    sendLog({ level: "info", message: "Java runtime installed: " + installedJava });
+    return installedJava;
   } finally {
-    if (fs.existsSync(tempArchivePath)) {
-      await fs.promises.rm(tempArchivePath, { force: true });
-    }
+    await fs.promises.rm(staging, { recursive: true, force: true, maxRetries: 3 });
   }
-
-  sendLog({
-    level: "progress",
-    message: "Extracting Java runtime..."
-  });
-  await fs.promises.rm(extractionDirectory, { recursive: true, force: true });
-  await fs.promises.mkdir(extractionDirectory, { recursive: true });
-  try {
-    await validateZipArchiveForExtraction(archivePath);
-  } catch (error) {
-    throw new Error(`Downloaded Java runtime ZIP is invalid or incomplete: ${String(error?.message || error)}`);
-  }
-
-  try {
-    await extractZipArchive(archivePath, extractionDirectory);
-  } catch (error) {
-    throw new Error(`Failed to extract Java runtime ZIP: ${String(error?.message || error)}`);
-  }
-
-  const extractedJavaHome = await findJavaHomeInDirectory(extractionDirectory);
-  if (!extractedJavaHome) {
-    throw new Error("Downloaded Java runtime does not contain a valid Java executable.");
-  }
-
-  await fs.promises.rm(javaHomeTarget, { recursive: true, force: true });
-  await fs.promises.mkdir(path.dirname(javaHomeTarget), { recursive: true });
-  await fs.promises.rename(extractedJavaHome, javaHomeTarget);
-  await fs.promises.rm(extractionDirectory, { recursive: true, force: true });
-
-  const javaExecutable = getBundledJavaExecutableCandidates(minecraftDirectory).find((candidate) => fs.existsSync(candidate));
-  if (!javaExecutable) {
-    throw new Error("Bundled Java runtime install completed, but java executable was not found.");
-  }
-
-  const major = await detectJavaMajorVersion(javaExecutable);
-  if (!isProjectJavaMajorVersion(major)) {
-    throw new Error(`Installed Java runtime version is ${major || "unknown"}, but ${getProjectJavaLabel()} is required.`);
-  }
-
-  sendLog({
-    level: "info",
-    message: `Java runtime installed: ${javaExecutable}`
-  });
-  return javaExecutable;
 }
 
 async function ensureJavaRuntimeInDirectory(minecraftDirectory, requestedJavaPath = "") {
@@ -6812,6 +6289,12 @@ async function ensureJavaRuntimeInDirectory(minecraftDirectory, requestedJavaPat
       level: "info",
       message: `Bundled Java runtime could not be used (version: ${bundledMajor || "unknown"}). Reinstalling ${getProjectJavaLabel()} runtime...`
     });
+  }
+
+  const javaHome = asTrimmedText(process.env.JAVA_HOME).replace(/^"(.*)"$/, "$1");
+  if (javaHome) {
+    const homeJava = path.join(javaHome, "bin", process.platform === "win32" ? "java.exe" : "java");
+    if (isProjectJavaMajorVersion(await detectJavaMajorVersion(homeJava))) return homeJava;
   }
 
   const systemJavaMajor = await detectJavaMajorVersion("java");
@@ -6978,7 +6461,7 @@ function createWindow() {
   let windowShapeLastAppliedAt = 0;
 
   mainWindow = new BrowserWindow({
-    ...MAIN_WINDOW_GEOMETRY,
+    ...getWindowGeometry(screen.getPrimaryDisplay().workArea),
     icon: APP_ICON_PATH,
     frame: false,
     thickFrame: false,
@@ -7109,6 +6592,8 @@ handleLauncherIpc("launcher:get-defaults", (_event, payload = {}) => {
     const config = readLauncherConfig() || {};
     const availableProjects = readProjects(config);
     const project = availableProjects.length ? resolveProject(config, payload?.projectId) : null;
+    const minecraftDirectory = project ? getLauncherProjectDirectory(project) : "";
+    const defaultMemory = Math.min(6144, getJavaMemoryLimitMb());
     return {
       projectId: project?.id || "",
       projects: availableProjects.map((project) => ({
@@ -7116,20 +6601,23 @@ handleLauncherIpc("launcher:get-defaults", (_event, payload = {}) => {
         minecraftVersion: project.minecraftVersion, modLoader: project.modLoader, javaMajor: project.javaMajor,
         manifestConfigured: Boolean(asTrimmedText(project.modpack.manifestUrl) || asTrimmedText(process.env.BETTERLAUNCHER_MODPACK_MANIFEST_URL)),
         minecraftDirectory: getLauncherProjectDirectory(project),
-        discordUrl: project.discordUrl || ""
+        discordUrl: project.discordUrl || "", serverConfigured: Boolean(project.server.host)
       })),
       javaMajor: project?.javaMajor || 21,
       username: asTrimmedText(microsoftAccount?.name) || "Player",
       version: project?.minecraftVersion || "",
       modLoader: project?.modLoader || "",
       versionType: "release",
-      minecraftDirectory: project ? getLauncherProjectDirectory(project) : "",
+      minecraftDirectory,
+      movedInstance: project ? minecraftDirectory !== getProjectDirectory(getLauncherRootPath(), project.id, project.instanceRevision) : false,
+      previousMinecraftDirectory: project && fs.existsSync(path.join(getLauncherStateRootPath(), LAUNCHER_MIGRATION_MARKER))
+        ? getProjectDirectory(path.join(app.getPath("appData"), PREVIOUS_LAUNCHER_DATA_DIRECTORY), project.id, project.instanceRevision) : "",
       instanceRevision: project?.instanceRevision || 0,
       systemMinecraftDirectory: getSystemMinecraftDir(),
       javaPath: "",
       jvmArgs: "",
-      ramMin: 6144,
-      ramMax: 6144
+      ramMin: defaultMemory,
+      ramMax: defaultMemory
     };
   } catch (error) {
     return { ok: false, error: String(error?.message || error) };
@@ -7153,21 +6641,7 @@ handleLauncherIpc("launcher:get-account-skin", async (_event, payload) => {
 });
 
 handleLauncherIpc("launcher:get-system-profile", () => {
-  return detectLauncherPreset();
-});
-
-registerProjectHandler("launcher:get-server-status", async () => {
-  try {
-    return await getLauncherServerStatusSnapshot();
-  } catch (error) {
-    return {
-      ok: false,
-      configured: false,
-      hasServerTarget: false,
-      updatedAt: new Date().toISOString(),
-      error: String(error?.message || error)
-    };
-  }
+  return getSystemProfile();
 });
 
 handleLauncherIpc("launcher:get-github-release", async (_event, payload = {}) => {
@@ -7340,18 +6814,116 @@ registerProjectHandler("launcher:sync-modpack", async (_, payload) => {
   return result;
 });
 
+async function moveGameDirectory(root, parent) {
+  const target = resolveGameDirectory(path.join(parent, path.basename(root)));
+  if (isPathInside(root, target) || fs.existsSync(target)) throw new Error("새 위치에 같은 이름의 폴더가 있거나 현재 폴더 안입니다.");
+  let moved = false;
+  let copied = false;
+  if (fs.existsSync(root)) {
+    try {
+      await fs.promises.rename(root, target);
+      moved = true;
+    } catch (error) {
+      if (error.code !== "EXDEV") throw error;
+      const staging = await fs.promises.mkdtemp(path.join(path.dirname(target), ".launcher-move-"));
+      try {
+        const copy = path.join(staging, path.basename(target));
+        await fs.promises.cp(root, copy, {
+          recursive: true,
+          filter(source) {
+            if (fs.lstatSync(source).isSymbolicLink()) throw new Error("연결된 폴더는 다른 드라이브로 옮길 수 없습니다.");
+            return true;
+          }
+        });
+        await fs.promises.rename(copy, target);
+        copied = true;
+      } finally {
+        await fs.promises.rm(staging, { recursive: true, force: true });
+      }
+    }
+  }
+  try {
+    await writeJsonFileAtomic(getProjectLocationFile(root), { directory: target });
+  } catch (error) {
+    if (moved) await fs.promises.rename(target, root);
+    throw error;
+  }
+  let originalRetained = false;
+  if (copied) {
+    try { await shell.trashItem(resolveGameDirectory(root)); }
+    catch { originalRetained = true; }
+  }
+  return { ok: true, minecraftDirectory: target, originalRetained };
+}
+
+registerProjectHandler("launcher:manage-game", async (_, payload) => {
+  const project = getCurrentProject();
+  const root = resolveGameDirectory(getLauncherProjectDirectory(project));
+  if (normalizePathForCompare(payload.minecraftDirectory) !== normalizePathForCompare(root)) {
+    return { ok: false, error: "런처에서 관리하는 게임 폴더만 변경할 수 있습니다." };
+  }
+  const { action } = payload;
+  if (action === "open") {
+    await fs.promises.mkdir(root, { recursive: true });
+    const error = await shell.openPath(root);
+    return error ? { ok: false, error } : { ok: true };
+  }
+  if (action === "shortcut") {
+    if (process.platform !== "win32" || !app.isPackaged) return { ok: false, error: "설치된 Windows 런처에서 바로가기를 만들 수 있습니다." };
+    const startMenu = path.join(app.getPath("appData"), "Microsoft", "Windows", "Start Menu", "Programs");
+    await fs.promises.mkdir(startMenu, { recursive: true });
+    for (const directory of [app.getPath("desktop"), startMenu]) {
+      const link = path.join(directory, `BetterLauncher - ${project.id}.lnk`);
+      if (!shell.writeShortcutLink(link, { target: process.execPath, cwd: path.dirname(process.execPath) })) {
+        throw new Error("바로가기를 만들 수 없습니다.");
+      }
+    }
+    return { ok: true };
+  }
+  if (!["move", "patch", "delete"].includes(action)) return { ok: false, error: "지원하지 않는 게임 관리 작업입니다." };
+  if (isLaunching || isLaunchRequestInProgress || isModpackReinstalling) {
+    return { ok: false, error: "게임 실행이나 모드팩 작업이 끝난 뒤 다시 시도해 주세요." };
+  }
+  isModpackReinstalling = true;
+  try {
+    return await runModpackOperationExclusive(root, async () => {
+      if (action === "move") {
+        const selected = await dialog.showOpenDialog(mainWindow, { title: "새 게임 폴더를 만들 상위 폴더 선택", properties: ["openDirectory", "createDirectory"] });
+        if (selected.canceled || !selected.filePaths[0]) return { ok: false, canceled: true };
+        return moveGameDirectory(resolveGameDirectory(root), selected.filePaths[0]);
+      }
+      if (action === "patch") {
+        const state = readModpackState(root);
+        if (state) await writeModpackState(root, { ...state, forcePatch: true });
+      } else if (fs.existsSync(root)) {
+        const { response } = await dialog.showMessageBox(mainWindow, {
+          type: "warning", title: "게임 삭제", message: "게임 폴더를 휴지통으로 보낼까요?",
+          detail: "이 폴더의 월드, 스크린샷, 게임 설정도 함께 이동합니다.",
+          buttons: ["취소", "삭제"], defaultId: 0, cancelId: 0
+        });
+        if (response !== 1) return { ok: false, canceled: true };
+        await shell.trashItem(resolveGameDirectory(root));
+      }
+      const key = getSessionModpackKey(root);
+      modpackSessionSyncedKeys.delete(key);
+      modpackArchiveSessionCache.delete(key);
+      return { ok: true };
+    });
+  } finally {
+    isModpackReinstalling = false;
+  }
+});
+
 registerProjectHandler("launcher:reinstall-modpack", async (_, payload) => {
   if (isLaunching || isLaunchRequestInProgress || isModpackReinstalling) {
     return { ok: false, error: "게임 실행 또는 모드팩 재설치가 끝난 뒤 다시 시도해 주세요." };
   }
-  const userData = app.getPath("userData");
   const root = getLauncherProjectDirectory(getCurrentProject());
-  const relativeRoot = path.relative(userData, root).split(path.sep).join("/");
   if (!payload.minecraftDirectory || payload.gameDirectory ||
       normalizePathForCompare(payload.minecraftDirectory) !== normalizePathForCompare(root)) {
     return { ok: false, error: "런처에서 관리하는 모드팩 폴더만 재설치할 수 있습니다." };
   }
-  resolveModpackTargetPath(userData, relativeRoot);
+  resolveGameDirectory(root);
 
   isModpackReinstalling = true;
   try {
@@ -7366,29 +6938,43 @@ registerProjectHandler("launcher:reinstall-modpack", async (_, payload) => {
     });
     if (response !== 1) return { ok: false, canceled: true };
     return await runModpackOperationExclusive(root, async () => {
-      resolveModpackTargetPath(userData, relativeRoot);
+      resolveGameDirectory(root);
       const parent = path.dirname(root);
       await fs.promises.mkdir(parent, { recursive: true });
       const staging = await fs.promises.mkdtemp(path.join(parent, ".reinstall-"));
-      const launcherPreset = detectLauncherPreset().preset;
-      const sessionKey = getSessionModpackKey(launcherPreset, staging);
-      const installedKey = getSessionModpackKey(launcherPreset, root);
+      const replacement = path.join(staging, "next");
+      const previous = path.join(staging, "previous");
+      const sessionKey = getSessionModpackKey(replacement);
+      const installedKey = getSessionModpackKey(root);
+      let preservePrevious = false;
       try {
         sendOperationProgress(0);
-        const result = await synchronizeModpackManifest({ launcherPreset, modpackRoot: staging, sessionKey });
+        const result = await synchronizeModpackManifest({ modpackRoot: replacement, sessionKey });
         if (!result?.ok) throw new Error("최신 모드팩을 내려받지 못했습니다.");
 
-        resolveModpackTargetPath(userData, relativeRoot);
-        resolveModpackTargetPath(userData, path.relative(userData, staging).split(path.sep).join("/"));
+        resolveGameDirectory(root);
+        resolveGameDirectory(replacement);
+        if (fs.existsSync(root)) {
+          await fs.promises.rename(root, previous);
+          preservePrevious = true;
+        }
+        try {
+          await fs.promises.rename(replacement, root);
+        } catch (error) {
+          if (preservePrevious) {
+            await fs.promises.rename(previous, root);
+            preservePrevious = false;
+          }
+          throw error;
+        }
+        preservePrevious = false;
         modpackSessionSyncedKeys.delete(installedKey);
         modpackArchiveSessionCache.delete(installedKey);
-        await fs.promises.rm(root, { recursive: true, force: true, maxRetries: 3 });
-        await fs.promises.rename(staging, root);
         sendOperationProgress(100);
         return result;
       } finally {
         modpackSessionSyncedKeys.delete(sessionKey);
-        await fs.promises.rm(staging, { recursive: true, force: true, maxRetries: 3 });
+        if (!preservePrevious) await fs.promises.rm(staging, { recursive: true, force: true, maxRetries: 3 });
       }
     });
   } finally {
@@ -7431,7 +7017,6 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
     const requestedVersion = asTrimmedText(payload?.version);
     const minecraftDirectory = asTrimmedText(payload?.minecraftDirectory);
     const gameDirectory = asTrimmedText(payload?.gameDirectory);
-    const launcherPreset = normalizeLauncherPreset(payload?.launcherPreset, detectLauncherPreset().preset);
     const requestedJavaPath = asTrimmedText(payload?.javaPath);
     const requestedJvmArgs = asTrimmedText(payload?.jvmArgs);
     const customJvmArgs = parseJvmCustomArgs(requestedJvmArgs);
@@ -7439,27 +7024,18 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
     const gameHeight = asIntegerInRange(payload?.gameHeight, 720, 240, 4320);
     const fullscreen = Boolean(payload?.fullscreen);
     const versionType = "release";
-    const ramMin = asIntegerInRange(payload?.ramMin, 6144, 512, 262144);
-    const ramMax = asIntegerInRange(payload?.ramMax, 6144, 512, 262144);
-    const systemMemoryMb = Math.max(512, Math.floor(os.totalmem() / (1024 * 1024)));
+    const memoryLimit = getJavaMemoryLimitMb();
+    const ramMax = asIntegerInRange(payload?.ramMax, Math.min(6144, memoryLimit), 512, memoryLimit);
+    const ramMin = asIntegerInRange(payload?.ramMin, Math.min(2048, ramMax), 512, ramMax);
 
     if (!minecraftDirectory) {
       return { ok: false, error: "Minecraft directory is required." };
     }
-    if (!Number.isFinite(ramMin) || !Number.isFinite(ramMax) || ramMin <= 0 || ramMax <= 0 || ramMin > ramMax) {
-      return { ok: false, error: "Memory values are invalid." };
-    }
-    if (ramMax > systemMemoryMb) {
-      return {
-        ok: false,
-        error: `Maximum memory cannot exceed installed system memory (${systemMemoryMb} MB).`
-      };
-    }
-
     sendOperationProgress(5);
     let resolvedJavaPath = "";
     try {
-      resolvedJavaPath = await ensureJavaRuntimeInDirectory(minecraftDirectory, requestedJavaPath);
+      resolvedJavaPath = await runModpackOperationExclusive(minecraftDirectory,
+        () => ensureJavaRuntimeInDirectory(minecraftDirectory, requestedJavaPath));
     } catch (error) {
       return { ok: false, error: `Java runtime preparation failed: ${String(error?.message || error)}` };
     }
@@ -7503,7 +7079,6 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
 
     sendOperationProgress(30);
     const modpackUpdateCheck = await runModpackUpdateCheckFromPayload({
-      launcherPreset,
       minecraftDirectory,
       gameDirectory
     });
@@ -7513,7 +7088,6 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
     }
     const modpackResult = await runModpackSyncFromPayload(
       {
-        launcherPreset,
         minecraftDirectory,
         gameDirectory
       },
@@ -7532,7 +7106,6 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
     let integrityResult;
     try {
       integrityResult = await verifyLaunchIntegrity({
-        launcherPreset,
         minecraftDirectory,
         gameDirectory
       });
@@ -7550,7 +7123,6 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
 
       const repairResult = await runModpackSyncFromPayload(
         {
-          launcherPreset,
           minecraftDirectory,
           gameDirectory
         },
@@ -7563,7 +7135,6 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
 
       try {
         integrityResult = await verifyLaunchIntegrity({
-          launcherPreset,
           minecraftDirectory,
           gameDirectory
         });
@@ -7709,7 +7280,23 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
     });
 
     try {
-      const autoConnectTarget = buildAutoConnectTarget();
+      const project = getCurrentProject();
+      if (project.server?.host && (typeof payload.addServer === "boolean" || typeof payload.serverResourcePack === "boolean")) {
+        try {
+          const { MAX_SERVER_LIST_BYTES, updateGameServers } = require("./lib/game-servers");
+          const file = resolveModpackTargetPath(gameDirectory || minecraftDirectory, "servers.dat");
+          let data;
+          if (fs.existsSync(file)) {
+            if ((await fs.promises.stat(file)).size > MAX_SERVER_LIST_BYTES) throw new Error("Minecraft server list is too large.");
+            data = await fs.promises.readFile(file);
+          }
+          const updated = updateGameServers(data, project, payload);
+          if (updated) await writeFileAtomic(file, updated);
+        } catch (error) {
+          sendLog({ level: "warn", message: `게임의 서버 목록을 갱신하지 못했습니다. (${String(error?.message || error)})` });
+        }
+      }
+      const autoConnectTarget = payload.autoConnect === false ? { ok: false } : buildAutoConnectTarget();
       if (autoConnectTarget.ok) {
         sendLog({
           level: "info",
@@ -7727,7 +7314,7 @@ registerProjectHandler("launcher:launch", async (_, payload) => {
         root: minecraftDirectory,
         timeout: NETWORK_API_TIMEOUT_MS,
         version: launchVersionConfig,
-        ...buildProjectConnectionOptions(getCurrentProject()),
+        ...(autoConnectTarget.ok ? buildProjectConnectionOptions(project) : {}),
         ...(customJvmArgs.length > 0 ? { customArgs: customJvmArgs } : {}),
         memory: {
           min: `${ramMin}M`,

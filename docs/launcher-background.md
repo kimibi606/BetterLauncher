@@ -1,19 +1,11 @@
 # 공용 런처 배경
 
-파일: `src/assets/launcher-background.png`
+배경 파일은 `src/assets/launcher-background.webp`입니다.
 
-로그인, 모드팩 선택, 실행 화면에서 공유하는 배경입니다. 특정 모드팩의 캐릭터나 로고 없이 산과 숲, 안개가 있는 블록 풍경으로 만들었습니다. 기존 `background_high.png`, `background_low.png`를 대체합니다.
+로그인, 모드팩 선택, 실행 화면에서 공유합니다. 왼쪽의 햇빛 드는 푸른 숲이 공터를 지나 오른쪽의 고목과 잿빛 안개로 이어집니다.
 
-2026-10-09에 내장 image_gen 도구로 생성했습니다. 최종 생성 프롬프트:
+2026-11-23에 내장 이미지 생성 도구로 제작했습니다.
 
 ```text
-Use case: stylized-concept
-Asset type: shared background texture for a desktop Minecraft modpack launcher, wide 16:9 wallpaper
-Primary request: a calm, generic voxel landscape suitable for many different modpacks.
-Scene/backdrop: layered blocky mountains, a quiet pine forest and a broad misty valley at blue hour.
-Style/medium: polished atmospheric voxel environment illustration, subtle block textures, restrained detail.
-Composition/framing: wide panoramic landscape, spacious low-detail sky and mist across the middle so interface cards remain readable; landscape silhouettes near the lower edges.
-Lighting/mood: soft diffuse dusk light, tranquil, low contrast.
-Color palette: muted slate blue, deep teal and desaturated forest green.
-Constraints: environment only; no people, creatures, buildings, game-specific characters, text, logos or watermarks. This is a background image, not a UI mockup. Keep the central area visually quiet.
+Edit the provided 16:9 forest wallpaper in place. Preserve the image's framing, painted anime background style, central glade, and the original left half with its green moss-covered trunk, glowing foliage, and warm shafts of sunlight. Transform the entire right half into a decaying forest: the matching foreground trunk is blackened and hollow, bare gnarled limbs reach inward, scattered dead brown leaves, rot and cracked roots with small fungi, layered gray-brown dead trees in cold slate mist. Make the decay unmistakable on the right, with enough midtone detail that it stays readable behind a launcher overlay. Blend the two halves organically near the midpoint through shared ground, canopy, depth and pale fog, as if life fades into rot across one continuous woodland. No hard vertical split. Leave the clearing open in the center. Match the original full-bleed framing and aspect ratio. No subjects, text, logos, controls or borders.
 ```

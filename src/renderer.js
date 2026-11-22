@@ -1,6 +1,8 @@
 const STARTUP_MIN_DURATION_MS = 1200;
 const STARTUP_FADE_DURATION_MS = 420;
 const STARTUP_SETTINGS_PROGRESS = 8;
+const STARTUP_UPDATE_PROGRESS_START = 14;
+const STARTUP_UPDATE_PROGRESS_DONE = 20;
 const STARTUP_RUNTIME_PROGRESS_START = 24;
 const STARTUP_RUNTIME_JAVA_DOWNLOAD_PROGRESS = 32;
 const STARTUP_RUNTIME_JAVA_EXTRACT_PROGRESS = 38;
@@ -10,9 +12,8 @@ const STARTUP_MODPACK_PROGRESS_DONE = 88;
 const STARTUP_FINALIZING_PROGRESS = 96;
 const STARTUP_COMPLETE_PROGRESS = 100;
 const LAUNCH_LOG_CAPTURE_MS = 45000;
-const PLAYER_COUNT_REFRESH_MS = 15000;
 const MODPACK_UPDATE_REFRESH_MS = 60000;
-const JAVA_RAM_MIN_MB = 6144;
+const JAVA_RAM_MIN_MB = 512;
 const JAVA_RAM_STEP_MB = 512;
 const JAVA_PATH_AUTO_SELECT_PLACEHOLDERS = new Set(["java", "java.exe", "javaw", "javaw.exe"]);
 const LEGACY_SETTINGS_STORAGE_KEY = "bettermon.launcher.settings.v1";
@@ -24,13 +25,14 @@ const DEFAULT_SETTINGS = {
   gameWidth: 1280,
   gameHeight: 720,
   fullscreen: false,
-  launchDetached: false,
+  serverAutoConnect: true,
+  serverResourcePack: false,
+  addServer: false,
   minecraftDirectory: "",
   selectedProfile: "",
   javaPath: "",
   jvmArgs: "",
-  ramMin: JAVA_RAM_MIN_MB,
-  ramMax: JAVA_RAM_MIN_MB,
+  ramMax: 6144,
   dataDirectory: "",
 };
 
@@ -45,18 +47,16 @@ const gateAuthStatus = document.getElementById("gateAuthStatus");
 const windowCloseButton = document.getElementById("windowClose");
 const startupOverlay = document.getElementById("startupOverlay");
 const startupStatus = document.getElementById("startupStatus");
-const startupProgressTrack = document.getElementById("startupProgressTrack");
 const startupProgressBar = document.getElementById("startupProgressBar");
 const startupProgressText = document.getElementById("startupProgressText");
 const accountModelPanel = document.getElementById("accountModelPanel");
 const accountModelImage = document.getElementById("accountModelImage");
 const accountModelName = document.getElementById("accountModelName");
-const playerCountPanel = document.getElementById("playerCountPanel");
-const playerCountValue = document.getElementById("playerCountValue");
-const playerCountTooltip = document.getElementById("playerCountTooltip");
 const discordButton = document.getElementById("discordButton");
 const settingsButton = document.getElementById("settingsButton");
 const startLaunchButton = document.getElementById("startLaunchButton");
+const startLaunchLabel = document.getElementById("startLaunchLabel");
+const startLaunchCaption = document.getElementById("startLaunchCaption");
 const externalMedia = document.getElementById("externalMedia");
 let activeModpack = null;
 let activeProjectId = "";
@@ -65,6 +65,9 @@ let authSessionRevision = 0;
 let isModpackPreparing = false;
 let hasActiveModpack = false;
 const launchProgress = document.getElementById("launchProgress");
+const launchProgressText = document.getElementById("launchProgressText");
+const launchLoading = document.getElementById("launchLoading");
+const launchLoadingStatus = document.getElementById("launchLoadingStatus");
 let launchStatusMessage = "";
 let launchStatusIsError = false;
 let progressSequence = 0;
@@ -78,14 +81,13 @@ const settingsAccountList = document.getElementById("settingsAccountList");
 const settingsGameWidthInput = document.getElementById("settingsGameWidth");
 const settingsGameHeightInput = document.getElementById("settingsGameHeight");
 const settingsFullscreenInput = document.getElementById("settingsFullscreen");
-const settingsLaunchDetachedInput = document.getElementById("settingsLaunchDetached");
+const settingsGameDirectory = document.getElementById("settingsGameDirectory");
+const gameActions = [...document.querySelectorAll("[data-game-action]")];
 const settingsProfileSelect = document.getElementById("settingsProfileSelect");
 const settingsJavaPathInput = document.getElementById("settingsJavaPath");
 const settingsAutoJavaPathButton = document.getElementById("settingsAutoJavaPath");
 const settingsPickJavaPathButton = document.getElementById("settingsPickJavaPath");
-const settingsRamMinInput = document.getElementById("settingsRamMin");
 const settingsRamMaxInput = document.getElementById("settingsRamMax");
-const settingsRamMinDisplay = document.getElementById("settingsRamMinDisplay");
 const settingsRamMaxDisplay = document.getElementById("settingsRamMaxDisplay");
 const settingsJavaTotalMemory = document.getElementById("settingsJavaTotalMemory");
 const settingsJavaUsableMemory = document.getElementById("settingsJavaUsableMemory");
@@ -108,13 +110,14 @@ const SETTINGS_TEXT_INPUTS = {
   gameHeight: settingsGameHeightInput,
   javaPath: settingsJavaPathInput,
   jvmArgs: settingsJvmArgsInput,
-  ramMin: settingsRamMinInput,
   ramMax: settingsRamMaxInput
 };
 
 const SETTINGS_BOOLEAN_INPUTS = {
   fullscreen: settingsFullscreenInput,
-  launchDetached: settingsLaunchDetachedInput
+  serverAutoConnect: document.getElementById("settingsAutoConnect"),
+  serverResourcePack: document.getElementById("settingsServerResourcePack"),
+  addServer: document.getElementById("settingsAddServer")
 };
 
 const startupStartedAt = Date.now();
@@ -146,8 +149,6 @@ let isLauncherUpdateInstallRunning = false;
 let startupProgressPercent = 0;
 let startupOverlayDismissed = false;
 let launchLogCaptureUntil = 0;
-let playerCountPollTimer = null;
-let isPlayerCountRequestPending = false;
 let modpackUpdatePollTimer = null;
 let isModpackUpdateCheckRunning = false;
 let updaterSnapshot = null;
@@ -294,11 +295,10 @@ function normalizeMinecraftUuid(value) {
   return normalized;
 }
 
-const DEFAULT_SKIN_IMAGE = "./assets/default-skin.svg";
 const DEFAULT_AVATAR_IMAGE = "./assets/default-avatar.svg";
 const SKIN_CACHE_MS = 5 * 60 * 1000;
-const renderedSkinCache = new Map();
-const renderedSkinRequests = new Map();
+const accountAvatarCache = new Map();
+const accountAvatarRequests = new Map();
 const skinImageStates = new WeakMap();
 
 async function renderAccountAvatar(textureDataUrl) {
@@ -315,14 +315,10 @@ async function renderAccountAvatar(textureDataUrl) {
   return canvas.toDataURL("image/png");
 }
 
-function defaultSkinImage(imageElement) {
-  return imageElement.dataset.skinVariant === "avatar" ? DEFAULT_AVATAR_IMAGE : DEFAULT_SKIN_IMAGE;
-}
-
-async function getRenderedAccountSkin(uuid, variant = "image") {
-  const saved = renderedSkinCache.get(uuid);
-  if (saved && saved.expiresAt > Date.now()) return saved[variant];
-  if (!renderedSkinRequests.has(uuid)) {
+async function getAccountAvatar(uuid) {
+  const saved = accountAvatarCache.get(uuid);
+  if (saved && saved.expiresAt > Date.now()) return saved.image;
+  if (!accountAvatarRequests.has(uuid)) {
     const request = (async () => {
       let timer;
       try {
@@ -331,30 +327,26 @@ async function getRenderedAccountSkin(uuid, variant = "image") {
           new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Skin request timed out.")), 12000); })
         ]);
         if (!result?.ok || normalizeMinecraftUuid(result.uuid) !== uuid) throw new Error("Skin is unavailable.");
-        const skin = result.textureDataUrl ? {
-          image: await window.minecraftSkinModel.render(result.textureDataUrl, result.model),
-          avatar: await renderAccountAvatar(result.textureDataUrl)
-        } : { image: DEFAULT_SKIN_IMAGE, avatar: DEFAULT_AVATAR_IMAGE };
-        renderedSkinCache.delete(uuid);
-        renderedSkinCache.set(uuid, { ...skin, expiresAt: Date.now() + SKIN_CACHE_MS });
-        if (renderedSkinCache.size > 32) renderedSkinCache.delete(renderedSkinCache.keys().next().value);
-        return skin;
+        const image = result.textureDataUrl ? await renderAccountAvatar(result.textureDataUrl) : DEFAULT_AVATAR_IMAGE;
+        accountAvatarCache.delete(uuid);
+        accountAvatarCache.set(uuid, { image, expiresAt: Date.now() + SKIN_CACHE_MS });
+        if (accountAvatarCache.size > 32) accountAvatarCache.delete(accountAvatarCache.keys().next().value);
+        return image;
       } finally {
         clearTimeout(timer);
       }
-    })().finally(() => renderedSkinRequests.delete(uuid));
-    renderedSkinRequests.set(uuid, request);
+    })().finally(() => accountAvatarRequests.delete(uuid));
+    accountAvatarRequests.set(uuid, request);
   }
-  return (await renderedSkinRequests.get(uuid))[variant];
+  return accountAvatarRequests.get(uuid);
 }
 
-function resetMinecraftModelImage(imageElement) {
+function resetAccountAvatar(imageElement) {
   if (!imageElement) return;
   const state = skinImageStates.get(imageElement);
   if (state?.retryTimer) clearTimeout(state.retryTimer);
   skinImageStates.delete(imageElement);
-  imageElement.onerror = null;
-  imageElement.src = defaultSkinImage(imageElement);
+  imageElement.src = DEFAULT_AVATAR_IMAGE;
   imageElement.dataset.skinState = "default";
 }
 
@@ -362,23 +354,23 @@ function updateAccountModelUi() {
   if (!accountModelPanel) return;
   accountModelPanel.hidden = !authState.signedIn;
   if (!authState.signedIn) {
-    resetMinecraftModelImage(accountModelImage);
+    resetAccountAvatar(accountModelImage);
     if (accountModelName) accountModelName.textContent = "로그인 안 됨";
     return;
   }
   const displayName = asText(authState.profileName, "플레이어");
   if (accountModelName) accountModelName.textContent = displayName;
-  void loadMinecraftModelImage(accountModelImage, authState.uuid, displayName);
+  void loadAccountAvatar(accountModelImage, authState.uuid, displayName);
 }
 
-async function loadMinecraftModelImage(imageElement, uuidValue, profileNameValue) {
+async function loadAccountAvatar(imageElement, uuidValue, profileNameValue) {
   if (!imageElement) return;
   const uuid = normalizeMinecraftUuid(uuidValue);
   const displayName = asText(profileNameValue, "플레이어");
   imageElement.alt = displayName + " 스킨";
   const previous = skinImageStates.get(imageElement);
   if (previous?.uuid === uuid && (previous.loading || previous.loadedAt > Date.now() - SKIN_CACHE_MS)) return;
-  resetMinecraftModelImage(imageElement);
+  resetAccountAvatar(imageElement);
   if (!uuid) return;
   const state = { uuid, loading: true, loadedAt: 0, retryTimer: null };
   skinImageStates.set(imageElement, state);
@@ -386,18 +378,18 @@ async function loadMinecraftModelImage(imageElement, uuidValue, profileNameValue
   imageElement.title = "스킨 불러오는 중...";
   const isCurrent = () => imageElement.isConnected && skinImageStates.get(imageElement) === state;
   try {
-    const image = await getRenderedAccountSkin(uuid, imageElement.dataset.skinVariant === "avatar" ? "avatar" : "image");
+    const image = await getAccountAvatar(uuid);
     if (!isCurrent()) return;
     state.loadedAt = Date.now();
     imageElement.src = image;
-    imageElement.dataset.skinState = image === defaultSkinImage(imageElement) ? "default" : "ready";
+    imageElement.dataset.skinState = image === DEFAULT_AVATAR_IMAGE ? "default" : "ready";
     imageElement.title = displayName + " 스킨";
   } catch {
     if (!isCurrent()) return;
     imageElement.dataset.skinState = "retry";
     imageElement.title = "스킨을 불러오지 못했습니다. 잠시 후 다시 시도합니다.";
     state.retryTimer = setTimeout(() => {
-      if (isCurrent()) void loadMinecraftModelImage(imageElement, uuid, displayName);
+      if (isCurrent()) void loadAccountAvatar(imageElement, uuid, displayName);
     }, 30000);
   } finally {
     state.loading = false;
@@ -521,141 +513,8 @@ async function refreshGitHubReleaseInfo(options = {}) {
   }
 }
 
-function setPlayerCountText(text, isError = false) {
-  if (!playerCountValue) {
-    return;
-  }
-  playerCountValue.textContent = text;
-  playerCountValue.classList.toggle("is-error", isError);
-}
-
-function setPlayerCountTooltip(text) {
-  const tooltip = asText(text);
-  if (playerCountTooltip) {
-    playerCountTooltip.textContent = tooltip;
-    playerCountTooltip.classList.toggle("is-empty", !tooltip);
-  }
-  if (playerCountValue) {
-    playerCountValue.removeAttribute("title");
-  }
-  if (playerCountPanel) {
-    playerCountPanel.removeAttribute("title");
-  }
-}
-
-function buildPlayerListTooltip(server) {
-  const names = Array.isArray(server?.playerNames)
-    ? server.playerNames.map((name) => asText(name)).filter(name => /^[A-Za-z0-9_]{1,16}$/.test(name)).slice(0, 40)
-    : [];
-  const playersOnline = Number(server?.playersOnline);
-  if (names.length === 0) {
-    if (Number.isFinite(playersOnline) && playersOnline > 0) {
-      return "플레이어 목록은 서버에서 전체 공개하지 않습니다.";
-    }
-    return "";
-  }
-  if (Number.isFinite(playersOnline) && playersOnline > names.length) {
-    return `${names.join("\n")}\n외 ${playersOnline - names.length}명`;
-  }
-  return names.join("\n");
-}
-
-function applyPlayerCountUi(snapshot) {
-  if (!playerCountValue) {
-    return;
-  }
-
-  if (!snapshot || snapshot.ok === false) {
-    setPlayerCountText("\uD655\uC778 \uC2E4\uD328", true);
-    setPlayerCountTooltip("");
-    return;
-  }
-
-  const server = snapshot?.server && typeof snapshot.server === "object" ? snapshot.server : {};
-  const playersOnline = Number(server?.playersOnline);
-  const playersMax = Number(server?.playersMax);
-  const playersTooltip = buildPlayerListTooltip(server);
-
-  if (Number.isFinite(playersOnline) && playersOnline >= 0 && Number.isFinite(playersMax) && playersMax > 0) {
-    setPlayerCountText(`${playersOnline}/${playersMax}`, false);
-    setPlayerCountTooltip(playersTooltip);
-    return;
-  }
-
-  if (server.online === true && Number.isFinite(playersOnline) && playersOnline >= 0) {
-    setPlayerCountText(`${playersOnline}/?`, false);
-    setPlayerCountTooltip(playersTooltip);
-    return;
-  }
-
-  if (server.online === false) {
-    setPlayerCountText("\uC624\uD504\uB77C\uC778", true);
-    setPlayerCountTooltip("");
-    return;
-  }
-
-  if (!snapshot?.hasServerTarget) {
-    setPlayerCountText("\uC11C\uBC84 \uBBF8\uC124\uC815", true);
-    setPlayerCountTooltip("");
-    return;
-  }
-
-  setPlayerCountText("\uD655\uC778 \uC911...", false);
-  setPlayerCountTooltip("");
-}
-
-async function refreshPlayerCount() {
-  if (!window.launcherApi || typeof window.launcherApi.getServerStatus !== "function") {
-    setPlayerCountText("\uD655\uC778 \uC2E4\uD328", true);
-    setPlayerCountTooltip("");
-    return false;
-  }
-  if (isPlayerCountRequestPending) {
-    return true;
-  }
-
-  isPlayerCountRequestPending = true;
-  const requestedProjectId = activeProjectId;
-  try {
-    const snapshot = await window.launcherApi.getServerStatus({ projectId: requestedProjectId });
-    if (requestedProjectId !== activeProjectId) return false;
-    applyPlayerCountUi(snapshot);
-    return !snapshot || snapshot.ok !== false;
-  } catch {
-    if (requestedProjectId !== activeProjectId) return false;
-    setPlayerCountText("\uD655\uC778 \uC2E4\uD328", true);
-    setPlayerCountTooltip("");
-    return false;
-  } finally {
-    isPlayerCountRequestPending = false;
-  }
-}
-
-function startPlayerCountPolling() {
-  if (!hasActiveModpack || !activeProjectId) return;
-  if (!playerCountValue) {
-    return;
-  }
-
-  if (playerCountPollTimer !== null) {
-    window.clearInterval(playerCountPollTimer);
-  }
-  void refreshPlayerCount();
-  playerCountPollTimer = window.setInterval(() => {
-    void refreshPlayerCount();
-  }, PLAYER_COUNT_REFRESH_MS);
-}
-
-function stopPlayerCountPolling() {
-  if (playerCountPollTimer === null) {
-    return;
-  }
-  window.clearInterval(playerCountPollTimer);
-  playerCountPollTimer = null;
-}
-
 function canRunBackgroundModpackUpdateCheck() {
-  return authState.signedIn && hasActiveModpack && activeModpack?.manifestConfigured && !(
+  return !document.hidden && authState.signedIn && hasActiveModpack && activeModpack?.manifestConfigured && !(
     isModpackPreparing ||
     isStartupModpackSyncRunning ||
     isModpackUpdateApplyRunning ||
@@ -717,11 +576,12 @@ async function refreshModpackUpdateStatusInBackground() {
   return refreshModpackUpdateStatus({ silent: true });
 }
 
-function startModpackUpdatePolling() {
-  if (!hasActiveModpack || !activeProjectId || !activeModpack?.manifestConfigured) return;
-  if (modpackUpdatePollTimer !== null) {
-    window.clearInterval(modpackUpdatePollTimer);
+function updateModpackUpdatePolling() {
+  if (!canRunBackgroundModpackUpdateCheck()) {
+    stopModpackUpdatePolling();
+    return;
   }
+  if (modpackUpdatePollTimer !== null) return;
   modpackUpdatePollTimer = window.setInterval(() => {
     void refreshModpackUpdateStatusInBackground();
   }, MODPACK_UPDATE_REFRESH_MS);
@@ -1019,30 +879,24 @@ function isSameDirectoryPath(left, right) {
 
 function normalizeSettings(raw, defaults = DEFAULT_SETTINGS) {
   const source = raw && typeof raw === "object" ? raw : {};
-  const unifiedRamMb = asNumber(source.ramMax ?? source.ramMin, defaults.ramMax, JAVA_RAM_MIN_MB, 32768);
+  const maxMemory = getJavaMemorySliderMaxMb();
+  const unifiedRamMb = Math.min(maxMemory, asNumber(source.ramMax ?? source.ramMin, defaults.ramMax, JAVA_RAM_MIN_MB, 32768));
   const normalized = {
     gameWidth: asNumber(source.gameWidth, defaults.gameWidth, 320, 7680),
     gameHeight: asNumber(source.gameHeight, defaults.gameHeight, 240, 4320),
     fullscreen: asBoolean(source.fullscreen, defaults.fullscreen),
-    launchDetached: asBoolean(source.launchDetached, defaults.launchDetached),
+    serverAutoConnect: asBoolean(source.serverAutoConnect, defaults.serverAutoConnect),
+    serverResourcePack: asBoolean(source.serverResourcePack, defaults.serverResourcePack),
+    addServer: asBoolean(source.addServer, defaults.addServer),
     minecraftDirectory: asText(source.minecraftDirectory, defaults.minecraftDirectory),
     selectedProfile: "",
     javaPath: asText(source.javaPath, defaults.javaPath),
     jvmArgs: asText(source.jvmArgs),
-    ramMin: unifiedRamMb,
     ramMax: unifiedRamMb,
     dataDirectory: asText(source.dataDirectory, defaults.dataDirectory),
   };
 
   return normalized;
-}
-
-function formatMemoryGbTextFromMb(memoryMb) {
-  const mb = Number(memoryMb);
-  if (!Number.isFinite(mb) || mb <= 0) {
-    return "-";
-  }
-  return `${(mb / 1024).toFixed(1)}G`;
 }
 
 function formatSystemMemoryGbText(memoryGb) {
@@ -1054,14 +908,7 @@ function formatSystemMemoryGbText(memoryGb) {
 }
 
 function getJavaMemorySliderMaxMb() {
-  const totalMemoryGb = Number(detectedSystemProfile?.totalMemoryGb);
-  if (!Number.isFinite(totalMemoryGb) || totalMemoryGb <= 0) {
-    return 32768;
-  }
-  const totalMemoryMb = Math.max(1024, Math.floor(totalMemoryGb * 1024));
-  const maxAllocatableMb = Math.floor(totalMemoryMb * 0.75);
-  const steppedMax = Math.floor(maxAllocatableMb / JAVA_RAM_STEP_MB) * JAVA_RAM_STEP_MB;
-  return Math.max(JAVA_RAM_MIN_MB, Math.min(65536, steppedMax));
+  return asNumber(detectedSystemProfile?.javaMemoryLimitMb, 32768, JAVA_RAM_MIN_MB, 32768);
 }
 
 function snapMemoryValue(value, min, max, step = 128) {
@@ -1099,19 +946,15 @@ function syncJavaMemoryControls() {
 
   const unifiedValue = snapMemoryValue(settingsRamMaxInput.value, JAVA_RAM_MIN_MB, maxBound, JAVA_RAM_STEP_MB);
   settingsRamMaxInput.value = String(unifiedValue);
-  if (settingsRamMinInput) {
-    settingsRamMinInput.value = String(unifiedValue);
-  }
-
-  if (settingsRamMinDisplay) {
-    settingsRamMinDisplay.textContent = formatMemoryGbTextFromMb(unifiedValue);
-  }
+  const fill = 100 * (unifiedValue - JAVA_RAM_MIN_MB) / Math.max(1, maxBound - JAVA_RAM_MIN_MB);
+  settingsRamMaxInput.style.setProperty("--game-ram-fill", `${fill}%`);
   if (settingsRamMaxDisplay) {
-    settingsRamMaxDisplay.textContent = formatMemoryGbTextFromMb(unifiedValue);
+    settingsRamMaxDisplay.max = String(maxBound / 1024);
+    settingsRamMaxDisplay.value = String(unifiedValue / 1024);
   }
 
   const totalMemoryGb = Number(detectedSystemProfile?.totalMemoryGb);
-  const usableMemoryGb = Number.isFinite(totalMemoryGb) && totalMemoryGb > 0 ? totalMemoryGb * 0.75 : NaN;
+  const usableMemoryGb = detectedSystemProfile?.javaMemoryLimitMb / 1024;
   if (settingsJavaTotalMemory) {
     settingsJavaTotalMemory.textContent = formatSystemMemoryGbText(totalMemoryGb);
   }
@@ -1126,6 +969,11 @@ function bindJavaMemoryControlEvents() {
       syncJavaMemoryControls();
     });
   }
+  settingsRamMaxDisplay?.addEventListener("change", () => {
+    const amount = settingsRamMaxDisplay.valueAsNumber;
+    if (Number.isFinite(amount)) settingsRamMaxInput.value = String(amount * 1024);
+    syncJavaMemoryControls();
+  });
 }
 
 function readStoredSettings() {
@@ -1178,34 +1026,38 @@ function setLaunchStatus(message, isError = false) {
     startLaunchButton?.setAttribute("aria-description", launchStatusMessage);
     launchProgressState.active = false;
     launchProgressState.failed = true;
-    renderLaunchProgress();
   } else {
     startLaunchButton?.removeAttribute("title");
     startLaunchButton?.removeAttribute("aria-description");
   }
+  renderLaunchProgress();
 }
 
 function renderLaunchProgress() {
-  if (!launchProgress) return;
-  const inProgress = isLaunchRequestPending || isLauncherRunning || isModpackUpdateApplyRunning ||
-    isLauncherUpdateInstallRunning || isLauncherUpdateDownloadInProgress();
-  launchProgress.hidden = !authState.signedIn || !inProgress || isLauncherUpdateGateRunning;
+  const downloading = isLauncherUpdateDownloadInProgress();
+  const inProgress = isModpackPreparing || isStartupModpackSyncRunning || isLaunchRequestPending ||
+    isModpackUpdateApplyRunning || isLauncherUpdateInstallRunning || isLauncherUpdateGateRunning || downloading;
+  launchLoading.hidden = !authState.signedIn || !inProgress;
   const percent = Math.floor(launchProgressState.percent);
   if (settingsReinstallModpack) {
     settingsReinstallModpack.textContent = isModpackUpdateApplyRunning && launchProgressState.kind === "reinstall"
       ? `재설치 중… ${percent}%`
       : "재설치";
   }
-  launchProgress.textContent = `${percent}%`;
-  launchProgress.setAttribute("aria-valuenow", String(percent));
-  launchProgress.classList.toggle("is-error", launchProgressState.failed);
+  const showPercent = downloading ? launchProgressState.kind === "updater" :
+    !isLauncherUpdateGateRunning && !isLauncherUpdateInstallRunning;
+  launchProgress.value = showPercent ? percent : 0;
+  launchProgressText.textContent = showPercent ? `${percent}%` : "";
+  launchLoading.classList.toggle("is-error", launchProgressState.failed);
+  const status = downloading && !launchStatusIsError ? "런처 업데이트 다운로드 중" :
+    launchStatusMessage || "게임 파일 확인 중";
+  if (launchLoadingStatus.textContent !== status) launchLoadingStatus.textContent = status;
 }
 
 function beginLaunchProgress(kind) {
   launchProgressState = { id: `${Date.now()}-${++progressSequence}`, kind, percent: 0,
     active: true, failed: false, projectId: activeProjectId, session: authSessionRevision };
   setLaunchStatus("");
-  renderLaunchProgress();
 }
 
 function resetLaunchProgress() {
@@ -1262,18 +1114,8 @@ function setStartupProgress(percent, message = "", isError = false, allowDecreas
   startupProgressPercent = nextPercent;
   if (launchProgressState.kind === "prepare") setLaunchProgress(nextPercent);
 
-  if (startupProgressBar) {
-    startupProgressBar.style.width = `${nextPercent.toFixed(1)}%`;
-  }
-
-  const roundedPercent = Math.round(nextPercent);
-  if (startupProgressTrack) {
-    startupProgressTrack.setAttribute("aria-valuenow", String(roundedPercent));
-  }
-  if (startupProgressText) {
-    startupProgressText.textContent = `${roundedPercent}%`;
-    startupProgressText.classList.toggle("is-error", Boolean(isError));
-  }
+  startupProgressBar.value = nextPercent;
+  startupProgressText.textContent = `${Math.round(nextPercent)}%`;
 
   if (message) {
     setStartupStatus(message, isError);
@@ -1439,32 +1281,27 @@ function updateLaunchButtonUi() {
     isLauncherUpdateInstallRunning ||
     isLauncherUpdateGateRunning ||
     isLauncherUpdateDownloading;
-  let label = "\uAC8C\uC784 \uC2DC\uC791";
-  if (isLauncherUpdateInstallRunning) {
-    label = "\uC5C5\uB370\uC774\uD2B8 \uC801\uC6A9 \uC911...";
-  } else if (isLauncherUpdateGateRunning) {
-    label = "\uAC8C\uC784 \uC2DC\uC791";
-  } else if (hasLauncherUpdateReady) {
-    label = "\uB7F0\uCC98 \uC5C5\uB370\uC774\uD2B8";
-  } else if (isLauncherUpdateDownloading) {
-    label = "\uC5C5\uB370\uC774\uD2B8 \uB2E4\uC6B4\uB85C\uB4DC";
-  } else if (isModpackUpdateApplyRunning) {
-    label = "업데이트 중...";
-  } else if (isStartupModpackSyncRunning) {
-    label = "\uAC8C\uC784 \uC2DC\uC791";
-  } else if (isLaunchRequestPending || isLauncherRunning) {
-    label = "\uC2E4\uD589 \uC911...";
+  let label = "게임 시작";
+  let caption = "PLAY";
+  if (hasLauncherUpdateReady) {
+    label = "런처 업데이트";
+    caption = "LAUNCHER UPDATE";
+  } else if (isLauncherRunning) {
+    label = "실행 중...";
+    caption = "RUNNING";
   } else if (hasPendingModpackUpdate) {
     label = "업데이트";
+    caption = "UPDATE";
   }
   const project = activeModpack;
   if (settingsReinstallModpack) {
     settingsReinstallModpack.disabled = busy || isModpackUpdateCheckRunning ||
       !authState.signedIn || !hasActiveModpack || !project?.manifestConfigured;
   }
+  for (const button of gameActions) button.disabled = busy || !authState.signedIn || !hasActiveModpack;
   startLaunchButton.disabled = busy || (!hasLauncherUpdateReady && (!authState.signedIn || !hasActiveModpack || !project?.manifestConfigured));
-  startLaunchButton.textContent = label;
-  startLaunchButton.setAttribute("aria-label", label);
+  startLaunchLabel.textContent = label;
+  startLaunchCaption.textContent = caption;
   startLaunchButton.setAttribute("aria-busy", busy ? "true" : "false");
   renderLaunchProgress();
 }
@@ -1506,11 +1343,13 @@ function buildLaunchPayload() {
     gameWidth: Number(launcherSettings.gameWidth) || DEFAULT_SETTINGS.gameWidth,
     gameHeight: Number(launcherSettings.gameHeight) || DEFAULT_SETTINGS.gameHeight,
     fullscreen: Boolean(launcherSettings.fullscreen),
+    autoConnect: launcherSettings.serverAutoConnect,
+    serverResourcePack: launcherSettings.serverResourcePack,
+    addServer: launcherSettings.addServer,
     minecraftDirectory,
     gameDirectory: "",
     javaPath,
     jvmArgs: asText(launcherSettings.jvmArgs),
-    ramMin: Number(launcherSettings.ramMin) || DEFAULT_SETTINGS.ramMin,
     ramMax: Number(launcherSettings.ramMax) || DEFAULT_SETTINGS.ramMax
   };
 }
@@ -1530,14 +1369,14 @@ async function ensureLatestLauncherOnStartup() {
 
   isLauncherUpdateGateRunning = true;
   updateLaunchButtonUi();
-  setStartupProgress(STARTUP_SETTINGS_PROGRESS + 6, "\uB7F0\uCC98 \uC5C5\uB370\uC774\uD2B8 \uD655\uC778 \uC911...");
+  setStartupProgress(STARTUP_UPDATE_PROGRESS_START, "\uB7F0\uCC98 \uC5C5\uB370\uC774\uD2B8 \uD655\uC778 \uC911...");
 
   try {
     const result = await window.launcherApi.ensureLatestLauncherUpdate();
     if (!result?.ok) {
       const message = localizeStatusMessage(result?.error || "Launcher update check failed.");
       setStartupProgress(
-        STARTUP_SETTINGS_PROGRESS + 12,
+        STARTUP_UPDATE_PROGRESS_DONE,
         `런처 업데이트를 확인하지 못했습니다. 현재 버전으로 계속합니다. (${message})`
       );
       return;
@@ -1552,10 +1391,10 @@ async function ensureLatestLauncherOnStartup() {
     }
 
     if (result.unavailable) {
-      setStartupProgress(STARTUP_SETTINGS_PROGRESS + 12, asText(result.message));
+      setStartupProgress(STARTUP_UPDATE_PROGRESS_DONE, asText(result.message));
       return;
     }
-    setStartupProgress(STARTUP_SETTINGS_PROGRESS + 12, "\uB7F0\uCC98 \uC5C5\uB370\uC774\uD2B8 \uD655\uC778 \uC644\uB8CC.");
+    setStartupProgress(STARTUP_UPDATE_PROGRESS_DONE, "\uB7F0\uCC98 \uC5C5\uB370\uC774\uD2B8 \uD655\uC778 \uC644\uB8CC.");
   } finally {
     isLauncherUpdateGateRunning = false;
     updateLaunchButtonUi();
@@ -1664,6 +1503,7 @@ function applyLauncherState(nextState) {
     setLaunchStatus("\uB9C8\uC778\uD06C\uB798\uD504\uD2B8\uAC00 \uC885\uB8CC\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
   }
 
+  updateModpackUpdatePolling();
   updateLaunchButtonUi();
 }
 
@@ -1787,27 +1627,22 @@ async function launchGame() {
     return;
   }
 
-  if (payload.ramMin > payload.ramMax) {
-    setLaunchStatus("RAM \uC124\uC815\uAC12\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.", true);
-    return;
-  }
-
   if (modpackUpdateState?.pending) {
     if (!(await runPendingModpackUpdate())) return;
   }
 
-  beginLaunchProgress("launch");
   const launcherReady = await ensureLatestLauncherBeforeLaunch();
   if (!launcherReady) {
     return;
   }
+  beginLaunchProgress("launch");
   setLaunchProgress(5);
   const progressId = launchProgressState.id;
 
   isLaunchRequestPending = true;
   extendLaunchLogCapture();
   updateLaunchButtonUi();
-  setLaunchStatus("\uB9C8\uC778\uD06C\uB798\uD504\uD2B8 \uC2E4\uD589 \uC911...");
+  setLaunchStatus("게임 파일 확인 중");
 
   try {
     const result = await window.launcherApi.launch({ ...payload, progressId });
@@ -1833,11 +1668,13 @@ async function launchGame() {
     setLaunchStatus(message, true);
   } finally {
     isLaunchRequestPending = false;
+    updateModpackUpdatePolling();
     updateLaunchButtonUi();
   }
 }
 
 function applySettingsToInputs(settings) {
+  settingsGameDirectory.textContent = settings.minecraftDirectory;
   for (const [key, input] of Object.entries(SETTINGS_TEXT_INPUTS)) {
     if (input) {
       input.value = String(settings[key] ?? "");
@@ -1847,6 +1684,7 @@ function applySettingsToInputs(settings) {
   for (const [key, input] of Object.entries(SETTINGS_BOOLEAN_INPUTS)) {
     if (input) {
       input.checked = Boolean(settings[key]);
+      input.disabled = key !== "fullscreen" && !activeModpack?.serverConfigured;
     }
   }
 
@@ -1880,7 +1718,7 @@ function updateSettingsAccountUi() {
   if (settingsMicrosoftAddButton) {
     settingsMicrosoftAddButton.disabled = authState.loggingIn;
   }
-  renderSettingsAccountList();
+  if (currentScreen === "settings" && selectedSettingsTab === "settingsTabAccount") renderSettingsAccountList();
 }
 
 function buildSettingsAccountCard(account, { placeholder = false } = {}) {
@@ -1898,7 +1736,6 @@ function buildSettingsAccountCard(account, { placeholder = false } = {}) {
   const image = document.createElement("img");
   image.className = "settings-account-model-image";
   image.loading = "lazy";
-  image.dataset.skinVariant = "avatar";
   image.src = DEFAULT_AVATAR_IMAGE;
   image.alt = "계정 스킨";
 
@@ -1940,7 +1777,7 @@ function buildSettingsAccountCard(account, { placeholder = false } = {}) {
   card.appendChild(state);
 
   if (!placeholder) {
-    loadMinecraftModelImage(image, account?.uuid, account?.profileName);
+    loadAccountAvatar(image, account?.uuid, account?.profileName);
   }
 
   return card;
@@ -1984,6 +1821,8 @@ function selectSettingsTab(tabId) {
 
   if (targetId === "settingsTabAbout") {
     void refreshGitHubReleaseInfo();
+  } else if (targetId === "settingsTabAccount" && currentScreen === "settings") {
+    updateSettingsAccountUi();
   }
 }
 
@@ -2117,7 +1956,6 @@ async function initializeSettings() {
         ...DEFAULT_SETTINGS,
         minecraftDirectory: asText(defaults?.minecraftDirectory),
         javaPath: asText(defaults?.javaPath),
-        ramMin: Number(defaults?.ramMin) || DEFAULT_SETTINGS.ramMin,
         ramMax: Number(defaults?.ramMax) || DEFAULT_SETTINGS.ramMax,
         dataDirectory: asText(defaults?.minecraftDirectory)
       },
@@ -2128,8 +1966,19 @@ async function initializeSettings() {
   }
 
   launcherSettings = readStoredSettings();
+  const previousDirectory = asText(defaults.previousMinecraftDirectory);
+  const previousPath = normalizeDirectoryForCompare(previousDirectory);
+  if (previousPath) {
+    for (const key of ["minecraftDirectory", "dataDirectory", "javaPath"]) {
+      const value = launcherSettings[key];
+      const normalized = normalizeDirectoryForCompare(value);
+      if (normalized === previousPath || normalized.startsWith(previousPath + "/")) {
+        launcherSettings[key] = launcherDefaults.minecraftDirectory + value.slice(previousDirectory.length);
+      }
+    }
+  }
   const systemMinecraftDirectory = asText(defaults?.systemMinecraftDirectory);
-  const usingOldInstance = defaults.instanceRevision > 0 &&
+  const usingOldInstance = (defaults.instanceRevision > 0 || defaults.movedInstance) &&
     !isSameDirectoryPath(launcherSettings.minecraftDirectory, launcherDefaults.minecraftDirectory);
   if (usingOldInstance || isSameDirectoryPath(launcherSettings.minecraftDirectory, systemMinecraftDirectory)) {
     if (usingOldInstance) {
@@ -2152,7 +2001,6 @@ async function initializeSettings() {
 function updateModpackControls() {
   const project = activeModpack;
   if (externalMedia) externalMedia.hidden = !project?.discordUrl;
-  if (playerCountPanel) playerCountPanel.hidden = !project;
   if (discordButton) {
     discordButton.hidden = !project?.discordUrl;
     discordButton.setAttribute("aria-label", `${project?.name || "모드팩"} 디스코드`);
@@ -2174,8 +2022,6 @@ async function prepareModpackForSession() {
   isModpackPreparing = true;
   hasActiveModpack = true;
   modpackUpdateState = null;
-  setPlayerCountText("확인 중...", false);
-  setPlayerCountTooltip("");
   updateLaunchButtonUi();
   try {
     if (!activeModpack.manifestConfigured) {
@@ -2201,8 +2047,7 @@ async function prepareModpackForSession() {
         } else if (activeModpack.manifestConfigured && !launchStatusIsError) setLaunchProgress(100, true);
         else launchProgressState.active = false;
       }
-      startPlayerCountPolling();
-      startModpackUpdatePolling();
+      updateModpackUpdatePolling();
       if (currentScreen === "launch") startLaunchButton?.focus();
     }
     updateLaunchButtonUi();
@@ -2252,7 +2097,6 @@ function updateAuthUi() {
   if (!authState.signedIn) {
     resetLaunchProgress();
     hasActiveModpack = false;
-    stopPlayerCountPolling();
     stopModpackUpdatePolling();
     switchScreen("login");
   } else if (currentScreen === "login") {
@@ -2299,6 +2143,11 @@ function updateUpdaterUi(state) {
   if (updaterSnapshot?.enabled && updaterSnapshot.downloading) {
     if (!wasDownloading || launchProgressState.kind !== "updater") beginLaunchProgress("updater");
     setLaunchProgress(Number(updaterSnapshot.progressPercent));
+    if (isLauncherUpdateGateRunning && isStartupOverlayVisible()) {
+      const ratio = clampPercent(updaterSnapshot.progressPercent) / 100;
+      setStartupProgress(STARTUP_UPDATE_PROGRESS_START + ratio * (STARTUP_UPDATE_PROGRESS_DONE - STARTUP_UPDATE_PROGRESS_START),
+        "런처 업데이트 다운로드 중");
+    }
   } else if (launchProgressState.kind === "updater") {
     if (updaterSnapshot?.downloaded) setLaunchProgress(100, true);
     else if (updaterSnapshot?.lastError) setLaunchStatus(updaterSnapshot.lastError, true);
@@ -2432,19 +2281,6 @@ bindClick(accountModelPanel, () => {
   openSettingsScreen("settingsTabAccount");
 });
 
-if (accountModelPanel) {
-  accountModelPanel.addEventListener("keydown", (event) => {
-    if (!authState.signedIn) {
-      return;
-    }
-    if (event.key !== "Enter" && event.key !== " ") {
-      return;
-    }
-    event.preventDefault();
-    openSettingsScreen("settingsTabAccount");
-  });
-}
-
 bindClick(startLaunchButton, async () => {
   await launchGame();
 });
@@ -2456,6 +2292,46 @@ bindClick(settingsCloseButton, () => {
 bindClick(settingsDoneButton, async () => {
   await saveSettings(true);
 });
+
+for (const button of gameActions) {
+  bindClick(button, async () => {
+    if (button.disabled) return;
+    const action = button.dataset.gameAction;
+    const payload = buildModpackSyncPayload();
+    isModpackUpdateApplyRunning = true;
+    updateLaunchButtonUi();
+    setSettingsStatus("");
+    try {
+      const result = await window.launcherApi.manageGame({ ...payload, action });
+      if (result?.canceled) return;
+      if (!result?.ok) throw new Error(result?.error || "게임 파일을 관리하지 못했습니다.");
+      if (action === "move") {
+        persistSettingsSnapshot();
+        const destination = result.minecraftDirectory;
+        const javaPath = normalizeDirectoryForCompare(launcherSettings.javaPath);
+        if (javaPath.startsWith(normalizeDirectoryForCompare(payload.minecraftDirectory) + "/")) {
+          launcherSettings.javaPath = destination + launcherSettings.javaPath.slice(payload.minecraftDirectory.length);
+        }
+        launcherSettings.minecraftDirectory = launcherSettings.dataDirectory = destination;
+        launcherDefaults.minecraftDirectory = launcherDefaults.dataDirectory = destination;
+        writeStoredSettings(launcherSettings);
+        applySettingsToInputs(launcherSettings);
+        await refreshProfilesForDirectory(destination, "");
+        setSettingsStatus(result.originalRetained ? "새 위치에 복사했습니다. 원본 폴더도 남아 있습니다." : "게임 폴더를 옮겼습니다.");
+      } else if (action === "delete" || action === "patch") {
+        modpackUpdateState = { ok: true, pending: true };
+        setSettingsStatus(action === "delete" ? "게임 폴더를 휴지통으로 보냈습니다." : "다음 실행 때 모드팩을 다시 패치합니다.");
+      } else if (action === "shortcut") {
+        setSettingsStatus("바탕화면과 시작 메뉴에 바로가기를 추가했습니다.");
+      }
+    } catch (error) {
+      setSettingsStatus(localizeStatusMessage(error.message), true);
+    } finally {
+      isModpackUpdateApplyRunning = false;
+      updateLaunchButtonUi();
+    }
+  });
+}
 
 bindClick(settingsReinstallModpack, async () => {
   if (settingsReinstallModpack.disabled) return;
@@ -2693,27 +2569,28 @@ window.launcherApi.onLog((payload) => {
 });
 
 window.addEventListener("beforeunload", () => {
-  stopPlayerCountPolling();
   stopModpackUpdatePolling();
 });
+
+function applyBackgroundState() {
+  document.body.toggleAttribute("data-backgrounded", document.hidden);
+  updateModpackUpdatePolling();
+}
+
+document.addEventListener("visibilitychange", applyBackgroundState);
+applyBackgroundState();
 
 Promise.resolve()
   .then(() => {
     setStartupProgress(0, "\uB7F0\uCC98 \uC124\uC815 \uBD88\uB7EC\uC624\uB294 \uC911...", false, true);
-    const githubReleasePromise =
-      window.launcherApi && typeof window.launcherApi.getGitHubRelease === "function"
-        ? window.launcherApi.getGitHubRelease().catch(() => null)
-        : Promise.resolve(null);
     return Promise.all([
       window.launcherApi.getAuthState(),
       initializeSettings(),
-      window.launcherApi.getUpdaterState().catch(() => null),
-      githubReleasePromise
+      window.launcherApi.getUpdaterState().catch(() => null)
     ]);
   })
-  .then(async ([state, _, updaterState, githubRelease]) => {
+  .then(async ([state, _, updaterState]) => {
     applyAuthState(state);
-    applyGitHubReleaseUi(githubRelease);
     updateUpdaterUi(updaterState);
     setStartupProgress(STARTUP_SETTINGS_PROGRESS, "\uB7F0\uCC98 \uC124\uC815 \uBD88\uB7EC\uC624\uAE30 \uC644\uB8CC.");
     await ensureLatestLauncherOnStartup();

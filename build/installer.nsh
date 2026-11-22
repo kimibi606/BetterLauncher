@@ -1,6 +1,7 @@
 !include LogicLib.nsh
 !include FileFunc.nsh
 !include x64.nsh
+!include WinVer.nsh
 
 ; Keep the original installation identity so the rename remains an upgrade.
 !define /ifndef BL_LEGACY_INSTALL_KEY "Software\0e192e02-a904-5be6-bca2-04cae62ae05b"
@@ -9,6 +10,19 @@
 !define /ifndef BL_LEGACY_MACHINE_ROOT HKLM
 
 !ifndef BUILD_UNINSTALLER
+!macro customInit
+  ${If} ${AtLeastWin10}
+    ${If} ${RunningX64}
+    ${OrIf} ${IsNativeARM64}
+      Goto blSupportedPlatform
+    ${EndIf}
+  ${EndIf}
+  MessageBox MB_OK|MB_ICONSTOP "BetterLauncher requires 64-bit Windows 10 or Windows 11." /SD IDOK
+  SetErrorLevel 2
+  Quit
+  blSupportedPlatform:
+!macroend
+
 Var blLegacyName
 Var blLegacyExeName
 Var blLegacyDirectory
@@ -224,6 +238,7 @@ FunctionEnd
     !insertmacro BL_RemoveLegacy ${BL_LEGACY_USER_ROOT} currentuser
     !insertmacro BL_RemoveLegacy ${BL_LEGACY_MACHINE_ROOT} allusers
     ${If} ${RunningX64}
+    ${OrIf} ${IsNativeARM64}
       SetRegView 64
       !insertmacro BL_RemoveLegacy ${BL_LEGACY_USER_ROOT} currentuser
       !insertmacro BL_RemoveLegacy ${BL_LEGACY_MACHINE_ROOT} allusers

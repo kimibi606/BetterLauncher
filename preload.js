@@ -5,7 +5,6 @@ contextBridge.exposeInMainWorld("launcherApi", {
   getAuthState: () => ipcRenderer.invoke("launcher:get-auth-state"),
   getAccountSkin: (uuid) => ipcRenderer.invoke("launcher:get-account-skin", { uuid }),
   getSystemProfile: () => ipcRenderer.invoke("launcher:get-system-profile"),
-  getServerStatus: (payload) => ipcRenderer.invoke("launcher:get-server-status", payload),
   getGitHubRelease: (payload) => ipcRenderer.invoke("launcher:get-github-release", payload),
   getUpdaterState: () => ipcRenderer.invoke("updater:get-state"),
   ensureLatestLauncherUpdate: () => ipcRenderer.invoke("updater:ensure-latest"),
@@ -27,6 +26,7 @@ contextBridge.exposeInMainWorld("launcherApi", {
   checkModpackUpdate: (payload) => ipcRenderer.invoke("launcher:check-modpack-update", payload),
   syncModpack: (payload) => ipcRenderer.invoke("launcher:sync-modpack", payload),
   reinstallModpack: (payload) => ipcRenderer.invoke("launcher:reinstall-modpack", payload),
+  manageGame: (payload) => ipcRenderer.invoke("launcher:manage-game", payload),
   launch: (payload) => ipcRenderer.invoke("launcher:launch", payload),
   onLog: (handler) => {
     const listener = (_, payload) => handler(payload);

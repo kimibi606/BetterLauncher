@@ -4,9 +4,11 @@ Electron 기반의 단일 모드팩 Minecraft 런처입니다. 로그인하면 �
 
 운영 서버 주소와 모드팩 정보는 Git에서 제외한 `.private/modpack.config.json`에 보관합니다. 저장소의 `modpack.config.json`에는 빈 목록만 포함합니다. 실제 운영값을 문서·테스트·커밋 메시지에 적지 마세요.
 
-- 개발 실행: `npm install` 후 `npm start` — 로컬 운영 설정을 먼저 읽습니다.
+- 개발 실행은 Node.js 22.12 이상에서 `npm ci` 후 `npm start`로 진행합니다. 로컬 운영 설정을 먼저 읽습니다.
 - 검증: `npm run check`, `npm test`
 - 설치 파일: `npm run dist:win` — 운영 설정과 GitHub 업데이트 설정을 포함한 하나의 런처를 `.private/releases/<버전>`에 만듭니다.
+- 사용자 데이터는 `%APPDATA%\BetterLauncher`에 저장합니다. 로그인·설정은 `data`, 모드팩은 `instances`에 들어갑니다.
+- 설치 파일 하나가 Windows 10·11의 x64와 ARM64를 지원합니다. ARM64에서 게임을 실행하려면 모드팩에 호환되는 Java와 게임 라이브러리가 필요합니다. 자동 설치는 ARM64 Java를 우선하며, 해당 배포본이 없으면 Windows 11에서 x64 Java를 사용합니다.
 - 기존 BetterMonLauncher가 정상적으로 제거되면 BetterLauncher로 교체합니다. 제거 프로그램 누락·부분 삭제·제거 실패가 있어도 남은 파일과 로그인·게임 데이터를 보존하고 새 설치를 계속합니다. 안전하지 않은 이전 경로의 파일은 실행하거나 삭제하지 않고 새 기본 경로를 사용합니다.
 - `npm run dist`, `npm run dist:win`, 이전 `npm run dist:private`는 같은 빌드 명령입니다. `npm run dist:dir`도 동일한 설정으로 설치 전 폴더를 만듭니다. 운영 설정이 없으면 빈 모드팩 설치 파일을 만드는 대신 빌드를 중단합니다.
 
@@ -18,7 +20,7 @@ Electron 기반의 단일 모드팩 Minecraft 런처입니다. 로그인하면 �
 
 소스 push와 GitHub 릴리즈·파일 업로드는 관리자가 명시적으로 요청했을 때만 수행합니다. 일반 수정은 로컬에서 검증하고 빌드합니다.
 
-관리자는 `.private/modpack.config.json`에 모드팩 하나와 서버를 설정합니다. 배포본은 앱에 포함된 설정을 사용하고, 게임 시작 시 해당 서버에 접속합니다. 서버 상태는 해당 서버에 직접 조회합니다. [관리자 설정 예시](modpack.config.example.json)
+관리자는 `.private/modpack.config.json`에 모드팩 하나와 서버를 설정합니다. 배포본은 앱에 포함된 설정을 사용하고, 게임 시작 시 해당 서버에 접속합니다. [관리자 설정 예시](modpack.config.example.json)
 
 NeoForge는 관리자 설정의 `loaderVersion`으로 버전을 고정합니다. 공식 Maven의 설치 파일을 SHA-256으로 검증하고 전용 게임 폴더에 설치하며, `loaderInstallerSha256`을 지정하면 관리자가 검증한 해시로 고정합니다. Minecraft 버전에 맞는 Java를 준비하고, 기존 Fabric 폴더와 섞이지 않도록 모드팩을 교체할 때 새 식별자를 사용하세요. ZIP 가져오기는 모드·설정·리소스만 다루며 서버 목록·계정·월드 파일은 배포에서 제외합니다.
 
@@ -30,6 +32,6 @@ UI 흐름 검증은 `npm run test:ui`로 실행합니다. 테스트용 모드팩
 
 Windows 설치 교체 검증은 `npm run test:installer`로 실행합니다. NSIS 컴파일러가 필요하며, 첫 Windows 빌드 후 자동으로 찾습니다. 실제 설치된 앱 대신 `dist/installer-tests`의 테스트 파일과 별도 레지스트리 키를 사용합니다.
 
-계정 스킨은 공식 Minecraft 서버에서 받아 메뉴와 계정 설정에 3D 전신 모델로 표시합니다. 렌더러는 앱에 포함하며 외부 아바타 서비스에 계정 정보를 보내지 않습니다. 로컬 렌더러 의존성을 갱신한 뒤에는 `npm run vendor:skin`으로 브라우저 번들과 라이선스를 동기화합니다.
+계정 스킨은 공식 Minecraft 서버에서 받아 메인 화면과 계정 설정에 픽셀 얼굴로 표시합니다. 외부 아바타 서비스에 계정 정보를 보내지 않습니다.
 
 [보안 정책과 점검 결과](SECURITY.md)

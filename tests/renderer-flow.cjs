@@ -20,6 +20,7 @@ let signedIn = true;
 let failDefaults = false;
 let defaultProjectId = "alpha";
 let instanceRevision = 0;
+let previousMinecraftDirectory = "";
 let pendingUpdate = false;
 let blockUpdate = false;
 let releaseUpdate;
@@ -34,9 +35,9 @@ let releaseLaunch;
 let launchResult = { ok: false, error: "테스트 실행 요청 확인 완료" };
 let delayedSkinUuid = "";
 let failedSkinUuid = "";
-let failServerStatus = false;
 let releaseSkin;
 const skinRequests = [];
+let releaseInfoRequests = 0;
 const { skinPng } = require("./skin-fixture.cjs");
 const calls = [];
 const removedFeatureRequests = [];
@@ -60,7 +61,8 @@ handle("launcher:get-defaults", ({ projectId }) => {
   if (failDefaults) return { ok: false, error: "모드팩 설정 읽기 실패 테스트" };
   const project = catalog.find((entry) => entry.id === projectId) || catalog.find((entry) => entry.id === defaultProjectId) || catalog[0];
   const instanceName = instanceRevision ? `${project?.id}.rev-${instanceRevision}` : project?.id;
-  return { projectId: project?.id || "", projects: catalog, instanceRevision, minecraftDirectory: project ? path.join(output, "instances", instanceName) : "", javaPath: "", ramMin: 6144, ramMax: 6144, jvmArgs: "" };
+  return { projectId: project?.id || "", projects: catalog.map(entry => ({ ...entry, serverConfigured: true })), instanceRevision, previousMinecraftDirectory,
+    minecraftDirectory: project ? path.join(output, "instances", instanceName) : "", javaPath: "", ramMin: 6144, ramMax: 6144, jvmArgs: "" };
 });
 handle("launcher:get-auth-state", auth);
 handle("launcher:microsoft-select-account", (accountId) => {
@@ -85,12 +87,15 @@ handle("launcher:microsoft-login", async () => {
   signedIn = true; return { ok: true, status: auth() };
 });
 handle("window:get-state", () => ({ maximized: false }));
-handle("launcher:get-system-profile", () => ({ totalMemoryGb: 32, preset: "high" }));
+handle("launcher:get-system-profile", () => ({ totalMemoryGb: 32, javaMemoryLimitMb: 24576 }));
 handle("launcher:load-profiles", () => ({ ok: true, profiles: [] }));
 handle("updater:get-state", () => updaterFixture);
 handle("updater:ensure-latest", () => updaterResult);
 handle("updater:check", () => updaterResult);
-handle("launcher:get-github-release", () => ({ ok: true, configured: false }));
+handle("launcher:get-github-release", () => {
+  releaseInfoRequests++;
+  return { ok: true, configured: false };
+});
 handle("launcher:auto-select-java", async (payload) => {
   calls.push({ type: "java", ...payload });
   if (blockJava) await new Promise((resolve) => { releaseJava = resolve; });
@@ -103,12 +108,11 @@ handle("launcher:check-modpack-update", async (payload) => {
 });
 handle("launcher:sync-modpack", (payload) => { calls.push({ type: "sync", ...payload }); pendingUpdate = false; return { ok: true, version: "1.0.1" }; });
 handle("launcher:reinstall-modpack", (payload) => { calls.push({ type: "reinstall", ...payload }); return { ok: true, version: "1.0.1" }; });
-handle("launcher:get-news", (payload) => { removedFeatureRequests.push({ type: "news", ...payload }); return { ok: true, items: [], configured: false }; });
-handle("launcher:get-server-status", (payload) => {
-  calls.push({ type: "server", ...payload });
-  if (failServerStatus) throw new Error("connect 203.0.113.42:25565 alpha.example");
-  return { ok: true, hasServerTarget: false };
+handle("launcher:manage-game", (payload) => {
+  calls.push({ type: "manage", ...payload });
+  return { ok: false, canceled: true };
 });
+handle("launcher:get-news", (payload) => { removedFeatureRequests.push({ type: "news", ...payload }); return { ok: true, items: [], configured: false }; });
 handle("launcher:launch", async (payload) => {
   calls.push({ type: "launch", ...payload });
   if (blockLaunch) await new Promise(resolve => { releaseLaunch = resolve; });
@@ -152,6 +156,9 @@ app.whenReady().then(async () => {
   signedIn = false;
   loginFailure = { ok: false, ...require("../lib/microsoft-login-errors").describeMicrosoftLoginFailure(new Error("Xbox account does not have an Xbox profile")) };
   let loginWin = await openWindow();
+  assert.equal(await js(loginWin, "typeof window.minecraftSkinModel"), "undefined");
+  assert.equal(await js(loginWin, "getComputedStyle(document.querySelector('.login-waiting-spinner'), '::before').animationPlayState"), "paused");
+  assert.equal(releaseInfoRequests, 0);
   await js(loginWin, "gateMicrosoftLoginButton.click()");
   await waitFor(loginWin, "!authState.loggingIn && !gateMicrosoftLoginButton.disabled");
   assert.equal(await js(loginWin, "gateAuthStatus.textContent"), loginFailure.error);
@@ -195,56 +202,32 @@ app.whenReady().then(async () => {
   assert.equal(await js(win, "document.querySelector('.modpack-info, #currentProjectName, #currentProjectServer, #projectDescription')"), null);
   assert.equal(await js(win, "'serverAddress' in activeModpack"), false);
   assert.equal(await js(win, "document.querySelectorAll('audio, #bgmControl').length"), 0);
-  assert.equal(await js(win, "document.querySelector('#newsPanel, #settingsAboutNewsList, .launcher-footer, .start-launch-logo')"), null);
-  assert.equal(await js(win, "typeof launcherApi.getNews === 'undefined' && typeof launcherApi.getServerStatus === 'function'"), true);
+  assert.equal(await js(win, "document.querySelector('#newsPanel, #settingsAboutNewsList, .start-launch-logo, #playerCountPanel')"), null);
+  assert.equal(await js(win, "typeof launcherApi.getNews === 'undefined' && typeof launcherApi.getServerStatus === 'undefined'"), true);
   assert.equal(await js(win, "document.querySelector('#launchStatus, .start-launch-status, #windowMinimize, #windowMaximize, #settingsTabLauncher, #settingsTabUpdate, [data-settings-tab=settingsTabLauncher], [data-settings-tab=settingsTabUpdate]')"), null);
-  assert.equal(await js(win, "launchProgress.textContent"), "100%");
-  assert.equal(await js(win, "launchProgress.hidden"), true, "ready-to-play state must not show a percentage");
+  assert.equal(await js(win, "launchProgress.value"), 100);
+  assert.equal(await js(win, "launchLoading.hidden"), true, "ready-to-play state must not show progress");
   await waitFor(win, "accountModelImage.dataset.skinState === 'ready'");
-  assert.equal(await js(win, "accountModelImage.src.startsWith('data:image/png;base64,') && accountModelImage.naturalHeight === 576"), true);
-  assert.equal(await js(win, "window.minecraftSkinModel.renderer"), "webgl");
-  const facePixels = [];
+  assert.equal(await js(win, "accountModelImage.src.startsWith('data:image/png;base64,') && accountModelImage.naturalHeight === 8 && accountModelName.textContent === 'Tester'"), true);
+  assert.equal(await js(win, "'ramMin' in buildLaunchPayload()"), false);
   for (const height of [32, 64]) {
     const texture = "data:image/png;base64," + skinPng({ height, opaqueHat: true }).toString("base64");
-    const image = nativeImage.createFromDataURL(await js(win, "window.minecraftSkinModel.render(" + JSON.stringify(texture) + ")"));
-    const pixels = image.toBitmap();
-    assert.equal(pixels[3], 0, "3D portrait background must remain transparent");
-    let visibleFace = 0;
-    for (let pixel = 0; pixel < 320 * 190; pixel++) if (pixels[pixel * 4 + 2] > 100 && pixels[pixel * 4 + 3] > 128) visibleFace++;
-    facePixels.push(visibleFace);
+    const image = nativeImage.createFromDataURL(await js(win, `renderAccountAvatar(${JSON.stringify(texture)})`));
+    assert.equal(image.toBitmap()[2], height === 32 ? 188 : 0, "the avatar applies the hat layer only to modern skins");
   }
-  assert.ok(facePixels[0] > 1000 && facePixels[1] < facePixels[0] * 0.2, "legacy opaque hat regions must not cover the face; modern hats stay visible");
-  const modelTexture = "data:image/png;base64," + skinPng().toString("base64");
-  const paintedPixels = [];
-  for (const model of ["classic", "slim"]) {
-    const image = nativeImage.createFromDataURL(await js(win, "window.minecraftSkinModel.render(" + JSON.stringify(modelTexture) + "," + JSON.stringify(model) + ")"));
-    const bitmap = image.toBitmap();
-    let painted = 0;
-    for (let pixel = 3; pixel < bitmap.length; pixel += 4) if (bitmap[pixel] > 0) painted++;
-    paintedPixels.push(painted);
-  }
-  assert.ok(paintedPixels[0] > paintedPixels[1], "slim arms are narrower than classic arms for the same texture");
+  await js(win, "Object.defineProperty(document, 'hidden', { configurable: true, value: true }); document.dispatchEvent(new Event('visibilitychange'))");
+  assert.equal(await js(win, "modpackUpdatePollTimer === null && !canRunBackgroundModpackUpdateCheck()"), true);
+  await js(win, "delete document.hidden; document.dispatchEvent(new Event('visibilitychange'))");
   await screenshot(win, "single-modpack-launch");
+  assert.ok(await js(win, `(() => {
+    const footer = startLaunchButton.closest('footer');
+    const button = startLaunchButton.getBoundingClientRect();
+    return footer?.contains(accountModelPanel) && footer.contains(document.getElementById('settingsButton')) &&
+      Math.abs((button.left + button.right) / 2 - innerWidth / 2) < 1 &&
+      Math.abs(footer.getBoundingClientRect().bottom - innerHeight) < 1;
+  })()`), "launch controls share a bottom bar with a centered play button");
 
-  // Pending, failed, offline and thrown status results must not expose network
-  // diagnostics through visible text, custom tooltips or native title hovers.
   const privateError = "connect 203.0.113.42:25565 alpha.example https://cdn.example/private?token=secret";
-  const statusFixtures = [
-    { ok: true, hasServerTarget: true, server: { online: null, error: privateError } },
-    { ok: false, error: privateError },
-    { ok: true, hasServerTarget: false, server: { error: privateError } },
-    { ok: true, hasServerTarget: true, server: { online: false, error: privateError } }
-  ];
-  for (const snapshot of statusFixtures) {
-    await js(win, "playerCountPanel.title = 'old target'; playerCountValue.title = 'old target'; applyPlayerCountUi(" + JSON.stringify(snapshot) + ")");
-    assert.equal(await js(win, "playerCountTooltip.textContent === '' && !playerCountPanel.hasAttribute('title') && !playerCountValue.hasAttribute('title')"), true);
-  }
-  await js(win, "applyPlayerCountUi({ ok: true, hasServerTarget: true, server: { online: true, playersOnline: 2, playersMax: 20, playerNames: ['Friend_1', 'alpha.example', '203.0.113.42'] } })");
-  assert.equal(await js(win, "playerCountTooltip.textContent"), "Friend_1\n외 1명");
-  failServerStatus = true;
-  await js(win, "refreshPlayerCount()");
-  assert.equal(await js(win, "playerCountTooltip.textContent"), "");
-  failServerStatus = false;
   const privateDiagnostic = privateError + " accessToken=game-secret C:\\Users\\Friend Name\\instance 01234567-89ab-cdef-0123-456789abcdef";
   for (const setter of ["setLaunchStatus", "setSettingsStatus", "setStartupStatus"]) {
     await js(win, setter + "(" + JSON.stringify(privateDiagnostic) + ", true)");
@@ -255,11 +238,11 @@ app.whenReady().then(async () => {
   }
   await js(win, "setLaunchStatus('모드팩이 최신 상태입니다.');");
 
-  await js(win, "settingsButton.click()");
+  await js(win, "accountModelPanel.click()");
   assert.equal(await js(win, "currentScreen"), "settings");
   assert.equal(await js(win, "document.querySelector('[data-settings-tab=settingsTabJava]').disabled"), false);
   await waitFor(win, "settingsAccountList.querySelector('img').dataset.skinState === 'ready' && settingsAccountList.querySelector('img').naturalHeight === 8");
-  assert.equal(await js(win, "settingsAccountList.querySelector('img').naturalHeight === 8 && accountModelImage.naturalHeight === 576"), true);
+  assert.equal(await js(win, "settingsAccountList.querySelector('img').src === accountModelImage.src"), true);
   assert.equal(await js(win, "settingsAccountList.textContent.includes(authState.uuid) || !!settingsAccountList.querySelector('.settings-account-uuid-value')"), false);
   assert.equal(skinRequests.length, 1, "menu and settings reuse the same skin request");
   await screenshot(win, "single-modpack-settings");
@@ -279,37 +262,54 @@ app.whenReady().then(async () => {
       })()`);
       assert.ok(geometry.fits && geometry.noHorizontalOverflow && geometry.closeClickable, `${width}px ${tab} settings must fit and remain usable`);
       if (["Account", "Minecraft", "Java"].includes(tab)) await screenshot(win, `settings-${tab.toLowerCase()}-${width}`);
-      if (tab === "Java") {
+      if (tab === "Minecraft") {
         assert.equal(await js(win, `(() => {
           const panel = document.querySelector('.settings-content-panel');
+          const title = panel.querySelector('#settingsTabMinecraft .settings-tab-header');
+          const top = title.getBoundingClientRect().top;
           panel.scrollTop = panel.scrollHeight;
           const close = settingsCloseButton.getBoundingClientRect();
           const clickable = document.elementFromPoint(close.x + close.width / 2, close.y + close.height / 2)?.id === 'settingsCloseButton';
+          const pinned = Math.abs(title.getBoundingClientRect().top - top) < 1;
           panel.scrollTop = 0;
-          return clickable;
-        })()`), true, "closing the modal must remain possible after scrolling");
+          return pinned && clickable;
+        })()`), true, "the game title and close button must remain visible while scrolling");
       }
     }
   }
   win.setSize(1280, 720);
   const originalDirectories = await js(win, "[launcherSettings.minecraftDirectory, launcherSettings.dataDirectory]");
   await js(win, "launcherSettings.minecraftDirectory += '-custom'; launcherSettings.dataDirectory += '-custom'");
-  await js(win, "selectSettingsTab('settingsTabMinecraft'); settingsGameWidthInput.value = '1440'; settingsFullscreenInput.checked = true; settingsCloseButton.click()");
+  await js(win, `selectSettingsTab('settingsTabMinecraft'); settingsGameWidthInput.value = '1440'; settingsFullscreenInput.checked = true;
+    document.getElementById('settingsAutoConnect').checked = false; settingsRamMaxDisplay.value = 8;
+    settingsRamMaxDisplay.dispatchEvent(new Event('change')); settingsCloseButton.click()`);
   assert.equal(await js(win, "launcherSettings.gameWidth === 1440 && launcherSettings.fullscreen"), true);
+  assert.equal(await js(win, "buildLaunchPayload().ramMax === 8192 && buildLaunchPayload().autoConnect === false"), true);
+  assert.ok(await js(win, "parseFloat(settingsRamMaxInput.style.getPropertyValue('--game-ram-fill')) > 30"));
   assert.deepEqual(await js(win, "[launcherSettings.minecraftDirectory, launcherSettings.dataDirectory]"), originalDirectories.map(value => value + '-custom'));
   await js(win, "[launcherSettings.minecraftDirectory, launcherSettings.dataDirectory] = " + JSON.stringify(originalDirectories));
 
   await js(win, "settingsButton.click()");
   assert.equal(await js(win, "settingsGameWidthInput.value === '1440' && settingsFullscreenInput.checked"), true);
-  await js(win, "selectSettingsTab('settingsTabMinecraft'); settingsReinstallModpack.click()");
+  await js(win, "selectSettingsTab('settingsTabMinecraft')");
+  for (const action of ["open", "move", "shortcut", "patch", "delete"]) {
+    await js(win, `document.querySelector('[data-game-action="${action}"]').click()`);
+    await waitFor(win, "!isModpackUpdateApplyRunning");
+    const request = calls.filter(entry => entry.type === "manage").at(-1);
+    assert.equal(request?.action, action);
+    assert.equal(request.minecraftDirectory, originalDirectories[0]);
+  }
+  await js(win, "settingsReinstallModpack.click()");
   await waitFor(win, "settingsStatus.textContent.includes('최신 모드팩을 재설치했습니다')");
   assert.equal(calls.find(({ type }) => type === "reinstall").minecraftDirectory, originalDirectories[0]);
   await js(win, "settingsGameWidthInput.value = '1280'; settingsFullscreenInput.checked = false; selectSettingsTab('settingsTabAccount')");
   extraAccount = { id: "2".repeat(32), uuid: "2".repeat(32), profileName: "SecondPlayer" };
   win.webContents.send("launcher:auth-state", auth());
   await waitFor(win, "settingsAccountList.querySelectorAll('.settings-account-card').length === 2");
+  await waitFor(win, "settingsAccountList.querySelector('.settings-account-card:not(.is-selected) img').dataset.skinState === 'ready'");
   await js(win, "settingsAccountList.querySelector('.settings-account-card:not(.is-selected)').click()");
   await waitFor(win, "authState.profileName === 'SecondPlayer' && !isModpackPreparing");
+  assert.equal(skinRequests.filter(uuid => uuid === extraAccount.uuid).length, 1);
   assert.equal(accountSwitchCount, 1);
   assert.equal(await js(win, "settingsAccountList.querySelector('.is-selected').getAttribute('aria-pressed')"), "true");
   await js(win, "const firstAccountCard = settingsAccountList.querySelector('.settings-account-card:not(.is-selected)'); firstAccountCard.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))");
@@ -322,7 +322,7 @@ app.whenReady().then(async () => {
   await js(win, "settingsCloseButton.click()");
   assert.equal(await js(win, "currentScreen"), "launch");
 
-  // A new account gets its own model; delayed requests cannot repaint a newer account.
+  // A new account gets its own avatar; delayed requests cannot repaint a newer account.
   activeAccountUuid = "2".repeat(32);
   const firstSkin = await js(win, "accountModelImage.src");
   win.webContents.send("launcher:auth-state", auth());
@@ -343,7 +343,7 @@ app.whenReady().then(async () => {
   activeAccountUuid = failedSkinUuid = "5".repeat(32);
   win.webContents.send("launcher:auth-state", auth());
   await waitFor(win, "accountModelImage.dataset.skinState === 'retry'");
-  assert.equal(await js(win, "accountModelImage.src.endsWith('default-skin.svg')"), true);
+  assert.equal(await js(win, "accountModelImage.src.endsWith('default-avatar.svg')"), true);
   failedSkinUuid = "";
   await js(win, "updateAccountModelUi()");
   await waitFor(win, "accountModelImage.dataset.skinState === 'ready'");
@@ -357,7 +357,7 @@ app.whenReady().then(async () => {
   await waitFor(win, "currentScreen === 'login'");
   releaseSkin();
   await delay(100);
-  assert.equal(await js(win, "accountModelPanel.hidden && accountModelImage.src.endsWith('default-skin.svg')"), true);
+  assert.equal(await js(win, "accountModelPanel.hidden && accountModelImage.src.endsWith('default-avatar.svg')"), true);
   delayedSkinUuid = "";
   activeAccountUuid = "0123456789abcdef0123456789abcdef";
   await js(win, "gateMicrosoftLoginButton.click()");
@@ -366,67 +366,65 @@ app.whenReady().then(async () => {
   blockLaunch = true;
   releaseLaunch = null;
   await js(win, "startLaunchButton.click()");
-  await waitFor(win, "isLaunchRequestPending && !launchProgress.hidden && launchProgress.textContent === '5%'");
+  await waitFor(win, "isLaunchRequestPending && !launchLoading.hidden && launchProgress.value === 5");
   while (!releaseLaunch) await delay(20);
   const firstProgress = calls.filter(entry => entry.type === "launch").at(-1);
   const sendProgress = (percent, overrides = {}) => win.webContents.send("launcher:progress", {
     id: firstProgress.progressId, projectId: firstProgress.projectId, percent, ...overrides
   });
   sendProgress(37.6);
-  await waitFor(win, "launchProgress.textContent === '37%'");
+  await waitFor(win, "launchProgress.value === 37 && launchProgressText.textContent === '37%'");
   sendProgress(10);
   sendProgress(95, { id: "previous-operation" });
   sendProgress(95, { projectId: "beta" });
   sendProgress(NaN);
   await delay(40);
-  assert.equal(await js(win, "launchProgress.textContent"), "37%");
+  assert.equal(await js(win, "launchProgress.value"), 37);
+  await screenshot(win, "launch-progress");
+  assert.deepEqual(await js(win, `({
+    wideBar: launchProgress.getBoundingClientRect().width > innerWidth * 0.85,
+    shownControls: [accountModelPanel, startLaunchButton, settingsButton].filter(control => control.getClientRects().length).map(control => control.id)
+  })`), { wideBar: true, shownControls: [] }, "a wide progress bar replaces the footer controls while loading");
   win.webContents.send("launcher:log", { level: "warn", message: "Retrying modpack download verification" });
   await delay(40);
   assert.equal(await js(win, "launchProgressState.active && !launchProgressState.failed"), true, "recoverable warnings must not stop overall progress");
-  const placement = await js(win, `(() => {
-    const button = startLaunchButton.getBoundingClientRect();
-    const percent = launchProgress.getBoundingClientRect();
-    const gap = percent.left - button.right;
-    return gap > 0 && gap <= 8 && Math.abs(percent.bottom - button.bottom) < 2;
-  })()`);
-  assert.ok(placement, "overall progress sits close to the play button and aligns with its bottom edge");
-  await screenshot(win, "launch-progress");
   releaseLaunch();
-  await waitFor(win, "!isLaunchRequestPending && launchProgress.classList.contains('is-error')");
-  assert.equal(await js(win, "launchProgress.hidden"), true, "failed launches return to a play button without progress");
+  await waitFor(win, "!isLaunchRequestPending && launchLoading.classList.contains('is-error')");
+  assert.equal(await js(win, "launchLoading.hidden && startLaunchButton.getClientRects().length > 0"), true, "failed launches restore the footer controls");
   sendProgress(100);
   await delay(40);
-  assert.equal(await js(win, "launchProgress.textContent"), "37%", "a failed operation must never become complete");
+  assert.equal(await js(win, "launchProgress.value"), 37, "a failed operation must never become complete");
   releaseLaunch = null;
   launchResult = { ok: true };
   await js(win, "startLaunchButton.click()");
-  await waitFor(win, "isLaunchRequestPending && launchProgress.textContent === '5%'");
+  await waitFor(win, "isLaunchRequestPending && launchProgress.value === 5");
   while (!releaseLaunch) await delay(20);
   const retry = calls.filter(entry => entry.type === "launch").at(-1);
   assert.notEqual(retry.progressId, firstProgress.progressId);
   sendProgress(99);
   win.webContents.send("launcher:progress", { id: retry.progressId, projectId: retry.projectId, percent: 99.9 });
-  await waitFor(win, "launchProgress.textContent === '99%'");
+  await waitFor(win, "launchProgress.value === 99");
   releaseLaunch();
-  await waitFor(win, "!isLaunchRequestPending && launchProgress.textContent === '100%'");
+  await waitFor(win, "!isLaunchRequestPending && launchLoading.hidden && launchProgress.value === 100");
   blockLaunch = false;
   launchResult = { ok: false, error: "Launch fixture failed" };
   const launch = calls.find((entry) => entry.type === "launch");
   assert.equal(launch.projectId, "alpha");
   assert.equal(launch.minecraftDirectory, path.join(output, "instances", "alpha"));
-  assert.equal("autoConnect" in launch, false);
+  assert.equal(launch.autoConnect, false);
   win.webContents.send("launcher:state", { launching: true });
-  await waitFor(win, "startLaunchButton.disabled && !launchProgress.hidden");
+  await waitFor(win, "startLaunchButton.disabled && launchLoading.hidden");
   const launchCount = calls.filter((entry) => entry.type === "launch").length;
   await js(win, "startLaunchButton.click()");
   assert.equal(calls.filter((entry) => entry.type === "launch").length, launchCount);
   win.webContents.send("launcher:state", { launching: false });
-  await waitFor(win, "!startLaunchButton.disabled && launchProgress.hidden");
+  await waitFor(win, "!startLaunchButton.disabled && launchLoading.hidden");
 
   pendingUpdate = true;
   await js(win, "refreshModpackUpdateStatus({ forceRefresh: true })");
-  assert.equal(await js(win, "startLaunchButton.textContent"), "업데이트");
-  assert.equal(await js(win, "launchProgress.hidden"), true, "an available update is not an active update");
+  assert.deepEqual(await js(win, "[startLaunchLabel.textContent, startLaunchCaption.textContent]"), ["업데이트", "UPDATE"]);
+  assert.equal(await js(win, "launchLoading.hidden"), true, "an available update is not an active update");
+  await screenshot(win, "modpack-update-ready");
   const updateStart = calls.length;
   blockLaunch = true;
   releaseLaunch = null;
@@ -438,8 +436,8 @@ app.whenReady().then(async () => {
   releaseLaunch();
   blockLaunch = false;
   await waitFor(win, "!isLaunchRequestPending");
-  assert.equal(await js(win, "startLaunchButton.textContent"), "게임 시작");
-  assert.equal(await js(win, "launchProgress.hidden"), true);
+  assert.deepEqual(await js(win, "[startLaunchLabel.textContent, startLaunchCaption.textContent]"), ["게임 시작", "PLAY"]);
+  assert.equal(await js(win, "launchLoading.hidden"), true);
 
   // Session expiry returns to login; signing back in prepares the same pack automatically.
   expireLaunch = true;
@@ -457,7 +455,7 @@ app.whenReady().then(async () => {
   blockJava = true;
   releaseJava = null;
   await js(win, "launcherSettings.javaPath = ''; gateMicrosoftLoginButton.click()");
-  await waitFor(win, "isModpackPreparing");
+  await waitFor(win, "isModpackPreparing && !launchLoading.hidden");
   while (!releaseJava) await delay(20);
   signedIn = false;
   win.webContents.send("launcher:auth-state", auth());
@@ -509,10 +507,21 @@ app.whenReady().then(async () => {
   await waitFor(win, "currentScreen === 'launch' && hasActiveModpack && !isModpackPreparing");
 
   // Preserve existing game settings while ignoring the removed remembered-pack preference.
-  await js(win, "localStorage.setItem('betterlauncher.selected-project.v1', 'beta'); localStorage.setItem('betterlauncher.project.alpha.settings.v1', JSON.stringify({ ...launcherSettings, jvmArgs: '-XX:+UseZGC', gameWidth: 1600, bgmVolume: 80, bgmMuted: false, autoConnect: false }))");
+  previousMinecraftDirectory = path.join(output, ".betterlauncher", "instances", "alpha");
+  const previousPaths = JSON.stringify({
+    minecraftDirectory: previousMinecraftDirectory,
+    dataDirectory: previousMinecraftDirectory,
+    javaPath: path.join(previousMinecraftDirectory, "runtime", "bin", "javaw.exe")
+  });
+  await js(win, `localStorage.setItem('betterlauncher.selected-project.v1', 'beta'); localStorage.setItem('betterlauncher.project.alpha.settings.v1', JSON.stringify({ ...launcherSettings, ...${previousPaths}, jvmArgs: '-XX:+UseZGC', gameWidth: 1600, bgmVolume: 80, bgmMuted: false, autoConnect: false }))`);
   calls.length = 0;
   await new Promise((resolve) => { win.webContents.once("did-finish-load", resolve); win.reload(); });
   await waitFor(win, "startupOverlayDismissed && startupOverlay.hidden");
+  previousMinecraftDirectory = "";
+  const migratedDirectory = path.join(output, "instances", "alpha");
+  assert.equal(await js(win, "launcherSettings.minecraftDirectory"), migratedDirectory);
+  assert.equal(await js(win, "launcherSettings.dataDirectory"), migratedDirectory);
+  assert.equal(await js(win, "launcherSettings.javaPath"), path.join(migratedDirectory, "runtime", "bin", "javaw.exe"));
   assert.equal(await js(win, "currentScreen === 'launch' && activeProjectId === 'alpha' && hasActiveModpack"), true);
   assert.equal(await js(win, "launcherSettings.gameWidth === 1600 && !('bgmVolume' in launcherSettings) && !('bgmMuted' in launcherSettings) && !('autoConnect' in launcherSettings)"), true);
   assert.equal(await js(win, "buildLaunchPayload().jvmArgs"), "");
@@ -578,18 +587,19 @@ app.whenReady().then(async () => {
     ["settingsTabAccount", "settingsTabMinecraft", "settingsTabJava", "settingsTabAbout"]);
   await js(win, "settingsCloseButton.click()");
   win.webContents.send("updater:state", { enabled: true, downloading: true, available: true, progressPercent: 33.7 });
-  await waitFor(win, "!launchProgress.hidden && launchProgress.textContent === '33%' && startLaunchButton.disabled");
+  await waitFor(win, "!launchLoading.hidden && launchProgress.value === 33 && startLaunchButton.disabled");
   await screenshot(win, "launcher-update-progress");
   win.webContents.send("updater:state", { enabled: true, downloading: true, available: true, progressPercent: 100 });
-  await waitFor(win, "launchProgress.textContent === '99%'");
+  await waitFor(win, "launchProgress.value === 99");
   win.webContents.send("updater:state", { enabled: true, downloaded: true, progressPercent: 100 });
-  await waitFor(win, "launchProgress.hidden && launchProgress.textContent === '100%' && !startLaunchButton.disabled");
+  await waitFor(win, "launchLoading.hidden && launchProgress.value === 100 && !startLaunchButton.disabled");
+  assert.deepEqual(await js(win, "[startLaunchLabel.textContent, startLaunchCaption.textContent]"), ["런처 업데이트", "LAUNCHER UPDATE"]);
   win.webContents.send("updater:state", { enabled: true, downloading: true, available: true, progressPercent: 12 });
-  await waitFor(win, "launchProgress.textContent === '12%'");
+  await waitFor(win, "launchProgress.value === 12");
   win.webContents.send("updater:state", { enabled: true, downloading: false, lastError: "Download fixture failed" });
-  await waitFor(win, "launchProgress.classList.contains('is-error')");
+  await waitFor(win, "launchLoading.hidden && launchLoading.classList.contains('is-error')");
   win.webContents.send("updater:state", { enabled: true, downloading: true, available: true, progressPercent: 3 });
-  await waitFor(win, "launchProgress.textContent === '3%' && !launchProgress.classList.contains('is-error')");
+  await waitFor(win, "launchProgress.value === 3 && !launchLoading.classList.contains('is-error')");
   win.destroy();
   updaterFixture = { enabled: false, currentVersion: require("../package.json").version };
   updaterResult = { ok: true };
@@ -628,7 +638,7 @@ app.whenReady().then(async () => {
 
   win = await openWindow({ webgl: false });
   await waitFor(win, "accountModelImage.dataset.skinState === 'ready'");
-  assert.equal(await js(win, "window.minecraftSkinModel.renderer"), "canvas");
+  assert.equal(await js(win, "accountModelImage.naturalHeight === 8"), true);
   assert.equal(await js(win, "currentScreen === 'launch' && !startLaunchButton.disabled"), true);
   win.destroy();
 

@@ -2,7 +2,6 @@
 
 const fs = require("fs");
 const path = require("path");
-const { readProjects, resolveProject } = require("../lib/projects");
 
 function fail(message) {
   throw new Error(`release validation failed: ${message}`);
@@ -34,7 +33,6 @@ function main() {
   if (config.defaultProject || !Array.isArray(config.projects) || config.projects.length !== 0) {
     fail("repository config must contain an empty catalog; keep operating settings in .private/modpack.config.json");
   }
-  if (readProjects(config).length > 0) resolveProject(config);
   if (Object.hasOwn(config.github || {}, "enabled")) {
     fail("launcher updates must not vary with the operating catalog");
   }

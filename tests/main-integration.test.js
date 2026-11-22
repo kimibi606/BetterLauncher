@@ -20,17 +20,18 @@ const nodeRequire = createRequire(mainPath);
 function loadMain(root, safeStorage) {
   const handlers = new Map();
   const dialog = { showMessageBox: async () => ({ response: 1 }) };
+  const shell = {};
   const updater = new EventEmitter();
   updater.setFeedURL = feed => { updater.feed = feed; };
-  const appPaths = { appData: root, userData: path.join(root, ".betterlauncher"), sessionData: path.join(root, "session") };
+  const appPaths = { appData: root };
   const app = { getVersion: () => "0.3.14", getName: () => "BetterLauncher", getPath: (name) => appPaths[name], setPath: (name, value) => { appPaths[name] = value; }, requestSingleInstanceLock: () => false, on() {}, quit() {}, isPackaged: false };
   const context = vm.createContext({
-    require: (name) => name === "electron" ? { app, dialog, safeStorage, ipcMain: { handle: (channel, fn) => handlers.set(channel, fn), on() {} } }
+    require: (name) => name === "electron" ? { app, dialog, shell, safeStorage, ipcMain: { handle: (channel, fn) => handlers.set(channel, fn), on() {} } }
       : name === "electron-updater" ? { autoUpdater: updater } : nodeRequire(name),
     __dirname: path.dirname(mainPath), process: { ...process, cwd: () => root },
     console, Buffer, URL, AbortSignal, fetch, setTimeout, clearTimeout, setInterval, clearInterval
   });
-  vm.runInContext(fs.readFileSync(mainPath, "utf8") + "\nglobalThis.testApi = { projectContext, getCurrentProject, readLauncherConfig, readGitHubReleaseConfig, isUpdaterEnabled, setupAutoUpdater, checkForAppUpdates, updaterState, queryMinecraftServerStatus, readServerStatusConfig, buildAutoConnectTarget, buildProjectConnectionOptions, getModpackConfigCandidatePaths, isProjectFabricVersionId, migrateLegacyUserDataIfNeeded, migrateLegacyStateLayoutIfNeeded, verifyLaunchIntegrity };", context);
+  vm.runInContext(fs.readFileSync(mainPath, "utf8") + "\nglobalThis.testApi = { projectContext, getCurrentProject, readLauncherConfig, readGitHubReleaseConfig, isUpdaterEnabled, setupAutoUpdater, checkForAppUpdates, updaterState, buildAutoConnectTarget, buildProjectConnectionOptions, getModpackConfigCandidatePaths, isProjectFabricVersionId, migrateLegacyUserDataIfNeeded, migrateLegacyStateLayoutIfNeeded, verifyLaunchIntegrity };", context);
   const mainFrame = { url: pathToFileURL(path.join(path.dirname(mainPath), "src", "index.html")).href };
   const webContents = { mainFrame, send() {} };
   context.testWindow = { webContents, isDestroyed: () => false };
@@ -38,7 +39,7 @@ function loadMain(root, safeStorage) {
   const trustedEvent = { sender: webContents, senderFrame: mainFrame };
   const authenticatedHandlers = new Map([...handlers].map(([channel, callback]) => [channel,
     (event, payload) => callback(Object.keys(event || {}).length ? event : trustedEvent, payload)]));
-  return { handlers: authenticatedHandlers, api: context.testApi, appPaths, webContents, context, updater, dialog };
+  return { handlers: authenticatedHandlers, api: context.testApi, appPaths, webContents, context, updater, dialog, shell };
 }
 
 async function setup(t, safeStorage, { cacheManifests = false } = {}) {
@@ -97,7 +98,7 @@ test("two HTTP modpacks install concurrently with separate state, chunks and run
     return result;
   }));
   assert.equal(results.length, 2);
-  const forbidden = await handlers.get("launcher:sync-modpack")({}, { projectId: "beta", minecraftDirectory: path.join(appPaths.userData, "instances", "alpha") });
+  const forbidden = await handlers.get("launcher:sync-modpack")({}, { projectId: "beta", minecraftDirectory: path.join(appPaths.appData, "BetterLauncher", "instances", "alpha") });
   assert.equal(forbidden.ok, false);
   assert.match(forbidden.error, /another modpack project/);
 });
@@ -115,7 +116,7 @@ test("a configured instance revision installs fresh and protects previous Minecr
   await fs.promises.writeFile(path.join(root, "modpack.config.json"), JSON.stringify(config));
   const defaults = await handlers.get("launcher:get-defaults")({}, { projectId: "alpha" });
   assert.equal(defaults.instanceRevision, 1);
-  assert.equal(defaults.minecraftDirectory, path.join(appPaths.userData, "instances", "alpha.rev-1"));
+  assert.equal(defaults.minecraftDirectory, path.join(appPaths.appData, "BetterLauncher", "instances", "alpha.rev-1"));
 
   const sync = (minecraftDirectory, gameDirectory) => handlers.get("launcher:sync-modpack")({}, {
     projectId: "alpha", minecraftDirectory, gameDirectory
@@ -169,14 +170,61 @@ test("clean reinstall replaces the whole managed directory only after a successf
   assert.equal(fs.readFileSync(world, "utf8"), "old world");
 
   fs.writeFileSync(asset, contents);
+  const rename = fs.promises.rename;
+  const mock = t.mock.method(fs.promises, "rename", (source, target) => {
+    if (path.basename(source) === "next" && target === minecraftDirectory) {
+      throw new Error("Fixture directory swap failure");
+    }
+    return rename(source, target);
+  });
+  try {
+    assert.match((await reinstall()).error, /directory swap failure/);
+    assert.equal(fs.readFileSync(world, "utf8"), "old world");
+  } finally {
+    mock.mock.restore();
+  }
+
   const result = await reinstall();
   assert.equal(result.ok, true, result.error);
   assert.equal(result.version, "2");
+  const state = JSON.parse(fs.readFileSync(path.join(minecraftDirectory, ".betterlauncher", "modpack-state.json")));
+  assert.equal(state.preset, "default");
   assert.equal(fs.readFileSync(path.join(minecraftDirectory, "mods", "shared-name.jar"), "utf8"), "latest content");
   for (const oldPath of [stale, world, path.join(minecraftDirectory, "options.txt")]) {
     assert.equal(fs.existsSync(oldPath), false);
   }
   assert.deepEqual(fs.readdirSync(path.dirname(minecraftDirectory)), [path.basename(minecraftDirectory)]);
+});
+
+test("game management reapplies the pack, moves the world and confirms removal", async (t) => {
+  const { root, handlers, dialog, shell } = await setup(t);
+  const { minecraftDirectory } = await handlers.get("launcher:get-defaults")({}, {});
+  const payload = { projectId: "alpha", minecraftDirectory };
+  const manage = (action, directory = minecraftDirectory) => handlers.get("launcher:manage-game")({}, { ...payload, action, minecraftDirectory: directory });
+  assert.equal((await handlers.get("launcher:sync-modpack")({}, payload)).ok, true);
+  const save = path.join("saves", "world.txt");
+  fs.mkdirSync(path.dirname(path.join(minecraftDirectory, save)), { recursive: true });
+  fs.writeFileSync(path.join(minecraftDirectory, save), "world");
+  assert.equal((await manage("patch")).ok, true);
+  assert.equal((await handlers.get("launcher:check-modpack-update")({}, payload)).pending, true);
+  assert.equal((await handlers.get("launcher:sync-modpack")({}, payload)).updatedCount, 1);
+  assert.equal((await handlers.get("launcher:check-modpack-update")({}, payload)).pending, false);
+
+  const parent = path.join(root, "relocated games");
+  fs.mkdirSync(parent);
+  dialog.showOpenDialog = async () => ({ filePaths: [parent] });
+  const moved = (await manage("move")).minecraftDirectory;
+  assert.equal(moved, path.join(parent, "alpha"));
+  assert.equal(fs.existsSync(minecraftDirectory), false);
+  assert.equal(fs.readFileSync(path.join(moved, save), "utf8"), "world");
+  assert.equal((await handlers.get("launcher:get-defaults")({}, {})).minecraftDirectory, moved);
+  assert.equal((await manage("delete", root)).ok, false);
+  dialog.showMessageBox = async () => ({ response: 0 });
+  assert.equal((await manage("delete", moved)).canceled, true);
+  shell.trashItem = directory => fs.promises.rename(directory, path.join(root, "recycled"));
+  dialog.showMessageBox = async () => ({ response: 1 });
+  assert.equal((await manage("delete", moved)).ok, true);
+  assert.equal(fs.readFileSync(path.join(root, "recycled", save), "utf8"), "world");
 });
 
 test("overall progress stays isolated per operation and never completes failed installs", async (t) => {
@@ -206,7 +254,7 @@ test("overall progress stays isolated per operation and never completes failed i
   assert.equal(messages.length, 0, "untrusted operation identifiers must not be emitted");
 });
 
-test("Minecraft subtask progress does not regress or reach 100 before the game starts", async (t) => {
+test("Minecraft subtask progress coalesces unchanged percentages without regressing", async (t) => {
   const { context, webContents } = await setup(t);
   const messages = [];
   webContents.send = (channel, payload) => { if (channel === "launcher:progress") messages.push(payload); };
@@ -215,6 +263,7 @@ test("Minecraft subtask progress does not regress or reach 100 before the game s
     reportMinecraftProgress({ type: 'version-jar', task: 1, total: 2 }, fixtureProgress);
     reportMinecraftProgress({ type: 'classes', task: 1, total: 2 }, fixtureProgress);
     reportMinecraftProgress({ type: 'assets', task: 1, total: 4 }, fixtureProgress);
+    reportMinecraftProgress({ type: 'assets', task: 26, total: 100 }, fixtureProgress);
     reportMinecraftProgress({ type: 'classes', task: 0, total: 20 }, fixtureProgress);
     reportMinecraftProgress({ type: 'assets-copy', task: 10, total: 10 }, fixtureProgress);
     reportMinecraftProgress({ type: 'assets', task: 1, total: 0 }, fixtureProgress);
@@ -222,17 +271,18 @@ test("Minecraft subtask progress does not regress or reach 100 before the game s
     fixtureProgress.active = false;
     sendOperationProgress(100, fixtureProgress);
   `, context);
-  assert.deepEqual(messages.map(message => message.percent), [67.5, 80, 89, 89, 99]);
+  assert.deepEqual(messages.map(message => message.percent), [67.5, 80, 89, 99]);
 });
 
 test("project context isolates server configuration and exact Fabric versions", async (t) => {
   const { handlers, api, config } = await setup(t);
   assert.equal(handlers.has("launcher:get-news"), false);
+  assert.equal(handlers.has("launcher:get-server-status"), false);
   api.projectContext.run(config.projects[0], () => {
-    assert.equal(api.readServerStatusConfig().host, "alpha.test");
+    assert.equal(api.buildAutoConnectTarget().host, "alpha.test");
   });
   api.projectContext.run(config.projects[1], () => {
-    assert.equal(api.readServerStatusConfig().host, "");
+    assert.equal(api.buildAutoConnectTarget().host, "");
     assert.equal(api.isProjectFabricVersionId("fabric-loader-0.16.0-1.21.1"), true);
     assert.equal(api.isProjectFabricVersionId("fabric-loader-0.16.0-1.21.10"), false);
     assert.equal(api.isProjectFabricVersionId("fabric-loader-0.16.0-1.20.1"), false);
@@ -255,10 +305,7 @@ test("administrator catalogs isolate server targets from global environment and 
   const targets = await Promise.all(config.projects.map((project) => api.projectContext.run(project, async () => {
     await Promise.resolve();
     const target = api.buildAutoConnectTarget();
-    const status = api.readServerStatusConfig();
     const connection = api.buildProjectConnectionOptions(api.getCurrentProject());
-    assert.equal(status.host, target.host);
-    assert.equal(status.port, target.port);
     assert.equal(connection.quickPlay.identifier, target.identifier);
     return target.identifier;
   })));
@@ -428,30 +475,6 @@ test("skin IPC only retrieves signed-in or saved accounts without exposing crede
   assert.equal((await skin({}, { uuid: "https://evil.example/" })).ok, false);
 });
 
-test("server status never sends targets to third-party services", async (t) => {
-  const { api, context } = await setup(t);
-  vm.runInContext("queryMinecraftServerStatusDirect = async (host, port) => ({ address: host + ':' + port, online: false, playerNames: [] }); fetchWithTimeout = () => { throw new Error('external status query forbidden'); };", context);
-  const result = await api.queryMinecraftServerStatus("private.example", 25565);
-  assert.equal(result.address, "private.example:25565");
-  assert.equal(result.online, false);
-});
-
-test("server status IPC excludes targets and raw errors in success and failure replies", async (t) => {
-  const { handlers, context } = await setup(t);
-  vm.runInContext("queryMinecraftServerStatus = async () => ({ address: 'alpha.test:25565', online: null, playersOnline: null, playersMax: null, playerNames: ['Friend_1', '203.0.113.42', 'alpha.test', '0123456789abcdef0123456789abcdef'], error: 'connect ECONNREFUSED 203.0.113.42:25565 alpha.test' });", context);
-  const status = await handlers.get("launcher:get-server-status")({}, { projectId: "alpha" });
-  assert.equal(status.ok, true);
-  assert.deepEqual(Array.from(status.server.playerNames), ["Friend_1"]);
-  assert.equal("config" in status, false);
-  assert.equal("address" in status.server, false);
-  assert.equal("error" in status.server, false);
-  assert.doesNotMatch(JSON.stringify(status), /alpha\.test|203\.0\.113\.42|25565/);
-  vm.runInContext("queryMinecraftServerStatus = async () => { throw new Error('connect alpha.test:25565 203.0.113.42:25565'); };", context);
-  const failure = await handlers.get("launcher:get-server-status")({}, { projectId: "alpha" });
-  assert.equal(failure.ok, false);
-  assert.doesNotMatch(failure.error, /alpha\.test|203\.0\.113\.42|25565/);
-});
-
 test("IPC and pushed diagnostics hide addresses, credentials and local paths while dropping raw game logs", async (t) => {
   const { handlers, context, webContents } = await setup(t);
   const messages = [];
@@ -615,6 +638,39 @@ test("fresh install repairs Korean pack paths and applies selection after vanill
   assert.match(await fs.promises.readFile(path.join(instance, "options.txt"), "utf8"), /^resourcePacks:\[\]/);
 });
 
+test("the BetterLauncher data layout copies recent accounts, settings and managed worlds", async (t) => {
+  const { root, api, appPaths, handlers } = await setup(t);
+  const launcherRoot = path.join(root, "BetterLauncher");
+  const oldRoot = path.join(root, ".betterlauncher");
+  const oldInstance = path.join(oldRoot, "instances", "alpha");
+  const world = path.join("saves", "world.txt");
+  const settings = path.join("Local Storage", "settings.txt");
+  const auth = path.join("state", "auth", "microsoft_auth.json");
+  for (const [file, contents] of [
+    [path.join(oldInstance, world), "world"],
+    [path.join(oldRoot, "runtime", "session", settings), "settings"],
+    [path.join(oldRoot, auth), "encrypted account fixture"],
+    [path.join(oldRoot, "state", "legacy-data-migrated.json"), "old marker"],
+    [path.join(launcherRoot, "instances", "alpha", "options.txt"), "new preferences"],
+    [path.join(oldInstance, "options.txt"), "old preferences"]
+  ]) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, contents);
+  }
+
+  api.migrateLegacyUserDataIfNeeded();
+  api.migrateLegacyStateLayoutIfNeeded();
+  const defaults = await handlers.get("launcher:get-defaults")({}, {});
+  assert.equal(defaults.previousMinecraftDirectory, oldInstance);
+  assert.equal(defaults.minecraftDirectory, path.join(launcherRoot, "instances", "alpha"));
+  assert.equal(appPaths.userData, path.join(launcherRoot, "data"));
+  assert.equal(fs.readFileSync(path.join(appPaths.userData, auth), "utf8"), "encrypted account fixture");
+  assert.equal(fs.readFileSync(path.join(appPaths.sessionData, settings), "utf8"), "settings");
+  assert.equal(fs.readFileSync(path.join(defaults.minecraftDirectory, world), "utf8"), "world");
+  assert.equal(fs.readFileSync(path.join(defaults.minecraftDirectory, "options.txt"), "utf8"), "new preferences");
+  assert.equal(fs.readFileSync(path.join(oldInstance, world), "utf8"), "world");
+});
+
 test("legacy auth/session migration excludes existing modpack installations", async (t) => {
   const { root, api, appPaths } = await setup(t);
   const oldRoot = path.join(root, ".bettermonlauncher");
@@ -626,7 +682,7 @@ test("legacy auth/session migration excludes existing modpack installations", as
   api.migrateLegacyUserDataIfNeeded();
   api.migrateLegacyStateLayoutIfNeeded();
   assert.equal(await fs.promises.readFile(path.join(appPaths.userData, "state", "auth", "microsoft_auth.json"), "utf8"), "cached-auth");
-  assert.equal(fs.existsSync(path.join(appPaths.userData, "instances", "bettermon")), false);
+  assert.equal(fs.existsSync(path.join(root, "BetterLauncher", "instances")), false);
   assert.equal(fs.existsSync(path.join(appPaths.userData, "minecraft")), false);
   assert.equal(fs.existsSync(path.join(appPaths.sessionData, "Local Storage")), true);
   assert.equal(fs.existsSync(path.join(oldRoot, "minecraft", "options.txt")), true);
@@ -635,7 +691,7 @@ test("legacy auth/session migration excludes existing modpack installations", as
 test("a migration marker created between check and write is never overwritten", async (t) => {
   const { root, api, appPaths } = await setup(t);
   const oldRoot = path.join(root, ".bettermonlauncher");
-  const marker = path.join(appPaths.userData, "state", "legacy-data-migrated.json");
+  const marker = path.join(appPaths.userData, "state", "launcher-data-migrated.json");
   await fs.promises.mkdir(oldRoot, { recursive: true });
   await fs.promises.writeFile(path.join(oldRoot, "preferences.json"), "old-preferences");
   const existsSync = fs.existsSync;
@@ -801,6 +857,34 @@ test("downloads stop when the response exceeds the manifest size", async (t) => 
   const download = vm.runInContext("downloadFile", context);
   await assert.rejects(download(config.projects[0].modpack.manifestUrl, target, { maxBytes: 4 }), /declared file size/);
   assert.equal(fs.existsSync(target), false);
+});
+
+test("Windows runtime selects the correct Java architecture and fits available memory", async (t) => {
+  const { context } = await setup(t);
+  const architectures = vm.runInContext("getWindowsJavaRuntimeArchitectures", context);
+  assert.deepEqual(Array.from(architectures("x64", "10.0.19045")), ["x64"]);
+  assert.deepEqual(Array.from(architectures("arm64", "10.0.19045")), ["aarch64"]);
+  assert.deepEqual(Array.from(architectures("arm64", "10.0.22631")), ["aarch64", "x64"]);
+  const memoryLimit = vm.runInContext("getJavaMemoryLimitMb", context);
+  assert.equal(memoryLimit(4 * 1024 ** 3), 3072);
+  assert.equal(memoryLimit(8 * 1024 ** 3), 6144);
+  assert.equal(memoryLimit(64 * 1024 ** 3), 32768);
+});
+
+test("Java ZIP extraction works on long Unicode paths without PowerShell", async (t) => {
+  const { context, root } = await setup(t);
+  const Zip = require("adm-zip");
+  const zip = new Zip();
+  zip.addFile("jdk/bin/java.exe", Buffer.from("fixture"));
+  const archive = path.join(root, "java.zip");
+  zip.writeZip(archive);
+  const destination = path.join(root, "한글 사용자", "a".repeat(90), "b".repeat(90), "c".repeat(90));
+  const extract = vm.runInContext("extractJavaRuntimeArchive", context);
+  await extract(archive, destination);
+  assert.equal(await fs.promises.readFile(path.join(destination, "jdk", "bin", "java.exe"), "utf8"), "fixture");
+  zip.addFile("jdk/bin/java.exe:stream", Buffer.from("invalid"));
+  zip.writeZip(archive);
+  await assert.rejects(extract(archive, path.join(root, "invalid")), /Invalid modpack path/);
 });
 
 test("patched ZIP library and Windows extraction accept normal files and reject ADS", async (t) => {

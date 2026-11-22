@@ -4,12 +4,23 @@
 // renderer, so account lists do not create animation loops or extra contexts.
 (() => {
   let viewer = null;
+  let rendererKind = "pending";
+  let idleTimer;
   let webglUnavailable = false;
   let queue = Promise.resolve();
-  function createViewer() {
+  async function createViewer() {
     const canvas = document.createElement("canvas");
-    const attributes = { alpha: true, antialias: true, preserveDrawingBuffer: true };
-    if (!canvas.getContext("webgl2", attributes) && !canvas.getContext("webgl", attributes)) throw new Error("WebGL is unavailable.");
+    const attributes = { alpha: true, antialias: true, preserveDrawingBuffer: true, powerPreference: "low-power" };
+    if (!canvas.getContext("webgl2", attributes)) throw new Error("WebGL is unavailable.");
+    if (!window.skinview3d) {
+      await new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = "./vendor/skinview3d.bundle.js";
+        script.onload = resolve;
+        script.onerror = reject;
+        document.head.appendChild(script);
+      });
+    }
     const instance = new skinview3d.SkinViewer({
       canvas, width: 320, height: 576, pixelRatio: 1,
       preserveDrawingBuffer: true, renderPaused: true, enableControls: false,
@@ -27,6 +38,14 @@
     skin.rightLeg.rotation.x = 0.1;
     skin.leftLeg.rotation.x = -0.1;
     return instance;
+  }
+  function releaseViewer() {
+    clearTimeout(idleTimer);
+    if (!viewer) return;
+    const renderer = viewer.renderer;
+    viewer.dispose();
+    renderer.forceContextLoss();
+    viewer = null;
   }
   function centerPortrait(source) {
     const snapshot = document.createElement("canvas");
@@ -59,32 +78,36 @@
     await image.decode();
     if (image.naturalWidth !== 64 || ![32, 64].includes(image.naturalHeight)) throw new Error("Invalid skin dimensions.");
     if (!viewer && !webglUnavailable) {
-      try { viewer = createViewer(); } catch { webglUnavailable = true; }
+      try { viewer = await createViewer(); } catch { webglUnavailable = true; }
     }
     if (!viewer) {
+      rendererKind = "canvas";
       const fallback = new Image();
       fallback.src = await window.minecraftSkinFallbackModel.render(textureDataUrl, model);
       await fallback.decode();
       return centerPortrait(fallback);
     }
-    viewer.loadSkin(image, { model: model === "slim" ? "slim" : "default" });
-    viewer.render();
-    return centerPortrait(viewer.canvas);
+    rendererKind = "webgl";
+    try {
+      viewer.loadSkin(image, { model: model === "slim" ? "slim" : "default" });
+      viewer.render();
+      return centerPortrait(viewer.canvas);
+    } finally {
+      clearTimeout(idleTimer);
+      if (document.hidden) releaseViewer();
+      else idleTimer = setTimeout(releaseViewer, 10000);
+    }
   }
   window.minecraftSkinModel = Object.freeze({
-    get renderer() { return viewer ? "webgl" : webglUnavailable ? "canvas" : "pending"; },
+    get renderer() { return rendererKind; },
     render(textureDataUrl, model = "classic") {
       const request = queue.then(() => render(textureDataUrl, model));
       queue = request.catch(() => {});
       return request;
     }
   });
-  window.addEventListener("beforeunload", () => {
-    if (viewer) {
-      const renderer = viewer.renderer;
-      viewer.dispose();
-      renderer.forceContextLoss();
-      viewer = null;
-    }
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) releaseViewer();
   });
+  window.addEventListener("beforeunload", releaseViewer);
 })();

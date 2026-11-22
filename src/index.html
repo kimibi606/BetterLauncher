@@ -10,39 +10,20 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <header class="window-bar" id="windowFrameBar">
-      <div class="window-resizable-top frame-drag-padder"></div>
-      <div class="window-main">
-        <div class="window-resizable-vert frame-drag-padder"></div>
-        <div class="window-content">
-          <div class="window-title-dock">
-            <span class="window-title">BetterLauncher</span>
-          </div>
-          <div class="window-controls">
-            <button id="windowClose" class="window-btn close" type="button" aria-label="닫기">×</button>
-          </div>
-        </div>
-        <div class="window-resizable-vert frame-drag-padder"></div>
-      </div>
+    <header class="window-bar">
+      <span class="window-title">BetterLauncher <span class="window-credit">(made by kimjaegeun)</span></span>
+      <button id="windowClose" type="button" aria-label="런처 닫기"></button>
     </header>
 
     <section id="startupOverlay" class="startup-overlay">
-      <div class="startup-content">
-        <img id="startupIcon" class="startup-icon" src="./assets/app-icon.png" alt="런처 아이콘" />
-        <p id="startupStatus" class="startup-status" aria-live="polite">런처 초기화 중...</p>
-        <div
-          id="startupProgressTrack"
-          class="startup-progress-track"
-          role="progressbar"
-          aria-label="시작 진행률"
-          aria-valuemin="0"
-          aria-valuemax="100"
-          aria-valuenow="0"
-        >
-          <div id="startupProgressBar" class="startup-progress-bar"></div>
+      <img id="startupIcon" class="startup-icon" src="./assets/app-icon.png" alt="런처 아이콘" />
+      <footer class="launch-bar">
+        <div class="loading-panel">
+          <span id="startupStatus" class="loading-status" role="status">런처 초기화 중...</span>
+          <span id="startupProgressText" class="loading-percent" aria-hidden="true">0%</span>
+          <progress id="startupProgressBar" class="loading-track" max="100" value="0" aria-label="시작 진행률"></progress>
         </div>
-        <p id="startupProgressText" class="startup-progress-text">0%</p>
-      </div>
+      </footer>
     </section>
 
     <section id="loginScreen" class="app-screen login-screen screen-active" aria-hidden="false">
@@ -74,52 +55,41 @@
     </section>
 
     <section id="launchScreen" class="app-screen launch-screen" aria-hidden="true">
-      <section
-        id="accountModelPanel"
-        class="account-model-panel"
-        aria-label="로그인 계정 모델"
-        role="button"
-        tabindex="0"
-        hidden
-      >
-        <div class="account-model-box">
-          <img id="accountModelImage" class="account-model-image" src="./assets/default-skin.svg" alt="계정 스킨" />
-          <span id="accountModelTooltip" class="account-model-tooltip">관리</span>
-        </div>
-        <div class="account-model-meta">
-          <p id="accountModelName" class="account-model-name">플레이어</p>
-        </div>
-      </section>
+      <footer class="launch-bar">
+        <button id="accountModelPanel" class="account-model-panel" type="button" aria-label="계정 관리" aria-describedby="accountModelName" hidden>
+          <img id="accountModelImage" class="account-model-image" src="./assets/default-avatar.svg" alt="" />
+          <span class="account-model-name">닉네임 : <strong id="accountModelName">플레이어</strong></span>
+        </button>
 
-      <section id="mediaContent" aria-label="바로가기">
-        <div id="internalMedia">
-          <div class="mediaContainer" id="settingsMediaContainer">
-            <button class="mediaButton" id="settingsButton" type="button" aria-label="설정">
-              <span class="icon-mask icon-settings-mask" aria-hidden="true"></span>
-              <span id="settingsTooltip">설정</span>
-            </button>
+        <button id="startLaunchButton" class="start-launch-button" type="button">
+          <span id="startLaunchLabel">게임 시작</span>
+          <span id="startLaunchCaption" class="start-launch-caption" lang="en" aria-hidden="true">PLAY</span>
+        </button>
+
+        <section class="launch-shortcuts" aria-label="바로가기">
+          <div id="externalMedia">
+            <div class="mediaContainer">
+              <a id="discordButton" class="mediaURL" href="#" aria-label="디스코드" title="디스코드">
+                <span class="icon-mask icon-discord-mask" aria-hidden="true"></span>
+                <span id="discordTooltip">디스코드</span>
+              </a>
+            </div>
           </div>
-        </div>
-        <div id="externalMedia">
-          <div class="mediaContainer">
-            <a id="discordButton" class="mediaURL" href="#" aria-label="디스코드" title="디스코드">
-              <span class="icon-mask icon-discord-mask" aria-hidden="true"></span>
-              <span id="discordTooltip">디스코드</span>
-            </a>
+          <div id="internalMedia">
+            <div class="mediaContainer" id="settingsMediaContainer">
+              <button class="mediaButton" id="settingsButton" type="button" aria-label="설정">
+                <span class="icon-mask icon-settings-mask" aria-hidden="true"></span>
+                <span id="settingsTooltip">설정</span>
+              </button>
+            </div>
           </div>
+        </section>
+        <div id="launchLoading" class="loading-panel" hidden>
+          <span id="launchLoadingStatus" class="loading-status" role="status">게임 파일 확인 중</span>
+          <span id="launchProgressText" class="loading-percent" aria-hidden="true">0%</span>
+          <progress id="launchProgress" class="loading-track" max="100" value="0" aria-label="전체 진행률"></progress>
         </div>
-      </section>
-
-      <section id="playerCountPanel" class="player-count-panel" aria-label="서버 접속 인원">
-        <span class="player-count-label">접속 인원</span>
-        <span id="playerCountValue" class="player-count-value">확인 중...</span>
-        <span id="playerCountTooltip" class="player-count-tooltip" aria-hidden="true"></span>
-      </section>
-
-      <section class="start-launch-area" aria-label="게임 실행">
-        <button id="startLaunchButton" class="start-launch-button" type="button" aria-label="게임 시작">게임 시작</button>
-        <span id="launchProgress" class="start-launch-progress" role="progressbar" aria-label="전체 진행률" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden>0%</span>
-      </section>
+      </footer>
 
       <main id="mainLayout" class="post-login-root"></main>
     </section>
@@ -182,65 +152,92 @@
           </section>
 
           <section id="settingsTabMinecraft" class="settings-tab" hidden>
-            <div class="settings-tab-header">
-              <h3>게임</h3>
-              <p>게임 실행과 관련된 설정입니다.</p>
-            </div>
+            <div class="settings-tab-header"><h3>게임</h3></div>
 
-            <div class="settings-minecraft-panel" aria-label="마인크래프트 실행 설정">
-              <div class="settings-minecraft-row settings-minecraft-resolution">
-                <div class="settings-minecraft-title">게임 해상도</div>
-                <div class="settings-minecraft-resolution-inputs">
-                  <input
-                    id="settingsGameWidth"
-                    class="settings-minecraft-resolution-input"
-                    type="text"
-                    inputmode="numeric"
-                    pattern="[0-9]*"
-                    autocomplete="off"
-                    spellcheck="false"
-                  />
-                  <span class="settings-cross">×</span>
-                  <input
-                    id="settingsGameHeight"
-                    class="settings-minecraft-resolution-input"
-                    type="text"
-                    inputmode="numeric"
-                    pattern="[0-9]*"
-                    autocomplete="off"
-                    spellcheck="false"
-                  />
+            <section class="settings-game-group" aria-labelledby="settingsWindowHeading">
+              <h4 id="settingsWindowHeading">창 및 플레이</h4>
+              <div class="settings-game-row">
+                <div><strong>화면 크기</strong><p>창 모드에서 적용됩니다. 전체 화면을 켜도 입력한 값은 저장됩니다.</p></div>
+                <div class="settings-game-resolution">
+                  <input id="settingsGameWidth" type="text" inputmode="numeric" aria-label="화면 너비" />
+                  <span aria-hidden="true">×</span>
+                  <input id="settingsGameHeight" type="text" inputmode="numeric" aria-label="화면 높이" />
                 </div>
               </div>
-
-              <label class="settings-minecraft-row settings-minecraft-toggle-row" for="settingsFullscreen">
-                <span class="settings-minecraft-toggle-text">전체 화면으로 실행합니다.</span>
-                <span class="settings-switch" aria-hidden="true">
-                  <input id="settingsFullscreen" type="checkbox" />
-                  <span class="settings-switch-slider"></span>
+              <label class="settings-game-row">
+                <span><strong>전체 화면으로 실행</strong><small>게임을 전체 화면으로 시작합니다.</small></span>
+                <span class="settings-switch">
+                  <input id="settingsFullscreen" type="checkbox" role="switch" />
+                  <span class="settings-switch-slider" aria-hidden="true"></span>
                 </span>
               </label>
-
-
-              <label class="settings-minecraft-row settings-minecraft-toggle-row" for="settingsLaunchDetached">
-                <span class="settings-minecraft-toggle-text-group">
-                  <span class="settings-minecraft-toggle-text">런처와 게임 프로세스를 분리하여 실행합니다.</span>
-                  <span class="settings-minecraft-toggle-note">이 옵션을 사용하면 런처를 닫아도 게임이 계속 실행됩니다.</span>
-                </span>
-                <span class="settings-switch" aria-hidden="true">
-                  <input id="settingsLaunchDetached" type="checkbox" />
-                  <span class="settings-switch-slider"></span>
+              <label class="settings-game-row">
+                <span><strong>서버 바로 접속</strong><small>게임 시작 시 모드팩 서버로 연결합니다.</small></span>
+                <span class="settings-switch">
+                  <input id="settingsAutoConnect" type="checkbox" role="switch" />
+                  <span class="settings-switch-slider" aria-hidden="true"></span>
                 </span>
               </label>
-              <div class="settings-minecraft-row">
-                <div class="settings-minecraft-toggle-text-group">
-                  <h4 class="settings-minecraft-title">모드팩 재설치</h4>
-                  <span class="settings-minecraft-toggle-note">현재 모드팩 폴더를 비우고 최신 버전을 설치합니다.</span>
+              <label class="settings-game-row">
+                <span><strong>서버 리소스팩 자동 적용</strong><small>모드팩 서버의 리소스팩을 자동으로 수락합니다.</small></span>
+                <span class="settings-switch">
+                  <input id="settingsServerResourcePack" type="checkbox" role="switch" />
+                  <span class="settings-switch-slider" aria-hidden="true"></span>
+                </span>
+              </label>
+              <label class="settings-game-row">
+                <span><strong>멀티플레이 서버 목록에 추가</strong><small>게임 시작 시 모드팩 서버를 목록에 등록합니다.</small></span>
+                <span class="settings-switch">
+                  <input id="settingsAddServer" type="checkbox" role="switch" />
+                  <span class="settings-switch-slider" aria-hidden="true"></span>
+                </span>
+              </label>
+            </section>
+
+            <section class="settings-game-group" aria-labelledby="settingsJvmHeading">
+              <h4 id="settingsJvmHeading">Java 가상 머신</h4>
+              <div class="settings-game-row settings-game-stack">
+                <label for="settingsRamMax"><strong>최대 메모리 (Xmx)</strong><small>게임이 사용할 수 있는 Java 힙의 상한입니다.</small></label>
+                <div class="settings-game-memory">
+                  <input id="settingsRamMax" type="range" min="512" max="32768" step="512" />
+                  <input id="settingsRamMaxDisplay" type="number" min="0.5" max="32" step="0.5" aria-label="최대 메모리 (GB)" />
+                  <span>GB</span>
                 </div>
+                <small>전체 <output id="settingsJavaTotalMemory">-</output> · 할당 가능 <output id="settingsJavaUsableMemory">-</output></small>
+              </div>
+              <label class="settings-game-row settings-game-stack">
+                <span><strong>JVM 인수</strong><small>실행 시 JVM에 전달할 추가 옵션입니다.</small></span>
+                <textarea id="settingsJvmArgs" rows="3" spellcheck="false"></textarea>
+              </label>
+            </section>
+
+            <section class="settings-game-group" aria-labelledby="settingsManageHeading">
+              <h4 id="settingsManageHeading">게임 파일 관리</h4>
+              <div class="settings-game-row">
+                <div><strong>게임 폴더 열기</strong><p>게임 파일을 탐색기에서 봅니다.</p></div>
+                <button class="secondary" data-game-action="open" type="button">열기</button>
+              </div>
+              <div class="settings-game-row">
+                <div><strong>게임 폴더 위치</strong><p id="settingsGameDirectory"></p></div>
+                <button class="secondary" data-game-action="move" type="button">옮기기</button>
+              </div>
+              <div class="settings-game-row">
+                <div><strong>바로가기 추가</strong><p>바탕화면과 시작 메뉴에서 런처를 열 수 있습니다.</p></div>
+                <button class="secondary" data-game-action="shortcut" type="button">추가</button>
+              </div>
+              <div class="settings-game-row">
+                <div><strong>강제 패치</strong><p>다음 실행 때 배포 파일을 다시 적용합니다.</p></div>
+                <button class="secondary" data-game-action="patch" type="button">초기화</button>
+              </div>
+              <div class="settings-game-row">
+                <div><strong>모드팩 재설치</strong><p>게임 폴더를 비우고 최신 모드팩을 설치합니다.</p></div>
                 <button id="settingsReinstallModpack" class="secondary" type="button" disabled>재설치</button>
               </div>
-            </div>
-
+              <div class="settings-game-row">
+                <div><strong>게임 삭제</strong><p>현재 게임 폴더를 휴지통으로 보냅니다.</p></div>
+                <button class="settings-game-delete" data-game-action="delete" type="button">삭제</button>
+              </div>
+            </section>
           </section>
 
           <section id="settingsTabJava" class="settings-tab" hidden>
@@ -250,36 +247,6 @@
             </div>
 
             <div class="settings-java-panel" aria-label="Java 실행 설정">
-              <section class="settings-java-section settings-java-memory-section" aria-label="메모리 설정">
-                <h4 class="settings-java-title settings-java-memory-title">메모리</h4>
-                <div class="settings-java-memory-grid">
-                  <div class="settings-java-memory-controls">
-                    <label class="settings-java-memory-row" for="settingsRamMax">
-                      <span class="settings-java-memory-label">
-                        <span class="settings-java-memory-label-text">할당 RAM</span>
-                        <span class="settings-java-memory-inline-note">
-                          메모리는 단일 값으로 적용되며 최소/최대 RAM이 동일하게 설정됩니다.
-                        </span>
-                      </span>
-                      <input id="settingsRamMax" type="range" min="6144" max="32768" step="512" />
-                      <span id="settingsRamMaxDisplay" class="settings-java-memory-value">6.0G</span>
-                    </label>
-                    <input id="settingsRamMin" type="hidden" value="6144" />
-                  </div>
-
-                  <div class="settings-java-memory-stats" aria-label="시스템 메모리 정보">
-                    <div class="settings-java-memory-stat">
-                      <span class="settings-java-memory-stat-label">전체</span>
-                      <strong id="settingsJavaTotalMemory">-</strong>
-                    </div>
-                    <div class="settings-java-memory-stat">
-                      <span class="settings-java-memory-stat-label">사용 가능</span>
-                      <strong id="settingsJavaUsableMemory">-</strong>
-                    </div>
-                  </div>
-                </div>
-              </section>
-
               <section class="settings-java-section settings-java-path-section" aria-label="Java 실행 파일">
                 <h4 class="settings-java-title settings-java-path-title">Java 실행 파일</h4>
                 <p id="settingsJavaPathStatus" class="settings-java-path-status settings-java-path-status-compact">유효하지 않은 선택</p>
@@ -295,24 +262,6 @@
                 </p>
               </section>
 
-              <section class="settings-java-section settings-java-jvm-section" aria-label="JVM 인수 설정">
-                <h4 class="settings-java-title">JVM 인수 설정</h4>
-                <div class="settings-java-jvm-row">
-                  <input
-                    id="settingsJvmArgs"
-                    type="text"
-                    placeholder="필요한 경우에만 추가 인수를 입력"
-                  />
-                </div>
-                <div class="settings-java-note-stack">
-                  <p class="settings-java-note">
-                    실행 시 JVM에 전달할 추가 인수를 설정합니다. <code>-Xms</code>와 <code>-Xmx</code>는 포함되지 않아야 합니다.
-                  </p>
-                  <p class="settings-java-note">
-                    선택한 Java (HotSpot VM) 기준으로 동작하는 JVM 인수를 사용하는 것을 권장합니다.
-                  </p>
-                </div>
-              </section>
             </div>
           </section>
 
@@ -357,9 +306,6 @@
     </section>
 
     <script src="../lib/log-security.js"></script>
-    <script src="./vendor/skinview3d.bundle.js"></script>
-    <script src="./skin-model-fallback.js"></script>
-    <script src="./skin-model.js"></script>
     <script src="./renderer.js"></script>
   </body>
 </html>

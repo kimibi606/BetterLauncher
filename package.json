@@ -1,8 +1,11 @@
 {
   "name": "betterlauncher",
-  "version": "0.4.26",
+  "version": "0.4.27",
   "description": "Single-modpack Minecraft launcher with independent modpack distribution.",
   "main": "main.js",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "start": "electron .",
     "check": "node --check main.js && node --check preload.js && node --check src/renderer.js && node --check src/skin-model.js && node --check src/skin-model-fallback.js && node --check lib/window-geometry.js && node --check lib/account-skin.js && node --check lib/neoforge-runtime.js && node --check lib/zip-entry-names.js && node --check lib/modpack-path-renames.js && node --check lib/resourcepack-settings.js && node --check lib/microsoft-login-errors.js && node --check scripts/import-modpack-zip.js && node --check scripts/build-launcher.js && node --check vendor/request/index.js && node --check lib/secure-fetch.js && node --check lib/log-security.js && node --check vendor/request/network-security.js && node --check lib/projects.js && node --check lib/distribution-download.js && node --check scripts/publish-modpack-distribution.js && node --check scripts/build-modpack-distribution.js && node scripts/validate-release.js && node scripts/sync-skin-renderer.js --check",
@@ -11,7 +14,7 @@
     "dist:dir": "node scripts/build-launcher.js --dir",
     "release:github": "npm run check && node scripts/build-launcher.js",
     "modpack:publish": "node scripts/publish-modpack-distribution.js",
-    "test": "node --test tests/distribution.test.js tests/main-integration.test.js tests/projects.test.js tests/security.test.js tests/account-skin.test.js tests/neoforge-runtime.test.js tests/modpack-import.test.js tests/launcher-build.test.js tests/modpack-path-renames.test.js tests/resourcepack-settings.test.js",
+    "test": "node --test \"tests/*.test.js\"",
     "test:ui": "electron tests/renderer-flow.cjs",
     "test:installer": "node scripts/test-installer-migration.js",
     "modpack:build": "node scripts/build-modpack-distribution.js",
@@ -28,8 +31,10 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "adm-zip": "0.6.1",
     "electron-updater": "^6.8.9",
     "minecraft-launcher-core": "^3.18.2",
+    "prismarine-nbt": "2.8.0",
     "request": "file:vendor/request",
     "undici": "7.30.1"
   },
@@ -55,6 +60,7 @@
     "appId": "com.betterlauncher.launcher",
     "productName": "BetterLauncher",
     "asar": true,
+    "allowMissingDependencies": false,
     "electronFuses": {
       "runAsNode": false,
       "enableNodeOptionsEnvironmentVariable": false,
@@ -68,7 +74,6 @@
       "src/**/*",
       "vendor/request/**/*",
       "package.json",
-      "modpack.config.json",
       "lib/**/*"
     ],
     "directories": {
@@ -82,7 +87,8 @@
         {
           "target": "nsis",
           "arch": [
-            "x64"
+            "x64",
+            "arm64"
           ]
         }
       ]

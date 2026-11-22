@@ -29,40 +29,49 @@ function prepareLauncherBuild(root) {
   // Update configuration belongs to the launcher. An old modpack flag must not
   // create a separate installer with updates disabled.
   config.github = { owner: github.owner, repo: github.repo, timeoutMs: 7000 };
-  const staging = path.join(privateRoot, "builds", crypto.randomUUID());
-  const appDir = path.join(staging, "app");
+  const stagingRoot = path.join(privateRoot, "builds");
   const output = path.join(privateRoot, "releases", appPackage.version);
-  for (const directory of [privateRoot, path.join(privateRoot, "builds"), path.join(privateRoot, "releases"), output]) {
-    if (fs.existsSync(directory) && fs.lstatSync(directory).isSymbolicLink()) throw new Error("Build directories cannot be symbolic links or junctions.");
+  for (const directory of [privateRoot, stagingRoot, path.dirname(output), output]) {
+    if (fs.lstatSync(directory, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error("Build directories cannot be symbolic links or junctions.");
   }
-  fs.mkdirSync(appDir, { recursive: true });
-  for (const entry of ["main.js", "preload.js", "src", "lib", "vendor"]) {
-    fs.cpSync(path.join(root, entry), path.join(appDir, entry), { recursive: true });
+  fs.mkdirSync(stagingRoot, { recursive: true });
+  const staging = fs.mkdtempSync(path.join(stagingRoot, "launcher-"));
+  const cleanup = () => fs.rmSync(staging, { recursive: true, force: true, maxRetries: 3 });
+  try {
+    fs.writeFileSync(path.join(staging, "modpack.config.json"), JSON.stringify(config, null, 2) + "\n");
+    return {
+      root, output, version: appPackage.version, cleanup,
+      builderConfig: {
+        directories: { output },
+        files: [{ from: staging, filter: ["modpack.config.json"] }]
+      }
+    };
+  } catch (error) {
+    cleanup();
+    throw error;
   }
-  delete appPackage.build;
-  delete appPackage.devDependencies;
-  fs.writeFileSync(path.join(appDir, "package.json"), JSON.stringify(appPackage, null, 2) + "\n");
-  fs.writeFileSync(path.join(appDir, "modpack.config.json"), JSON.stringify(config, null, 2) + "\n");
-  fs.symlinkSync(path.join(root, "node_modules"), path.join(appDir, "node_modules"), "junction");
-  return { root, appDir, output, builderConfig: { directories: { app: appDir, output } }, version: appPackage.version };
 }
 
 async function main(args = process.argv.slice(2)) {
   if (args.some(arg => arg !== "--dir")) throw new Error("Supported build option: --dir. Uploading is a separate explicit action.");
-  const { build, Platform } = require("electron-builder");
+  const { build, Platform, Arch } = require("electron-builder");
   const prepared = prepareLauncherBuild(path.resolve(__dirname, ".."));
-  const files = await build({
-    projectDir: prepared.root,
-    targets: Platform.WINDOWS.createTarget(args.includes("--dir") ? ["dir"] : ["nsis"]),
-    publish: "never",
-    // Let electron-builder read the common root build configuration. Passing
-    // its publish array again corrupts the provider during config merging.
-    config: prepared.builderConfig
-  });
+  const unpacked = args.includes("--dir");
+  let files;
+  try {
+    files = await build({
+      projectDir: prepared.root,
+      targets: Platform.WINDOWS.createTarget(unpacked ? "dir" : "nsis", Arch.x64, Arch.arm64),
+      publish: "never",
+      config: prepared.builderConfig
+    });
+  } finally {
+    prepared.cleanup();
+  }
   const checksums = [];
   // electron-builder returns the installer and blockmap, but emits latest.yml
   // separately. Include all three release files in the local checksum list.
-  const releaseFiles = args.includes("--dir") ? [] : [
+  const releaseFiles = unpacked ? [] : [
     `BetterLauncher-Setup-${prepared.version}.exe`,
     `BetterLauncher-Setup-${prepared.version}.exe.blockmap`,
     "latest.yml"
