@@ -32,7 +32,7 @@
   "license": "MIT",
   "dependencies": {
     "adm-zip": "0.6.1",
-    "electron-updater": "^6.8.9",
+    "electron-updater": "^6.8.11",
     "minecraft-launcher-core": "^3.18.2",
     "prismarine-nbt": "2.8.0",
     "request": "file:vendor/request",
